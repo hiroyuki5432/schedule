@@ -1,0 +1,226 @@
+"""Pydantic v2 request/response models. Field names mirror docs/API.md exactly."""
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+from typing import Any, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+Role = Literal["admin", "member"]
+ColumnType = Literal["text", "number", "date", "dropdown", "status", "member", "lookup"]
+
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    email: str
+    role: Role
+    org_id: int
+
+
+# ---------------------------------------------------------------------------
+# Organization
+# ---------------------------------------------------------------------------
+class OrgOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    slug: str
+    settings: dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# Members
+# ---------------------------------------------------------------------------
+class MemberOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    email: str
+    role: Role
+
+
+class MemberCreate(BaseModel):
+    name: str
+    email: str
+    password: str
+    role: Role = "member"
+
+
+class MemberUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[Role] = None
+    password: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Columns
+# ---------------------------------------------------------------------------
+class ColumnOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    sheet_id: int
+    name: str
+    type: ColumnType
+    order: int
+    is_key: bool
+    config: dict[str, Any]
+
+
+class ColumnCreate(BaseModel):
+    name: str
+    type: ColumnType
+    config: dict[str, Any] = Field(default_factory=dict)
+    order: Optional[int] = None
+    is_key: Optional[bool] = None
+
+
+class ColumnUpdate(BaseModel):
+    name: Optional[str] = None
+    type: Optional[ColumnType] = None
+    config: Optional[dict[str, Any]] = None
+    order: Optional[int] = None
+    is_key: Optional[bool] = None
+
+
+# ---------------------------------------------------------------------------
+# Sheets
+# ---------------------------------------------------------------------------
+class SheetOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    order: int
+    has_week_grid: bool
+    key_column_id: Optional[int] = None
+    color_basis_column_id: Optional[int] = None
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class SheetCreate(BaseModel):
+    name: str
+    has_week_grid: bool = True
+
+
+class SheetUpdate(BaseModel):
+    name: Optional[str] = None
+    has_week_grid: Optional[bool] = None
+    key_column_id: Optional[int] = None
+    color_basis_column_id: Optional[int] = None
+    order: Optional[int] = None
+    settings: Optional[dict[str, Any]] = None
+
+
+class SheetDetailOut(BaseModel):
+    sheet: SheetOut
+    columns: list[ColumnOut]
+    rows: list["RowOut"]
+
+
+# ---------------------------------------------------------------------------
+# Rows
+# ---------------------------------------------------------------------------
+class RowOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    sheet_id: int
+    key_value: Optional[str] = None
+    data: dict[str, Any]
+    version: int
+
+
+class RowCreate(BaseModel):
+    key_value: Optional[str] = None
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class RowUpdate(BaseModel):
+    data: dict[str, Any]
+    version: int
+    key_value: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Effort
+# ---------------------------------------------------------------------------
+class EffortOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    row_id: int
+    week_start: date
+    planned_hours: Optional[float] = None
+    actual_hours: Optional[float] = None
+    version: int
+
+
+class EffortUpsert(BaseModel):
+    planned_hours: Optional[float] = None
+    actual_hours: Optional[float] = None
+    version: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
+# Milestones
+# ---------------------------------------------------------------------------
+class MilestoneOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    row_id: int
+    name: str
+    boundary_date: date
+    color: Optional[str] = None
+    order: int
+    done: bool = False
+
+
+class MilestoneIn(BaseModel):
+    name: str
+    boundary_date: date
+    color: Optional[str] = None
+    order: int = 0
+    done: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Snapshot / changes
+# ---------------------------------------------------------------------------
+class SnapshotOut(BaseModel):
+    rows: list[dict[str, Any]]
+    effort: list[dict[str, Any]]
+
+
+class ChangeOut(BaseModel):
+    row_id: Optional[int] = None
+    field: str
+    old: Any = None
+    new: Any = None
+
+
+# ---------------------------------------------------------------------------
+# Aggregate
+# ---------------------------------------------------------------------------
+class AggregateRow(BaseModel):
+    group: Any
+    planned_sum: float
+    actual_sum: float
+    count: int
+
+
+SheetDetailOut.model_rebuild()

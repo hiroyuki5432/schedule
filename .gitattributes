@@ -1,0 +1,12 @@
+# Normalize line endings to LF in the repo so Linux builds (CI / EC2 / Docker)
+# always get LF, regardless of the editing OS.
+* text=auto eol=lf
+
+# Binary assets — never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
