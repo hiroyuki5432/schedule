@@ -1,0 +1,53 @@
+name: schedule
+
+# Production stack for a single EC2 host. Images are pulled from GHCR (built by
+# CI), not built here. TLS is terminated by the host's nginx, which reverse-
+# proxies https://<your-domain> → http://127.0.0.1:8080 (the frontend below).
+#
+# Usage on the server:
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+# Requires a .env file alongside this (see .env.prod.example).
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # No host port — the database is reachable only inside the compose network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    image: ${BACKEND_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+    # Production run: no --reload, a couple of workers. Code is baked into the image.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    # No host port — only the frontend nginx reaches it over the compose network.
+
+  frontend:
+    image: ${FRONTEND_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    # Bind to localhost only; the host's nginx (with the TLS cert) proxies to this.
+    ports:
+      - "127.0.0.1:8080:80"
+
+volumes:
+  pgdata:

@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工数スケジュール — モック</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --green:#2C5446; --green-d:#1F4234; --green-l:#3C6857; --green-line:#3A6150;
+  --canvas:#FBF9F4; --surface:#FFFFFF;
+  --ink:#23211D; --ink2:#6B6B61; --ink3:#9A968B;
+  --line:#E7E1D2; --line2:#EFEBE1;
+  --accent:#B5562F; --today:#D98E6E; --asof:#6E84B8;
+  --p-design:#D4E7DC; --p-impl:#A7D0BE; --p-test:#F1DBAC; --p-review:#CBD9EE; --p-late:#E8B6A6; --p-done:#BFE2D3;
+  --wk:22px;
+  --font:"Inter","Noto Sans JP",-apple-system,"Segoe UI",sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font-family:var(--font);color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased;font-size:13px}
+.app{display:flex;height:100vh;overflow:hidden}
+
+.sidebar{width:226px;flex-shrink:0;background:var(--green);color:#CFE0D7;display:flex;flex-direction:column;padding:18px 14px}
+.brand{display:flex;align-items:center;gap:9px;font-size:16px;font-weight:600;color:#fff;padding:2px 6px 16px}
+.brand .dot{width:9px;height:9px;border-radius:50%;background:#7FC9A6}
+.org{display:flex;align-items:center;gap:9px;background:var(--green-d);border-radius:11px;padding:9px 10px;margin-bottom:16px}
+.org .sq{width:30px;height:30px;border-radius:8px;background:var(--green-l);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:12px}
+.org .nm{font-size:13px;color:#fff} .org .sub{font-size:11px;color:#9CB8AC}
+.nav{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:9px;font-size:13px;color:#C2D7CC;cursor:pointer;margin-bottom:2px}
+.nav:hover{background:var(--green-line)} .nav.on{background:var(--green-l);color:#fff;font-weight:500}
+.nav svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.7}
+.me{margin-top:auto;display:flex;align-items:center;gap:9px;padding-top:12px;border-top:1px solid var(--green-line)}
+.me .av{width:28px;height:28px;border-radius:50%;background:#C9DCD3;color:var(--green-d);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:12px}
+
+.main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:16px 22px 12px;gap:12px}
+.title{font-size:18px;font-weight:600} .subtitle{font-size:12px;color:var(--ink3);margin-top:2px}
+.controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.seg{display:flex;align-items:center;background:var(--surface);border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.seg button{border:0;background:transparent;padding:7px 12px;font:inherit;font-size:12px;color:var(--ink2);cursor:pointer}
+.seg button.on{background:var(--green);color:#fff;font-weight:500}
+.seg .step{padding:6px 9px;font-size:14px;line-height:1}
+.seg .lbl{padding:0 10px;font-size:12px;color:var(--ink2);white-space:nowrap}
+.pill{display:flex;align-items:center;gap:7px;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:7px 11px;font-size:12px;color:var(--ink2);cursor:pointer}
+.btn{display:flex;align-items:center;gap:6px;background:var(--green);color:#fff;border:0;border-radius:9px;padding:8px 14px;font:inherit;font-size:12px;font-weight:500;cursor:pointer}
+.btn svg,.pill svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8}
+.av-sm{width:30px;height:30px;border-radius:50%;background:#DCEAE3;color:var(--green-d);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:12px}
+
+.legend{display:flex;flex-wrap:wrap;align-items:center;gap:15px;padding:0 22px 10px;font-size:12px;color:var(--ink2)}
+.legend .it{display:flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:3px}
+.dia{width:9px;height:9px;background:#fff;border:1.6px solid var(--ink);transform:rotate(45deg)}
+
+.asofbar{display:none;align-items:center;gap:10px;margin:0 22px 10px;padding:8px 12px;background:#EBF0F7;border:1px solid #C9D6EC;border-radius:10px;font-size:12px;color:#34507A}
+.asofbar b{font-weight:600}
+.asofbar button{margin-left:auto;border:1px solid #C9D6EC;background:#fff;color:#34507A;border-radius:7px;padding:5px 10px;font:inherit;font-size:12px;cursor:pointer}
+
+.board{flex:1;margin:0 22px 20px;background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex}
+.left{width:472px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--line);z-index:2}
+.right{flex:1;min-width:0;overflow-x:auto;position:relative}
+.rinner{width:max-content;min-width:100%}
+.lhead,.rhead{height:46px;display:flex;align-items:center;background:#F4F1E8;border-bottom:1px solid var(--line)}
+.lhead>div{font-size:11px;color:var(--ink3);font-weight:500;padding:0 10px}
+.col-id{width:80px}.col-ttl{flex:1;min-width:130px;padding:0 10px}.col-asg{width:108px}.col-sts{width:92px}.col-sum{width:62px;text-align:right;padding:0 10px}
+.lrow{height:38px;display:flex;align-items:center;border-bottom:1px solid var(--line2)}
+.lrow:nth-child(odd){background:#FCFBF7}
+.lrow>div{padding:0 10px;overflow:hidden}
+.lrow .col-id{font-weight:600;font-size:12.5px}
+.lrow .col-ttl{font-size:12.5px;white-space:nowrap;text-overflow:ellipsis}
+.lrow .col-asg{display:flex;align-items:center;gap:7px}
+.lrow .col-asg .nm{font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.av-xs{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;flex-shrink:0}
+.badge{font-size:11px;padding:2px 8px;border-radius:6px;font-weight:500;white-space:nowrap}
+.lrow .col-sum{font-size:12.5px;font-weight:500;color:var(--ink2)}
+
+.rhead .mhd{height:100%;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--ink3);flex-shrink:0}
+.mhd.mstart{border-left:1px solid var(--line)}
+.rbody{position:relative}
+.rrow{height:38px;display:flex;border-bottom:1px solid var(--line2)}
+.rrow:nth-child(odd){background:#FCFBF7}
+.wk{width:var(--wk);flex-shrink:0;height:100%;display:flex;align-items:center;justify-content:center;font-size:11px;position:relative}
+.wk.mstart{box-shadow:inset 1px 0 0 var(--line2)}
+.wk .ms{position:absolute;left:0;top:50%;width:9px;height:9px;background:#fff;border:1.5px solid var(--ink);transform:translate(-50%,-50%) rotate(45deg);z-index:3}
+.vline{position:absolute;top:0;bottom:0;width:2px;z-index:4;pointer-events:none}
+.vcap{position:absolute;top:-1px;transform:translateX(-50%);font-size:10px;background:var(--canvas);padding:0 4px;z-index:5;white-space:nowrap}
+.tip{position:fixed;z-index:50;background:var(--ink);color:#fff;font-size:11.5px;line-height:1.5;padding:7px 10px;border-radius:8px;pointer-events:none;opacity:0;transition:opacity .08s;white-space:nowrap}
+.note{position:absolute;left:0;right:0;bottom:0;padding:8px 14px;font-size:11.5px;color:var(--ink3);border-top:1px solid var(--line2);background:#FCFBF7;z-index:6}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><span class="dot"></span>工数スケジュール</div>
+    <div class="org"><div class="sq">デ</div><div><div class="nm">デモ組織</div><div class="sub">demo</div></div></div>
+    <div class="nav on"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>スケジュール</div>
+    <div class="nav"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>ダッシュボード</div>
+    <div class="nav"><svg viewBox="0 0 24 24"><path d="M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>マイタスク</div>
+    <div class="nav"><svg viewBox="0 0 24 24"><path d="M17 20v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8"/></svg>メンバー管理</div>
+    <div class="nav"><svg viewBox="0 0 24 24"><path d="M3 6h18M7 12h10M10 18h4"/></svg>シート設定</div>
+    <div class="me"><div class="av">浜</div><div style="font-size:12px;color:#CFE0D7">浜崎 寛幸</div></div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <div class="title">開発スケジュール 2026</div>
+        <div class="subtitle">2026/4 – 2027/3 ・ 週次工数 ・ 過去=実績 / 未来=予定</div>
+      </div>
+      <div class="controls">
+        <div class="seg" id="asof">
+          <button class="step" id="aprev" title="前の週の計画へ">‹</button>
+          <span class="lbl" id="albl">基準週: 今日</span>
+          <button class="step" id="anext" title="次の週へ">›</button>
+        </div>
+        <div class="seg" id="dens">
+          <button data-w="16">細</button><button class="on" data-w="22">標準</button><button data-w="34">広</button>
+        </div>
+        <div class="pill"><svg viewBox="0 0 24 24"><path d="M3 4h18M3 4l7 8v6l4 2v-8l7-8"/></svg>絞り込み</div>
+        <button class="btn"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新規行</button>
+        <div class="av-sm">浜</div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <div class="it"><span class="sw" style="background:var(--p-design)"></span>設計</div>
+      <div class="it"><span class="sw" style="background:var(--p-impl)"></span>実装</div>
+      <div class="it"><span class="sw" style="background:var(--p-test)"></span>テスト</div>
+      <div class="it"><span class="sw" style="background:var(--p-review)"></span>レビュー</div>
+      <div class="it"><span class="sw" style="background:var(--p-late)"></span>遅延（節目超過）</div>
+      <div class="it"><span class="dia"></span>マイルストン</div>
+      <div class="it"><span style="color:var(--accent);font-weight:600">20</span>変化点（前週から変更＝文字色）</div>
+    </div>
+
+    <div class="asofbar" id="asofbar">
+      <span><b id="asoftxt"></b> 時点の計画（週次スナップショット）を表示中</span>
+      <button id="aback">今日に戻る</button>
+    </div>
+
+    <div class="board">
+      <div class="left">
+        <div class="lhead">
+          <div class="col-id">ID</div><div class="col-ttl">件名</div><div class="col-asg">担当</div>
+          <div class="col-sts">ステータス</div><div class="col-sum">予定計</div>
+        </div>
+        <div id="lbody"></div>
+      </div>
+      <div class="right">
+        <div class="rinner">
+          <div class="rhead" id="rhead"></div>
+          <div class="rbody" id="rbody"></div>
+        </div>
+      </div>
+      <div class="note">値のある週だけフェーズ色で塗る（ゼロは無色）。◇は境界＝マイルストン、節目超過は遅延色、変化点は文字色。基準週の‹ ›で前週時点の計画にすぐ切替（as-of）。右上「細/標準/広」で列幅。</div>
+    </div>
+  </main>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+const MS_W=6048e5;
+const TODAY=new Date(2026,5,16);
+const COL={design:'var(--p-design)',impl:'var(--p-impl)',test:'var(--p-test)',review:'var(--p-review)',late:'var(--p-late)',done:'var(--p-done)'};
+const BASE={design:8,impl:16,test:12,review:6,late:10,done:8};
+const PHJP={design:'設計',impl:'実装',test:'テスト',review:'レビュー',late:'超過',done:'完了'};
+const STS={'進行中':['#E3EFEA','#266B53'],'未着手':['#EFEDE4','#6A675C'],'遅延':['#FAE6E0','#A8442B'],'完了':['#E6F0DB','#3E6D14']};
+const AV={浜:'#DCEAE3',佐:'#DCEAE3',田:'#F3E7CC',鈴:'#DCEAE3',山:'#DCEAE3'};
+const NAME={浜:'浜崎',佐:'佐藤',田:'田中',鈴:'鈴木',山:'山本'};
+const dt=(m,day)=>new Date(2026+(m<4?1:0),m-1,day);
+const f=d=>(d.getMonth()+1)+'/'+d.getDate();
+
+const wk0=new Date(2026,2,30);
+const WEEKS=[];for(let i=0;i<54;i++)WEEKS.push(new Date(wk0.getTime()+i*MS_W));
+const widx=d=>Math.floor((d-WEEKS[0])/MS_W);
+const CURW=widx(TODAY);
+let asOf=CURW;
+
+const rows=[
+ {id:'P26-001',ttl:'認証基盤',asg:'浜',sts:'進行中',
+  segs:[['design',dt(4,1),dt(5,15)],['impl',dt(5,15),dt(8,31)],['test',dt(9,1),dt(9,30)]]},
+ {id:'P26-002',ttl:'課金API連携',asg:'佐',sts:'未着手',
+  segs:[['design',dt(6,1),dt(6,30)],['impl',dt(7,1),dt(11,30)]]},
+ {id:'E26-001',ttl:'データ移行',asg:'田',sts:'遅延',
+  segs:[['design',dt(4,10),dt(4,30)],['late',dt(4,30),dt(6,16)]]},
+ {id:'P26-003',ttl:'管理画面リニューアル',asg:'鈴',sts:'完了',
+  segs:[['done',dt(4,1),dt(4,20)]]},
+ {id:'P26-004',ttl:'通知基盤',asg:'浜',sts:'進行中',
+  segs:[['impl',dt(8,1),dt(1,31)],['test',dt(2,1),dt(3,15)]]},
+ {id:'P26-005',ttl:'帳票・レポート',asg:'山',sts:'進行中',
+  segs:[['design',dt(5,1),dt(6,15)],['impl',dt(6,15),dt(10,31)],['review',dt(11,1),dt(11,30)]]},
+ {id:'E26-002',ttl:'監査ログ整備',asg:'佐',sts:'未着手',
+  segs:[['design',dt(11,1),dt(12,15)],['impl',dt(12,16),dt(2,28)]]},
+];
+const GAPS={'P26-001':[dt(7,13),dt(7,20)],'P26-002':[dt(9,21)],'P26-004':[dt(12,28),dt(1,4)],'P26-005':[dt(8,10),dt(8,17)]};
+const CHG={'P26-001':[widx(dt(5,18))],'P26-002':[widx(dt(8,3))],'P26-005':[widx(dt(7,6))]};
+
+rows.forEach(r=>{
+  const gaps=new Set((GAPS[r.id]||[]).map(widx));
+  r.cells=WEEKS.map(()=>null);let sum=0;
+  r.segs.forEach((s,si)=>{
+    const a=widx(s[1]),b=widx(s[2]);
+    for(let i=a;i<=b&&i<WEEKS.length;i++){
+      const h=gaps.has(i)?0:BASE[s[0]];
+      r.cells[i]={ty:s[0],first:(i===a&&si>0),h};
+      sum+=h;
+    }
+  });
+  r.sum=sum;
+  (CHG[r.id]||[]).forEach(i=>{if(r.cells[i]&&r.cells[i].h>0){r.cells[i].chg=true;r.cells[i].h+=4;}});
+});
+
+const lbody=document.getElementById('lbody');
+rows.forEach(r=>{
+  const sts=STS[r.sts]||['#eee','#555'];
+  const el=document.createElement('div');el.className='lrow';
+  el.innerHTML=`<div class="col-id">${r.id}</div><div class="col-ttl">${r.ttl}</div>
+    <div class="col-asg"><span class="av-xs" style="background:${AV[r.asg]};color:#234538">${r.asg}</span><span class="nm">${NAME[r.asg]}</span></div>
+    <div class="col-sts"><span class="badge" style="background:${sts[0]};color:${sts[1]}">${r.sts}</span></div>
+    <div class="col-sum">${r.sum}h</div>`;
+  lbody.appendChild(el);
+});
+
+const monthStart=WEEKS.map((w,i)=>i===0||w.getMonth()!==WEEKS[i-1].getMonth());
+const rhead=document.getElementById('rhead');
+let mi=0;
+while(mi<WEEKS.length){
+  let j=mi+1;while(j<WEEKS.length&&!monthStart[j])j++;
+  const span=j-mi;const cell=document.createElement('div');
+  cell.className='mhd'+(mi>0?' mstart':'');
+  cell.style.width='calc(var(--wk) * '+span+')';
+  cell.textContent=(WEEKS[mi].getMonth()+1);
+  rhead.appendChild(cell);mi=j;
+}
+
+const tip=document.getElementById('tip');
+const rbody=document.getElementById('rbody');
+const CELLS=[];
+function shade(o){
+  const past=o.i<asOf;const live=asOf===CURW;
+  o.cell.style.color=(o.c.chg&&live)?'var(--accent)':(past?'#33322c':'rgba(51,50,44,.5)');
+  o.cell.style.fontWeight=(o.c.chg&&live)?'600':'500';
+}
+rows.forEach(r=>{
+  const row=document.createElement('div');row.className='rrow';
+  r.cells.forEach((c,i)=>{
+    const cell=document.createElement('div');cell.className='wk'+(monthStart[i]?' mstart':'');
+    if(c){
+      if(c.first){const m=document.createElement('div');m.className='ms';cell.appendChild(m);}
+      if(c.h>0){
+        cell.style.background=COL[c.ty];
+        cell.textContent=c.h;
+        const o={cell,i,c};CELLS.push(o);shade(o);
+        cell.addEventListener('mousemove',e=>{const past=i<asOf;tip.innerHTML=`<b style="font-weight:600">${r.id}</b> ・ ${PHJP[c.ty]}<br>週 ${f(WEEKS[i])} ・ ${past?'実績':'予定'} ${c.h}h${(c.chg&&asOf===CURW)?'<br><span style="color:#F2B8A0">● 前週から変更</span>':''}`;tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';tip.style.opacity=1;});
+        cell.addEventListener('mouseleave',()=>tip.style.opacity=0);
+      }
+    }
+    row.appendChild(cell);
+  });
+  rbody.appendChild(row);
+});
+
+const vline=document.createElement('div');vline.className='vline';rbody.appendChild(vline);
+const vcap=document.createElement('div');vcap.className='vcap';rbody.appendChild(vcap);
+function placeLine(){
+  const w=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--wk'));
+  const x=asOf*w;vline.style.left=x+'px';vcap.style.left=x+'px';
+  const live=asOf===CURW;
+  vline.style.background=live?'var(--today)':'var(--asof)';
+  vcap.style.color=live?'var(--accent)':'var(--asof)';
+  vcap.textContent=live?'今日 6/16':('基準 '+f(WEEKS[asOf]));
+}
+function applyAsOf(){
+  CELLS.forEach(shade);placeLine();
+  const live=asOf===CURW;
+  document.getElementById('albl').textContent=live?'基準週: 今日':('基準週: '+f(WEEKS[asOf]));
+  const bar=document.getElementById('asofbar');bar.style.display=live?'none':'flex';
+  if(!live)document.getElementById('asoftxt').textContent=f(WEEKS[asOf])+' 週';
+}
+applyAsOf();
+
+document.getElementById('aprev').addEventListener('click',()=>{if(asOf>1){asOf--;applyAsOf();}});
+document.getElementById('anext').addEventListener('click',()=>{if(asOf<CURW){asOf++;applyAsOf();}});
+document.getElementById('aback').addEventListener('click',()=>{asOf=CURW;applyAsOf();});
+document.getElementById('dens').addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;
+  document.querySelectorAll('#dens button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
+  document.documentElement.style.setProperty('--wk',b.dataset.w+'px');
+  placeLine();
+});
+</script>
+</body>
+</html>
