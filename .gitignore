@@ -18,10 +18,11 @@ dist-types/
 # Claude Code local (machine-specific permissions)
 .claude/settings.local.json
 
-# Env / secrets
+# Env / secrets (real .env is ignored; *.example templates are kept)
 .env
 .env.*
 !.env.example
+!.env.prod.example
 
 # Editor / OS
 .vscode/
