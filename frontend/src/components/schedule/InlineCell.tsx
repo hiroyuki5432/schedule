@@ -61,7 +61,7 @@ export function InlineCell({
       </Badge>
     ) : null
     if (!editable) {
-      return <div className={cn('flex items-center', pad, className)}>{badgeNode}</div>
+      return <div className={cn('flex h-full items-center', pad, className)}>{badgeNode}</div>
     }
     const options = statusOptions(statusCol, rows ?? [row])
     return (
@@ -88,7 +88,7 @@ export function InlineCell({
     return (
       <div
         className={cn(
-          'flex items-center overflow-hidden text-ellipsis whitespace-nowrap text-[12.5px] text-[var(--ink3)]',
+          'flex h-full items-center overflow-hidden text-ellipsis whitespace-nowrap text-[12.5px] text-[var(--ink3)]',
           pad,
           className,
         )}

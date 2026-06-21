@@ -10,8 +10,23 @@ export interface User {
   org_id: string
 }
 
+/** A node in the 実績入力 category master (大分類→中分類). */
+export interface WorkLogCategoryNode {
+  name: string
+  children?: WorkLogCategoryNode[]
+}
+
+/** Org-level 実績入力 master: 2-level cascading categories (大→中) + a shared note. */
+export interface WorkLogMaster {
+  categories?: WorkLogCategoryNode[]
+  /** Free-text 記載ルール shown at the bottom of 実績入力 for everyone. */
+  note?: string
+}
+
 export interface OrgSettings {
   week_start_weekday?: number // 1..7, default 1 (Mon)
+  /** Daily work-log masters (categories + properties). */
+  worklog?: WorkLogMaster
   [k: string]: unknown
 }
 
@@ -114,6 +129,8 @@ export type CellValue = string | number | boolean | null
 export interface Row {
   id: string
   sheet_id: string
+  /** Parent task id for a subtask (子タスク); null for top-level tasks. */
+  parent_row_id: string | null
   key_value: string
   data: Record<string, CellValue>
   version: number
@@ -137,11 +154,13 @@ export interface Milestone {
   id: string
   row_id: string
   name: string
-  boundary_date: string // YYYY-MM-DD
+  boundary_date: string // YYYY-MM-DD (planned boundary)
   color: string
   order: number
   /** Whether this milestone (phase boundary) has been achieved. */
   done: boolean
+  /** Actual completion date (YYYY-MM-DD), or null. Compared to boundary_date. */
+  actual_date: string | null
 }
 
 export interface SnapshotResult {
@@ -161,4 +180,39 @@ export interface AggregateRow {
   planned_sum: number
   actual_sum: number
   count: number
+}
+
+/** A work-log line (実績入力). Hours roll up into the task's weekly actual. */
+export interface WorkLog {
+  id: string
+  user_id: string | null
+  work_date: string // YYYY-MM-DD
+  row_id: string | null
+  /** Resolved label of the linked task (read-only, from the server). */
+  row_key_value: string | null
+  sheet_id: string | null
+  cat1: string | null
+  cat2: string | null
+  memo: string | null
+  hours: number
+}
+
+// `type` (not `interface`) so it gets an implicit index signature and is
+// assignable to the http client's JSON body type (Record<string, unknown>).
+export type WorkLogInput = {
+  work_date: string
+  row_id?: string | null
+  cat1?: string | null
+  cat2?: string | null
+  memo?: string | null
+  hours: number
+}
+
+/** A task the current user is assigned to (for the 実績入力 task dropdown). */
+export interface TaskOption {
+  row_id: string
+  key_value: string | null
+  title: string
+  sheet_id: string
+  sheet_name: string
 }

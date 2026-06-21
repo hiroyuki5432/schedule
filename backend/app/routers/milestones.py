@@ -53,6 +53,7 @@ def replace_milestones(
             color=item.color,
             order=item.order if item.order is not None else idx,
             done=item.done,
+            actual_date=item.actual_date,
         )
         db.add(m)
         created.append(m)
