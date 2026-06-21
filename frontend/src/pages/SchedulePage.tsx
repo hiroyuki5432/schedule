@@ -91,25 +91,12 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const { weeks, currentWeekIdx } = grid
   const lineIndex = live ? currentWeekIdx : Math.max(0, currentWeekIdx + asOfOffset)
 
-  // Frozen-column count: directly adjustable on the schedule top bar (0..列数).
-  // Persisted to the sheet's pinned_columns so it sticks. A local override gives
-  // instant feedback while the save round-trips.
+  // Frozen-column count comes from the sheet setting (configured on the sheet
+  // settings page). Freezable = attribute columns + the 4 summary columns
+  // (予定計/実績計/差/進捗), so the freeze can extend up to 進捗.
   const sheetSettings = grid.detail?.sheet.settings
-  const savedPinned = sheetSettings?.pinned_columns ?? 1
   const colCount = grid.columns.length
-  const [pinnedOverride, setPinnedOverride] = useState<number | null>(null)
-  useEffect(() => setPinnedOverride(null), [sheetId])
-  const pinnedCount = Math.max(0, Math.min(pinnedOverride ?? savedPinned, colCount))
-  function setPinned(n: number) {
-    const v = Math.max(0, Math.min(n, colCount))
-    setPinnedOverride(v)
-    api
-      .updateSheet(sheetId, { settings: { ...sheetSettings, pinned_columns: v } })
-      .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
-      .catch(() => {
-        /* TODO: toast on failure */
-      })
-  }
+  const pinnedCount = Math.max(0, Math.min(sheetSettings?.pinned_columns ?? 1, colCount + 4))
   const defaultMilestones = useMemo(
     () => sheetSettings?.default_milestones ?? [],
     [sheetSettings],
@@ -320,31 +307,6 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
               onClick={() => setExtraAfter((n) => n + RANGE_STEP)}
             >
               もっと後 ▶
-            </button>
-          </div>
-
-          {/* frozen-column count stepper (ID + 先頭N列を固定) */}
-          <div
-            className="flex items-center overflow-hidden rounded-[9px] border border-[var(--line)] bg-[var(--surface)]"
-            title="左端に固定する列数（IDは常に固定）。スケジュールを広く見たいときは減らす。"
-          >
-            <span className="px-2.5 text-[12px] text-[var(--ink2)]">固定列</span>
-            <button
-              onClick={() => setPinned(pinnedCount - 1)}
-              disabled={pinnedCount <= 0}
-              className="border-l border-[var(--line)] px-2.5 py-1.5 text-[14px] leading-none text-[var(--ink2)] hover:bg-[var(--line2)] disabled:opacity-40"
-            >
-              −
-            </button>
-            <span className="min-w-[22px] text-center text-[12px] font-medium tabular-nums">
-              {pinnedCount}
-            </span>
-            <button
-              onClick={() => setPinned(pinnedCount + 1)}
-              disabled={pinnedCount >= colCount}
-              className="border-l border-[var(--line)] px-2.5 py-1.5 text-[14px] leading-none text-[var(--ink2)] hover:bg-[var(--line2)] disabled:opacity-40"
-            >
-              ＋
             </button>
           </div>
 
