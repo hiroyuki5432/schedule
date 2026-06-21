@@ -29,10 +29,11 @@ const FOOT_H = 34 // sticky 週計 (per-week totals) footer
 const YEAR_H = 18 // year band above the month numbers
 const MONTH_H = 28 // month-number band
 const HEAD_H = YEAR_H + MONTH_H
-const ID_W = 152 // full key_value (e.g. P26-001) + ◇ milestone + ☑ subtask buttons
+const ID_W = 176 // key_value + ◇ milestone + tree toggle + dep / add / delete buttons
 const TOTAL_W = 60 // 予定計 column
 const ACTUAL_W = 60 // 実績計 column
 const DIFF_W = 60 // 差（予定−実績）column
+const PROG_W = 66 // 進捗 column (手入力%、ビハインド色)
 
 /** Round to 1 decimal for compact hour totals. */
 const round1 = (x: number) => Math.round(x * 10) / 10
@@ -169,6 +170,10 @@ interface Props {
   onEditMilestones: (row: Row) => void
   /** Add a subtask (子タスク) under this top-level task. */
   onAddChild: (parentRow: Row) => void
+  /** Save the manual progress % for a leaf task (null clears). */
+  onEditProgress: (row: Row, value: number | null) => void
+  /** Open the dependency (先行タスク) editor for a row. */
+  onEditDeps: (row: Row) => void
   onDeleteRow: (row: Row) => void
 }
 
@@ -200,6 +205,8 @@ export function GanttGrid({
   onEditRowKey,
   onEditMilestones,
   onAddChild,
+  onEditProgress,
+  onEditDeps,
   onDeleteRow,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -301,7 +308,8 @@ export function GanttGrid({
     [pinnedCols],
   )
   const attrW = useMemo(
-    () => scrollCols.reduce((s, c) => s + colWidth(c), 0) + TOTAL_W + ACTUAL_W + DIFF_W,
+    () =>
+      scrollCols.reduce((s, c) => s + colWidth(c), 0) + TOTAL_W + ACTUAL_W + DIFF_W + PROG_W,
     [scrollCols],
   )
 
@@ -459,6 +467,9 @@ export function GanttGrid({
               <HeadCell style={{ width: DIFF_W }} className="justify-end text-right">
                 差
               </HeadCell>
+              <HeadCell style={{ width: PROG_W }} className="justify-end text-right">
+                進捗
+              </HeadCell>
             </div>
             {/* year band (top) + month spans (below) + today caption */}
             <div className="relative" style={{ width: gridW, height: HEAD_H }}>
@@ -574,6 +585,43 @@ export function GanttGrid({
                         {model.childCount}
                       </span>
                     )}
+                    {(() => {
+                      const depCount = model.row.depends_on?.length ?? 0
+                      const viol = model.depViolations.length > 0
+                      const show = depCount > 0 || viol
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => onEditDeps(model.row)}
+                          title={
+                            viol
+                              ? `逆ザヤ: ${model.depViolations
+                                  .map((v) => `${v.predKey} の完了前に開始（${v.weeks}週）`)
+                                  .join(' / ')}`
+                              : depCount > 0
+                                ? `先行タスク ${depCount}件（クリックで編集）`
+                                : '先行タスク（依存）を設定'
+                          }
+                          className={cn(
+                            'flex h-5 flex-shrink-0 items-center gap-0.5 rounded px-1 text-[10px]',
+                            viol
+                              ? 'bg-[#FAE6E0] font-semibold text-[#A8442B]'
+                              : show
+                                ? 'text-[var(--ink3)] hover:bg-[var(--line2)]'
+                                : 'text-[var(--ink3)] opacity-0 hover:bg-[var(--line2)] group-hover/row:opacity-100',
+                          )}
+                        >
+                          {viol ? (
+                            <span className="leading-none">⚠{model.depViolations.length}</span>
+                          ) : (
+                            <>
+                              <LinkGlyph />
+                              {depCount > 0 && <span className="font-medium">{depCount}</span>}
+                            </>
+                          )}
+                        </button>
+                      )
+                    })()}
                     {editable && !isChild && (
                       <button
                         type="button"
@@ -659,6 +707,11 @@ export function GanttGrid({
                       </div>
                     )
                   })()}
+                  <ProgressCell
+                    model={model}
+                    editable={editable}
+                    onEdit={(v) => onEditProgress(model.row, v)}
+                  />
                 </div>
 
                 {/* week cells (virtualized) */}
@@ -763,7 +816,7 @@ export function GanttGrid({
               <div
                 className="px-2 text-[11px] font-semibold text-[var(--ink2)]"
                 style={{ width: ID_W }}
-                title="表示中の行の週ごとの合計（絞り込み連動／子タスクは合算、親の二重計上なし）"
+                title="表示中の行の週ごとの合計（絞り込み連動／子タスクは合算、親の二重計上なし）。今日より前=実績、今週以降=予定。"
               >
                 週計
               </div>
@@ -782,16 +835,16 @@ export function GanttGrid({
                 className="px-2.5 text-right text-[12px] font-semibold text-[var(--ink)]"
                 style={{ width: TOTAL_W }}
               >
-                {round1(footTotals.plannedSum)}h
+                {Math.round(footTotals.plannedSum)}h
               </div>
               <div
                 className="px-2.5 text-right text-[12px] font-semibold text-[var(--ink)]"
                 style={{ width: ACTUAL_W }}
               >
-                {round1(footTotals.actualSum)}h
+                {Math.round(footTotals.actualSum)}h
               </div>
               {(() => {
-                const diff = round1(footTotals.plannedSum - footTotals.actualSum)
+                const diff = Math.round(footTotals.plannedSum - footTotals.actualSum)
                 return (
                   <div
                     className="px-2.5 text-right text-[12px] font-semibold"
@@ -802,29 +855,30 @@ export function GanttGrid({
                   </div>
                 )
               })()}
+              <div style={{ width: PROG_W }} />
             </div>
             <div className="relative flex-shrink-0" style={{ width: gridW, height: FOOT_H }}>
               {weeks.map((_w, wi) => {
-                const p = footTotals.planned[wi]
-                const a = footTotals.actual[wi]
-                if (p <= 0 && a <= 0) return null
+                // Single line: past weeks (今日より前) show 実績, this week onward
+                // (今週以降) shows 予定. Rounded to a whole number.
+                const past = wi < lineIndex
+                const val = Math.round(past ? footTotals.actual[wi] : footTotals.planned[wi])
+                if (val <= 0) return null
                 return (
                   <div
                     key={wi}
                     className={cn(
-                      'absolute top-0 flex h-full flex-col items-center justify-center leading-none',
+                      'absolute top-0 flex h-full items-center justify-center leading-none',
                       monthStart[wi] && 'shadow-[inset_1px_0_0_var(--line2)]',
                     )}
                     style={{ left: wi * weekColWidth, width: weekColWidth }}
                   >
-                    {p > 0 && (
-                      <span className="text-[9px] text-[var(--ink2)]">{round1(p)}</span>
-                    )}
-                    {a > 0 && (
-                      <span className="text-[9px] font-semibold text-[var(--ink)]">
-                        {round1(a)}
-                      </span>
-                    )}
+                    <span
+                      className="text-[9.5px] font-semibold"
+                      style={{ color: past ? '#33322c' : '#8a8778' }}
+                    >
+                      {val}
+                    </span>
                   </div>
                 )
               })}
@@ -1234,5 +1288,125 @@ function WeekCellInput({
       className="absolute top-0 z-[5] h-full rounded-[3px] border-[1.5px] border-[var(--green-l)] bg-[var(--surface)] text-center text-[11px] outline-none"
       style={{ left, width: Math.max(width, 44) }}
     />
+  )
+}
+
+/** Small chain/link glyph for the dependency (先行タスク) button. */
+function LinkGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-[11px] w-[11px]"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9 12h6" />
+      <path d="M10 8H8a4 4 0 1 0 0 8h2" />
+      <path d="M14 8h2a4 4 0 1 1 0 8h-2" />
+    </svg>
+  )
+}
+
+/** 進捗 cell: manual % for leaf tasks (click to edit), read-only effort-weighted
+ *  roll-up for parents. Colored red when behind the plan, green when on track. */
+function ProgressCell({
+  model,
+  editable,
+  onEdit,
+}: {
+  model: ScheduleRowModel
+  editable: boolean
+  onEdit: (value: number | null) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [val, setVal] = useState('')
+  const ref = useRef<HTMLInputElement>(null)
+  const done = useRef(false)
+
+  const p = model.progress
+  const hasPlan = model.gantt.plannedSum > 0
+  const expected = Math.round(model.expectedPct * 100)
+  const neutral = p == null || !hasPlan
+  const color = neutral ? 'var(--ink3)' : model.behind ? '#A8442B' : '#266B53'
+  const bg = neutral ? undefined : model.behind ? '#FAE6E0' : '#E6F0DB'
+  const canEdit = editable && !model.progressRollup
+
+  useEffect(() => {
+    if (editing) {
+      setVal(p == null ? '' : String(p))
+      ref.current?.focus()
+      ref.current?.select()
+      done.current = false
+    }
+  }, [editing, p])
+
+  function commit() {
+    if (done.current) return
+    done.current = true
+    setEditing(false)
+    const t = val.trim()
+    if (t === '') return onEdit(null)
+    const n = Math.round(Number(t))
+    if (!Number.isFinite(n)) return
+    onEdit(Math.max(0, Math.min(100, n)))
+  }
+
+  if (editing) {
+    return (
+      <div className="flex items-center justify-end px-1.5" style={{ width: PROG_W }}>
+        <input
+          ref={ref}
+          type="number"
+          min={0}
+          max={100}
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              commit()
+            }
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              done.current = true
+              setEditing(false)
+            }
+          }}
+          className="w-[46px] rounded border-[1.5px] border-[var(--green-l)] bg-[var(--surface)] px-1 text-right text-[12px] outline-none"
+        />
+      </div>
+    )
+  }
+
+  const title = hasPlan
+    ? `進捗 ${p ?? '—'}% ／ 予定上は今日 ${expected}% 想定${model.behind ? '（ビハインド）' : ''}${
+        model.progressRollup ? '（子タスクの集計）' : ''
+      }`
+    : '進捗（予定がないため基準なし）'
+
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={() => {
+        if (canEdit) setEditing(true)
+      }}
+      className={cn(
+        'flex h-full items-center justify-end px-2 text-[12px] font-semibold',
+        canEdit ? 'cursor-pointer' : 'cursor-default',
+      )}
+      style={{ width: PROG_W, color }}
+    >
+      <span
+        className="rounded px-1 py-0.5"
+        style={{ background: bg }}
+      >
+        {p == null ? '—' : `${p}%`}
+      </span>
+    </button>
   )
 }

@@ -119,6 +119,12 @@ class Row(Base):
     )
     key_value: Mapped[str | None] = mapped_column(String(255), nullable=True)
     data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Manual progress 0-100 (手入力の進捗%). Null = not set. A parent with
+    # children shows an effort-weighted roll-up instead (computed on the front end).
+    progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Predecessor task ids (先行タスク). The task should start only after these
+    # finish; the front end flags 逆ザヤ (starting before a predecessor ends).
+    depends_on: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

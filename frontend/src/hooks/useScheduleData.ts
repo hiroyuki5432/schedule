@@ -50,6 +50,19 @@ export interface ScheduleRowModel {
   childCount: number
   /** 0 = top-level task, 1 = subtask (one level of nesting). */
   depth: number
+  /** Effective progress 0-100 (手入力; parents = effort-weighted roll-up). null=unset. */
+  progress: number | null
+  /** True when progress is a read-only roll-up (parent with children). */
+  progressRollup: boolean
+  /** Fraction the plan expects done by today (planned-to-date / planned-total). */
+  expectedPct: number
+  /** Behind schedule: progress below the expected fraction. */
+  behind: boolean
+  /** Week index of first / last planned-effort week (task span); null if none. */
+  startIdx: number | null
+  finishIdx: number | null
+  /** 逆ザヤ: predecessors whose finish is after this task's start. */
+  depViolations: Array<{ predKey: string; weeks: number }>
 }
 
 export interface ScheduleData {
@@ -196,6 +209,22 @@ function numOf(v: number | string | null | undefined): number {
   if (v == null) return 0
   const n = typeof v === 'number' ? v : Number(v)
   return Number.isFinite(n) ? n : 0
+}
+
+/** Task span (first/last planned-effort week) + planned hours up to today. */
+function spanAndToDate(g: RowGantt, currentWeekIdx: number) {
+  let startIdx: number | null = null
+  let finishIdx: number | null = null
+  let plannedToDate = 0
+  g.cells.forEach((c, i) => {
+    if (!c) return
+    if (c.planned > 0) {
+      if (startIdx === null) startIdx = i
+      finishIdx = i
+    }
+    if (i <= currentWeekIdx) plannedToDate += c.planned
+  })
+  return { startIdx, finishIdx, plannedToDate }
 }
 
 /** Roll a parent task's weekly effort up from its subtasks: per week, the sum of
@@ -433,6 +462,12 @@ export function useScheduleData({
 
       const title = ttlCol ? String(row.data[ttlCol.id] ?? '') : ''
 
+      const { startIdx, finishIdx, plannedToDate } = spanAndToDate(gantt, currentWeekIdx)
+      const expectedPct = gantt.plannedSum > 0 ? plannedToDate / gantt.plannedSum : 0
+      // Leaf tasks use the manual %, parents get an effort-weighted roll-up below.
+      const leafProgress =
+        hasChildren || typeof row.progress !== 'number' ? null : row.progress
+
       return {
         row,
         keyValue: row.key_value,
@@ -446,8 +481,54 @@ export function useScheduleData({
         hasChildren,
         childCount: childRows.length,
         depth: row.parent_row_id != null ? 1 : 0,
+        progress: leafProgress,
+        progressRollup: hasChildren,
+        expectedPct,
+        behind: false, // filled in the cross-row pass below
+        startIdx,
+        finishIdx,
+        depViolations: [], // filled in the cross-row pass below
       }
     })
+
+    // Cross-row pass: parent progress roll-up, behind flag, and 逆ザヤ detection.
+    const byId = new Map(built.map((m) => [String(m.row.id), m]))
+    for (const m of built) {
+      if (m.progressRollup) {
+        // Effort-weighted average of children's manual progress (read-only).
+        let wsum = 0
+        let psum = 0
+        let cnt = 0
+        let psimple = 0
+        for (const k of childrenByParent.get(String(m.row.id)) ?? []) {
+          const km = byId.get(String(k.id))
+          if (!km || km.progress == null) continue
+          const w = km.gantt.plannedSum || 0
+          wsum += w
+          psum += km.progress * w
+          cnt += 1
+          psimple += km.progress
+        }
+        m.progress =
+          cnt === 0 ? null : wsum > 0 ? Math.round(psum / wsum) : Math.round(psimple / cnt)
+      }
+    }
+    for (const m of built) {
+      m.behind =
+        m.progress != null && m.gantt.plannedSum > 0 && m.progress / 100 < m.expectedPct - 0.01
+      const deps = (m.row.depends_on ?? []) as Array<string | number>
+      const sIdx = m.startIdx
+      if (deps.length && sIdx != null) {
+        const v: Array<{ predKey: string; weeks: number }> = []
+        for (const pid of deps) {
+          const pm = byId.get(String(pid))
+          const fIdx = pm?.finishIdx
+          if (!pm || fIdx == null) continue
+          if (sIdx < fIdx) v.push({ predKey: pm.keyValue, weeks: fIdx - sIdx })
+        }
+        m.depViolations = v
+      }
+    }
 
     const loading = detailQ.isLoading || effortQ.isLoading || !milestonesAllLoaded
 
