@@ -152,6 +152,10 @@ class RowOut(BaseModel):
     key_value: Optional[str] = None
     data: dict[str, Any]
     version: int
+    # Manual progress 0-100 (手入力進捗%); null if unset.
+    progress: Optional[int] = None
+    # Predecessor task ids (先行タスク).
+    depends_on: list[int] = Field(default_factory=list)
 
 
 class RowCreate(BaseModel):
@@ -163,6 +167,9 @@ class RowUpdate(BaseModel):
     data: dict[str, Any]
     version: int
     key_value: Optional[str] = None
+    # Optional: only applied when present in the request body.
+    progress: Optional[int] = None
+    depends_on: Optional[list[int]] = None
 
 
 # ---------------------------------------------------------------------------

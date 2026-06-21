@@ -14,7 +14,7 @@ import { Card, CardBody } from '@/components/ui/Card'
 import { Select } from '@/components/ui/Select'
 import { ChevronDownIcon, ChevronUpIcon } from '@/components/ui/icons'
 import { parseDate } from '@/lib/dates'
-import type { Effort, Member, Row } from '@/types/api'
+import type { Column, Effort, Member, Row } from '@/types/api'
 
 const MONTHS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']
 // Lane color palette (mirrors the phase-color feel of the gantt).
@@ -53,12 +53,29 @@ interface TaskLane {
   title: string
   months: boolean[]
 }
+interface SubLane {
+  name: string
+  months: boolean[]
+  tasks: TaskLane[]
+  firstMonth: number
+}
 interface CategoryLane {
   name: string
   color: string
   months: boolean[]
+  /** 中分類サブレーン（中分類列が選ばれているとき）。 */
+  subs: SubLane[]
+  /** 中分類なしのときの直下タスク。 */
   tasks: TaskLane[]
   firstMonth: number
+}
+
+/** Separator for 大||中 expand keys (unit-separator char, unlikely in names). */
+const SEP = '␟'
+const m12 = () => new Array(12).fill(false) as boolean[]
+const firstTrue = (b: boolean[]) => {
+  const i = b.indexOf(true)
+  return i < 0 ? 12 : i
 }
 
 export function AnnualPlanPage() {
@@ -105,6 +122,13 @@ export function AnnualPlanPage() {
   // as strings so a user-picked group column still resolves.
   const groupCol = columns.find((c) => String(c.id) === String(groupBy))
 
+  // Optional 2nd level (中分類). Empty = single level.
+  const [subGroupBy, setSubGroupBy] = useState<string>('')
+  const subCol =
+    subGroupBy && String(subGroupBy) !== String(groupBy)
+      ? columns.find((c) => String(c.id) === String(subGroupBy))
+      : undefined
+
   // Weeks (ISO) with any effort, per row.
   const effortWeeksByRow = useMemo(() => {
     const m = new Map<string, Set<string>>()
@@ -150,13 +174,15 @@ export function AnnualPlanPage() {
     return m
   }, [membersQ.data])
 
-  function categoryOf(row: Row): string {
-    if (!groupCol) return UNSET
-    const v = row.data[groupCol.id]
+  function valueOf(row: Row, col: Column | undefined): string {
+    if (!col) return UNSET
+    const v = row.data[col.id]
     if (v == null || v === '') return UNSET
-    if (groupCol.type === 'member') return membersById.get(String(v))?.name ?? UNSET
+    if (col.type === 'member') return membersById.get(String(v))?.name ?? UNSET
     return String(v)
   }
+  const categoryOf = (row: Row) => valueOf(row, groupCol)
+  const subCategoryOf = (row: Row) => valueOf(row, subCol)
 
   /** A top-level task's active months in `year` (own effort ∪ subtasks' effort). */
   function taskMonths(row: Row): boolean[] {
@@ -187,35 +213,68 @@ export function AnnualPlanPage() {
     }
   }, [groupCol])
 
-  // Build the category lanes for the selected year.
+  // Build the (optionally 2-level) category lanes for the selected year.
   const lanes = useMemo<CategoryLane[]>(() => {
-    const byCat = new Map<string, CategoryLane>()
     const titleCol = columns.find((c) => c.type === 'text' && !c.is_key)
+    const byCat = new Map<
+      string,
+      { name: string; color: string; months: boolean[]; firstMonth: number; tasks: TaskLane[]; subMap: Map<string, SubLane> }
+    >()
     for (const row of rows) {
       if (row.parent_row_id != null) continue // top-level tasks only
       const months = taskMonths(row)
       if (!months.some(Boolean)) continue // not active this year
-      const cat = categoryOf(row)
-      const lane =
-        byCat.get(cat) ??
-        ({
-          name: cat,
-          color: colorFor(cat),
-          months: new Array(12).fill(false),
-          tasks: [],
+      const catName = categoryOf(row)
+      let cat = byCat.get(catName)
+      if (!cat) {
+        cat = {
+          name: catName,
+          color: colorFor(catName),
+          months: m12(),
           firstMonth: 12,
-        } as CategoryLane)
-      for (let m = 0; m < 12; m++) if (months[m]) lane.months[m] = true
-      const title = titleCol ? String(row.data[titleCol.id] ?? '') : ''
-      lane.tasks.push({ key: row.key_value, title, months })
-      lane.firstMonth = Math.min(lane.firstMonth, months.indexOf(true))
-      byCat.set(cat, lane)
+          tasks: [],
+          subMap: new Map(),
+        }
+        byCat.set(catName, cat)
+      }
+      for (let m = 0; m < 12; m++) if (months[m]) cat.months[m] = true
+      cat.firstMonth = Math.min(cat.firstMonth, firstTrue(months))
+      const task: TaskLane = {
+        key: row.key_value,
+        title: titleCol ? String(row.data[titleCol.id] ?? '') : '',
+        months,
+      }
+      if (subCol) {
+        const subName = subCategoryOf(row)
+        let sl = cat.subMap.get(subName)
+        if (!sl) {
+          sl = { name: subName, months: m12(), tasks: [], firstMonth: 12 }
+          cat.subMap.set(subName, sl)
+        }
+        for (let m = 0; m < 12; m++) if (months[m]) sl.months[m] = true
+        sl.firstMonth = Math.min(sl.firstMonth, firstTrue(months))
+        sl.tasks.push(task)
+      } else {
+        cat.tasks.push(task)
+      }
     }
-    // Sort lanes by earliest active month, then name.
-    return [...byCat.values()].sort(
-      (a, b) => a.firstMonth - b.firstMonth || a.name.localeCompare(b.name, 'ja'),
-    )
-  }, [rows, columns, groupBy, year, membersById, childrenByParent, effortWeeksByRow])
+    const bySpan = <T extends { firstMonth: number; name: string }>(a: T, b: T) =>
+      a.firstMonth - b.firstMonth || a.name.localeCompare(b.name, 'ja')
+    return [...byCat.values()]
+      .map((c) => ({
+        name: c.name,
+        color: c.color,
+        months: c.months,
+        firstMonth: c.firstMonth,
+        tasks: c.tasks,
+        subs: [...c.subMap.values()].sort(bySpan),
+      }))
+      .sort(bySpan)
+  }, [rows, columns, groupBy, subGroupBy, year, membersById, childrenByParent, effortWeeksByRow])
+
+  /** Total task count under a category (across sub-lanes or direct tasks). */
+  const catCount = (lane: CategoryLane) =>
+    subCol ? lane.subs.reduce((s, sub) => s + sub.tasks.length, 0) : lane.tasks.length
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const toggle = (name: string) =>
@@ -265,13 +324,26 @@ export function AnnualPlanPage() {
             </Select>
           </label>
           <label className="flex items-center gap-2">
-            集約カテゴリ
+            大分類
             <Select value={groupBy} onChange={(e) => setGroupByState(e.target.value)}>
               {groupable.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
                 </option>
               ))}
+            </Select>
+          </label>
+          <label className="flex items-center gap-2">
+            中分類
+            <Select value={subGroupBy} onChange={(e) => setSubGroupBy(e.target.value)}>
+              <option value="">（なし）</option>
+              {groupable
+                .filter((c) => String(c.id) !== String(groupBy))
+                .map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
             </Select>
           </label>
         </div>
@@ -289,52 +361,83 @@ export function AnnualPlanPage() {
                 <MonthHeader currentMonth={currentMonth} />
                 {lanes.map((lane) => (
                   <div key={lane.name}>
+                    {/* 大分類 lane */}
                     <LaneRow
                       label={
                         <button
                           type="button"
                           onClick={() => toggle(lane.name)}
                           className="flex w-full items-center gap-1 overflow-hidden text-left text-[12.5px] font-medium text-[var(--ink)] hover:text-[var(--green-d)]"
-                          title="クリックで内訳（タスク）を表示"
+                          title="クリックで内訳を表示"
                         >
-                          {expanded.has(lane.name) ? (
-                            <ChevronUpIcon className="h-3.5 w-3.5 flex-shrink-0 text-[var(--ink3)]" />
-                          ) : (
-                            <ChevronDownIcon className="h-3.5 w-3.5 flex-shrink-0 text-[var(--ink3)]" />
-                          )}
+                          <Chevron open={expanded.has(lane.name)} />
                           <span className="h-2.5 w-2.5 flex-shrink-0 rounded-sm" style={{ background: lane.color }} />
                           <span className="overflow-hidden text-ellipsis whitespace-nowrap">
                             {lane.name}
                           </span>
                           <span className="flex-shrink-0 text-[10.5px] text-[var(--ink3)]">
-                            {lane.tasks.length}
+                            {catCount(lane)}
                           </span>
                         </button>
                       }
                       months={lane.months}
                       color={lane.color}
                       currentMonth={currentMonth}
-                      bold
+                      tier="cat"
                     />
                     {expanded.has(lane.name) &&
-                      lane.tasks.map((t, i) => (
-                        <LaneRow
-                          key={`${t.key}-${i}`}
-                          label={
-                            <div className="flex items-center gap-1.5 overflow-hidden pl-5 text-[11.5px] text-[var(--ink2)]">
-                              <span className="flex-shrink-0 font-medium text-[var(--ink3)]">
-                                {t.key}
-                              </span>
-                              <span className="overflow-hidden text-ellipsis whitespace-nowrap">
-                                {t.title}
-                              </span>
-                            </div>
-                          }
-                          months={t.months}
-                          color={lane.color}
-                          currentMonth={currentMonth}
-                        />
-                      ))}
+                      (subCol
+                        ? lane.subs.map((sub) => {
+                            const subKey = lane.name + SEP + sub.name
+                            return (
+                              <div key={subKey}>
+                                {/* 中分類 sub-lane */}
+                                <LaneRow
+                                  label={
+                                    <button
+                                      type="button"
+                                      onClick={() => toggle(subKey)}
+                                      className="flex w-full items-center gap-1 overflow-hidden pl-4 text-left text-[12px] text-[var(--ink2)] hover:text-[var(--green-d)]"
+                                      title="クリックでタスクを表示"
+                                    >
+                                      <Chevron open={expanded.has(subKey)} />
+                                      <span className="overflow-hidden text-ellipsis whitespace-nowrap">
+                                        {sub.name}
+                                      </span>
+                                      <span className="flex-shrink-0 text-[10.5px] text-[var(--ink3)]">
+                                        {sub.tasks.length}
+                                      </span>
+                                    </button>
+                                  }
+                                  months={sub.months}
+                                  color={lane.color}
+                                  currentMonth={currentMonth}
+                                  tier="sub"
+                                />
+                                {expanded.has(subKey) &&
+                                  sub.tasks.map((t, i) => (
+                                    <LaneRow
+                                      key={`${t.key}-${i}`}
+                                      label={<TaskLabel t={t} pad="pl-9" />}
+                                      months={t.months}
+                                      color={lane.color}
+                                      currentMonth={currentMonth}
+                                      tier="task"
+                                    />
+                                  ))}
+                              </div>
+                            )
+                          })
+                        : lane.tasks.map((t, i) => (
+                            <LaneRow
+                              key={`${t.key}-${i}`}
+                              label={<TaskLabel t={t} pad="pl-5" />}
+                              months={t.months}
+                              color={lane.color}
+                              currentMonth={currentMonth}
+                              tier="task"
+                            />
+                          )))}
                   </div>
                 ))}
               </div>
@@ -343,9 +446,9 @@ export function AnnualPlanPage() {
         </Card>
 
         <p className="px-1 text-[11.5px] text-[var(--ink3)]">
-          各カテゴリの帯＝そのカテゴリに属するタスク（子タスク含む）が動く月。
-          予定/実績の入っている週から算出（数値は表示しない）。カテゴリ名クリックで
-          個別タスクの内訳を表示。「集約カテゴリ」で集約軸の列を切り替え。
+          帯＝そのカテゴリに属するタスク（子タスク含む）が動く月。予定/実績の入って
+          いる週から算出（数値は表示しない）。大分類クリックで中分類／タスクの内訳を
+          表示。「大分類・中分類」で集約軸の列を切り替え（中分類は任意）。
         </p>
       </div>
     </>
@@ -380,26 +483,48 @@ function cnMonth(isCurrent: boolean): string {
   ].join(' ')
 }
 
-/** One swimlane row: a label cell + a 12-month track with rounded activity bars. */
+function Chevron({ open }: { open: boolean }) {
+  return open ? (
+    <ChevronUpIcon className="h-3.5 w-3.5 flex-shrink-0 text-[var(--ink3)]" />
+  ) : (
+    <ChevronDownIcon className="h-3.5 w-3.5 flex-shrink-0 text-[var(--ink3)]" />
+  )
+}
+
+function TaskLabel({ t, pad }: { t: TaskLane; pad: string }) {
+  return (
+    <div
+      className={`flex items-center gap-1.5 overflow-hidden ${pad} text-[11.5px] text-[var(--ink2)]`}
+    >
+      <span className="flex-shrink-0 font-medium text-[var(--ink3)]">{t.key}</span>
+      <span className="overflow-hidden text-ellipsis whitespace-nowrap">{t.title}</span>
+    </div>
+  )
+}
+
+/** One swimlane row: a label cell + a 12-month track with rounded activity bars.
+ *  tier controls bar weight/indent: 大(cat) > 中(sub) > タスク(task). */
 function LaneRow({
   label,
   months,
   color,
   currentMonth,
-  bold,
+  tier,
 }: {
   label: React.ReactNode
   months: boolean[]
   color: string
   currentMonth: number
-  bold?: boolean
+  tier: 'cat' | 'sub' | 'task'
 }) {
   const runs = runsOf(months)
+  const barH = tier === 'cat' ? 13 : tier === 'sub' ? 11 : 9
+  const barOpacity = tier === 'cat' ? 1 : tier === 'sub' ? 0.82 : 0.5
   return (
     <div
       className={[
         'flex items-stretch border-b border-[var(--line2)]',
-        bold ? 'bg-[var(--surface)]' : 'bg-[#FCFBF7]',
+        tier === 'cat' ? 'bg-[var(--surface)]' : 'bg-[#FCFBF7]',
       ].join(' ')}
     >
       <div className="flex w-[200px] flex-shrink-0 items-center px-3 py-2">{label}</div>
@@ -428,9 +553,9 @@ function LaneRow({
             style={{
               left: `calc(${(s / 12) * 100}% + 3px)`,
               width: `calc(${((e - s + 1) / 12) * 100}% - 6px)`,
-              height: bold ? 13 : 9,
+              height: barH,
               background: color,
-              opacity: bold ? 1 : 0.6,
+              opacity: barOpacity,
             }}
             title={`${MONTHS[s]}月〜${MONTHS[e]}月`}
           />

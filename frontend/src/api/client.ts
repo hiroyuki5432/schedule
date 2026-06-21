@@ -105,7 +105,13 @@ export const createChildRow = (
 
 export const updateRow = (
   id: string,
-  body: { data: Row['data']; version: number; key_value?: string },
+  body: {
+    data: Row['data']
+    version: number
+    key_value?: string
+    progress?: number | null
+    depends_on?: string[]
+  },
 ) => http.patch<Row>(`/api/rows/${id}`, body)
 
 export const deleteRow = (id: string) => http.del<void>(`/api/rows/${id}`)

@@ -10,6 +10,7 @@ import { GanttGrid } from '@/components/schedule/GanttGrid'
 import type { WeekEdit } from '@/components/schedule/GanttGrid'
 import { Legend } from '@/components/schedule/Legend'
 import { MilestoneEditor } from '@/components/schedule/MilestoneEditor'
+import { DependencyEditor } from '@/components/schedule/DependencyEditor'
 import { Button } from '@/components/ui/Button'
 import { Avatar } from '@/components/ui/Avatar'
 import { Input } from '@/components/ui/Input'
@@ -56,6 +57,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const [extraAfter, setExtraAfter] = useState(0)
   const RANGE_STEP = 26 // ~half a year per click
   const [milestoneRow, setMilestoneRow] = useState<Row | null>(null)
+  const [depRow, setDepRow] = useState<Row | null>(null)
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS)
   const [showFilter, setShowFilter] = useState(false)
 
@@ -186,6 +188,16 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   function saveRowKey(row: Row, key: string) {
     rowMut.mutate({ row, patch: {}, keyValue: key })
   }
+
+  function saveProgress(row: Row, value: number | null) {
+    rowMut.mutate({ row, patch: {}, progress: value })
+  }
+
+  // Candidate predecessor tasks for the dependency picker.
+  const depCandidates = useMemo(
+    () => grid.rows.map((r) => ({ id: r.row.id, key_value: r.keyValue, title: r.title })),
+    [grid.rows],
+  )
 
   function newRow() {
     api
@@ -391,6 +403,8 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             onEditRowKey={saveRowKey}
             onEditMilestones={setMilestoneRow}
             onAddChild={addChild}
+            onEditProgress={saveProgress}
+            onEditDeps={setDepRow}
             onDeleteRow={deleteRow}
           />
         )}
@@ -404,6 +418,15 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           row={milestoneRow}
           defaults={defaultMilestones}
           onClose={() => setMilestoneRow(null)}
+        />
+      )}
+
+      {depRow && (
+        <DependencyEditor
+          row={depRow}
+          candidates={depCandidates}
+          sheetId={sheetId}
+          onClose={() => setDepRow(null)}
         />
       )}
     </>

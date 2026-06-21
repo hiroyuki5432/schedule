@@ -155,6 +155,13 @@ def update_row(
     if payload.key_value is not None and payload.key_value != row.key_value:
         row.key_value = payload.key_value
     row.data = payload.data
+    # progress / depends_on are applied only when present in the body (so a normal
+    # data edit never clears them); an explicit null clears progress.
+    fields = payload.model_dump(exclude_unset=True)
+    if "progress" in fields:
+        row.progress = payload.progress
+    if "depends_on" in fields:
+        row.depends_on = payload.depends_on or []
     row.version = row.version + 1
     row.updated_by = user.id
     try:

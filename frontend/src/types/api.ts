@@ -134,6 +134,10 @@ export interface Row {
   key_value: string
   data: Record<string, CellValue>
   version: number
+  /** Manual progress 0-100 (手入力進捗%); null if unset. */
+  progress: number | null
+  /** Predecessor task ids (先行タスク). */
+  depends_on: string[]
 }
 
 export interface SheetDetail {
