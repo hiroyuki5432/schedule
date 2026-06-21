@@ -18,6 +18,7 @@ import type {
   SnapshotResult,
   TaskOption,
   User,
+  UserDayWorkLog,
   WorkLog,
   WorkLogInput,
 } from '@/types/api'
@@ -173,6 +174,10 @@ export const getWorkLogs = (params?: { from?: string; to?: string; userId?: stri
 
 // Tasks the current user is assigned to (across all sheets) for the picker.
 export const getMyTasks = () => http.get<TaskOption[]>('/api/worklog/tasks')
+
+// Every member's work logs for one day (みんなの入力一覧).
+export const getAllUsersWorklog = (date: string) =>
+  http.get<UserDayWorkLog[]>(`/api/worklog/all?date=${date}`)
 
 export const createWorkLog = (body: WorkLogInput) => http.post<WorkLog>('/api/worklog', body)
 

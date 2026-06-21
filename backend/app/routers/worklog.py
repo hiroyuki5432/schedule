@@ -11,7 +11,13 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps import get_row_for_user
 from app.models import Column, Row, Sheet, User, WorkLog
-from app.schemas import TaskOption, WorkLogCreate, WorkLogOut, WorkLogUpdate
+from app.schemas import (
+    TaskOption,
+    UserDayWorkLog,
+    WorkLogCreate,
+    WorkLogOut,
+    WorkLogUpdate,
+)
 from app.security import current_user
 from app.weeks import current_week_start
 from app.worklog_service import org_week_start_weekday, recompute_actual, week_start_for
@@ -76,6 +82,50 @@ def my_tasks(
                     sheet_name=sheet.name,
                 )
             )
+    return out
+
+
+@router.get("/all", response_model=list[UserDayWorkLog])
+def all_users_day(
+    date_: date = Query(alias="date"),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[UserDayWorkLog]:
+    """Every org member's work logs for one day, grouped by member with totals
+    (みんなの入力一覧). Read-only team view; members with no input are included."""
+    members = list(
+        db.execute(
+            select(User).where(User.org_id == user.org_id).order_by(User.id)
+        ).scalars()
+    )
+    logs = list(
+        db.execute(
+            select(WorkLog)
+            .where(WorkLog.org_id == user.org_id, WorkLog.work_date == date_)
+            .order_by(WorkLog.user_id, WorkLog.id)
+        ).scalars()
+    )
+    row_ids = {wl.row_id for wl in logs if wl.row_id is not None}
+    rows: dict[int, Row] = {}
+    if row_ids:
+        for r in db.execute(select(Row).where(Row.id.in_(row_ids))).scalars():
+            rows[r.id] = r
+
+    by_user: dict[int, list[WorkLog]] = {}
+    for wl in logs:
+        by_user.setdefault(wl.user_id, []).append(wl)
+
+    out: list[UserDayWorkLog] = []
+    for m in members:
+        ulogs = by_user.get(m.id, [])
+        out.append(
+            UserDayWorkLog(
+                user_id=m.id,
+                user_name=m.name,
+                total_hours=float(sum(float(wl.hours) for wl in ulogs)),
+                logs=[_to_out(wl, rows.get(wl.row_id) if wl.row_id else None) for wl in ulogs],
+            )
+        )
     return out
 
 

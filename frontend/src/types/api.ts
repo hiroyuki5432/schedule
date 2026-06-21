@@ -57,6 +57,10 @@ export interface SheetSettings {
   pinned_columns_narrow?: number
   /** Default milestones (phases) a row starts from / picks colors from. */
   default_milestones?: DefaultMilestone[]
+  /** Column ids offered as filters in the schedule 絞り込み panel. */
+  filter_columns?: string[]
+  /** When true, the manual progress column resets weekly. */
+  progress_weekly_reset?: boolean
   [k: string]: unknown
 }
 
@@ -103,6 +107,8 @@ export interface ColumnConfig {
   rules?: StatusRule[]
   /** status: when true, the badge is auto-derived from the row's milestones. */
   auto_from_milestones?: boolean
+  /** When true, this column's value resets each week (週次リセット). */
+  weekly_reset?: boolean
   // lookup. Each of local_key/match/return may be the literal "__id__"
   // (meaning the row's key_value) or a column id.
   target_sheet_id?: string
@@ -136,6 +142,8 @@ export interface Row {
   version: number
   /** Manual progress 0-100 (手入力進捗%); null if unset. */
   progress: number | null
+  /** Week (YYYY-MM-DD) the current progress applies to (weekly reset). */
+  progress_week: string | null
   /** Predecessor task ids (先行タスク). */
   depends_on: string[]
 }
@@ -219,4 +227,12 @@ export interface TaskOption {
   title: string
   sheet_id: string
   sheet_name: string
+}
+
+/** One member's work logs for a day (みんなの入力一覧). */
+export interface UserDayWorkLog {
+  user_id: string
+  user_name: string
+  total_hours: number
+  logs: WorkLog[]
 }
