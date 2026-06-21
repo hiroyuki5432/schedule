@@ -42,6 +42,14 @@ export interface ScheduleRowModel {
   status: StatusBadge | null
   milestones: Milestone[]
   gantt: RowGantt
+  /** Parent task id (子タスクのとき); null for top-level tasks. */
+  parentRowId: string | null
+  /** True when this top-level task has subtasks — its gantt is their roll-up. */
+  hasChildren: boolean
+  /** Number of direct subtasks. */
+  childCount: number
+  /** 0 = top-level task, 1 = subtask (one level of nesting). */
+  depth: number
 }
 
 export interface ScheduleData {
@@ -111,9 +119,13 @@ function aggregateRowToMonths(g: RowGantt, cols: MonthCol[]): RowGantt {
     let color = ''
     let label = ''
     let marker = false
+    let markerActual = false
     let markerDone = false
     let late = false
     let changed = false
+    let msPlannedDate: string | null = null
+    let msActualDate: string | null = null
+    let msDelayDays: number | null = null
     for (const k of col.weekIdxs) {
       const c = g.cells[k]
       if (!c) continue
@@ -124,28 +136,36 @@ function aggregateRowToMonths(g: RowGantt, cols: MonthCol[]): RowGantt {
         color = c.color
         label = c.phaseLabel
       }
-      if (c.milestoneMarker && !marker) {
-        marker = true
+      if ((c.milestoneMarker || c.milestoneActual) && msPlannedDate === null && msActualDate === null) {
         markerDone = c.milestoneDone
+        msPlannedDate = c.msPlannedDate
+        msActualDate = c.msActualDate
+        msDelayDays = c.msDelayDays
         if (!label) label = c.phaseLabel
       }
+      if (c.milestoneMarker) marker = true
+      if (c.milestoneActual) markerActual = true
       if (c.late) late = true
       if (c.changed) changed = true
     }
-    if (hours <= 0 && !marker) return null
+    if (hours <= 0 && !marker && !markerActual) return null
     return {
       hours,
       color,
       milestoneMarker: marker,
+      milestoneActual: markerActual,
       milestoneDone: markerDone,
       phaseLabel: label,
       changed,
       late,
       planned,
       actual,
+      msPlannedDate,
+      msActualDate,
+      msDelayDays,
     }
   })
-  return { cells, plannedSum: g.plannedSum }
+  return { cells, plannedSum: g.plannedSum, actualSum: g.actualSum }
 }
 
 function pickColumn(columns: Column[], type: Column['type']): Column | undefined {
@@ -170,6 +190,42 @@ function plannedOf(e: Effort | undefined): number {
   if (v == null) return 0
   const n = typeof v === 'number' ? v : Number(v)
   return Number.isFinite(n) ? n : 0
+}
+
+function numOf(v: number | string | null | undefined): number {
+  if (v == null) return 0
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+
+/** Roll a parent task's weekly effort up from its subtasks: per week, the sum of
+ *  all children's planned/actual. The parent itself holds no own effort, so this
+ *  is the "上位ではまとめた工数" view (子の合算). */
+function aggregateChildEffort(
+  childRows: Row[],
+  effortByRow: Map<string, Map<string, Effort>>,
+): Map<string, Effort> {
+  const acc = new Map<string, { planned: number; actual: number }>()
+  for (const c of childRows) {
+    const m = effortByRow.get(c.id)
+    if (!m) continue
+    for (const [wk, e] of m) {
+      const cur = acc.get(wk) ?? { planned: 0, actual: 0 }
+      cur.planned += numOf(e.planned_hours)
+      cur.actual += numOf(e.actual_hours)
+      acc.set(wk, cur)
+    }
+  }
+  const out = new Map<string, Effort>()
+  for (const [wk, v] of acc) {
+    out.set(wk, {
+      row_id: '',
+      week_start: wk,
+      planned_hours: v.planned || null,
+      actual_hours: v.actual || null,
+    })
+  }
+  return out
 }
 
 /**
@@ -294,6 +350,17 @@ export function useScheduleData({
       m.set(e.week_start, e)
     }
 
+    // Subtask tree: group children under their parent (one level of nesting).
+    const childrenByParent = new Map<string, Row[]>()
+    for (const r of sheetRows) {
+      if (r.parent_row_id != null) {
+        const pid = String(r.parent_row_id)
+        const arr = childrenByParent.get(pid) ?? []
+        arr.push(r)
+        childrenByParent.set(pid, arr)
+      }
+    }
+
     // Default milestone colors by phase name (per sheet). The gantt bar color is
     // derived from the matching default — per-row colors are no longer set.
     const defaultColorByName = new Map<string, string>(
@@ -323,13 +390,22 @@ export function useScheduleData({
         ...m,
         color: defaultColorByName.get(m.name) ?? m.color,
       }))
-      const effortByWeek = effortByRow.get(row.id) ?? new Map<string, Effort>()
+
+      // A parent task's effort is the roll-up of its subtasks (read-only); a
+      // leaf task (childless, incl. subtasks) uses its own weekly effort.
+      const childRows = childrenByParent.get(String(row.id)) ?? []
+      const hasChildren = childRows.length > 0
+      const effortByWeek = hasChildren
+        ? aggregateChildEffort(childRows, effortByRow)
+        : effortByRow.get(row.id) ?? new Map<string, Effort>()
 
       // Change points: a week whose planned hours differ from this week's
-      // snapshot baseline (= changed since the start of this week).
-      const changedWeekIdx = asOfWeek
-        ? new Set<number>()
-        : changedVsBaseline(weeks, effortByWeek, baselineByRow.get(row.id))
+      // snapshot baseline (= changed since the start of this week). Roll-up
+      // parents don't highlight change points (the breakdown lives on children).
+      const changedWeekIdx =
+        asOfWeek || hasChildren
+          ? new Set<number>()
+          : changedVsBaseline(weeks, effortByWeek, baselineByRow.get(row.id))
 
       const gantt = buildRowGantt({
         weeks,
@@ -366,6 +442,10 @@ export function useScheduleData({
         status,
         milestones: ms,
         gantt,
+        parentRowId: row.parent_row_id != null ? String(row.parent_row_id) : null,
+        hasChildren,
+        childCount: childRows.length,
+        depth: row.parent_row_id != null ? 1 : 0,
       }
     })
 

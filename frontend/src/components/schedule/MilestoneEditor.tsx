@@ -35,6 +35,14 @@ interface Draft {
   name: string
   boundary_date: string
   done: boolean
+  actual_date: string | null
+}
+
+/** Whole days from planned boundary to actual (+ = late). Null if either missing. */
+function delayDays(boundary: string, actual: string | null): number | null {
+  if (!actual || !boundary) return null
+  const ms = new Date(actual).getTime() - new Date(boundary).getTime()
+  return Math.round(ms / (24 * 60 * 60 * 1000))
 }
 
 interface Props {
@@ -77,6 +85,7 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
         name: m.name,
         boundary_date: m.boundary_date,
         done: !!m.done,
+        actual_date: m.actual_date ?? null,
       }))
     }
     // No milestones yet: prefill from the default phases (staggered ~4 weeks
@@ -86,6 +95,7 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
       name: p.name,
       boundary_date: todayPlusDaysISO(i * 28),
       done: false,
+      actual_date: null,
     }))
   }, [drafts, msQ.data, phases])
 
@@ -103,6 +113,7 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
         color: colorFor(d.name), // inherited from the default phase of this name
         order: i,
         done: d.done,
+        actual_date: d.done ? d.actual_date : null,
       }))
       return api.putMilestones(rowId, payload)
     },
@@ -121,6 +132,7 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
         name: next?.name ?? '',
         boundary_date: todayPlusDaysISO(items.length * 28),
         done: false,
+        actual_date: null,
       },
     ])
   }
@@ -151,7 +163,8 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
       ) : (
         <>
           <p className="mb-2.5 text-[12px] text-[var(--ink3)]">
-            各フェーズの開始日（境界）と達成を設定します。色は設定画面の「既定マイルストン」から名前で引き継ぎます。
+            各フェーズの開始日（境界＝予定）と達成を設定します。達成にすると実績完了日を入力でき、予定との
+            遅延日数が出ます。色は設定画面の「既定マイルストン」から名前で引き継ぎます。
           </p>
           <div className="flex flex-col gap-2.5">
             {items.length === 0 && (
@@ -238,11 +251,41 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
                     checked={d.done}
                     onChange={(e) =>
                       update(
-                        items.map((x, j) => (j === i ? { ...x, done: e.target.checked } : x)),
+                        items.map((x, j) =>
+                          j === i
+                            ? {
+                                ...x,
+                                done: e.target.checked,
+                                // Default the actual date to today on first check;
+                                // clear it when unchecking.
+                                actual_date: e.target.checked
+                                  ? x.actual_date ?? todayPlusDaysISO(0)
+                                  : null,
+                              }
+                            : x,
+                        ),
                       )
                     }
                   />
                 </label>
+                {d.done && (
+                  <label className="flex flex-col gap-1 text-[11px] text-[var(--ink3)]">
+                    実績完了日
+                    <Input
+                      type="date"
+                      className="w-[150px]"
+                      value={d.actual_date ?? ''}
+                      onChange={(e) =>
+                        update(
+                          items.map((x, j) =>
+                            j === i ? { ...x, actual_date: e.target.value || null } : x,
+                          ),
+                        )
+                      }
+                    />
+                    <DelayBadge boundary={d.boundary_date} actual={d.actual_date} />
+                  </label>
+                )}
                 <button
                   className="rounded p-1 pb-2 text-[var(--ink3)] hover:bg-[#FAE6E0] hover:text-[#A8442B]"
                   onClick={() => update(items.filter((_, j) => j !== i))}
@@ -273,5 +316,17 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
         </>
       )}
     </Modal>
+  )
+}
+
+/** Small colored 遅延/前倒し label from planned vs actual dates. */
+function DelayBadge({ boundary, actual }: { boundary: string; actual: string | null }) {
+  const d = delayDays(boundary, actual)
+  if (d == null) return null
+  const text = d > 0 ? `${d}日 遅れ` : d < 0 ? `${-d}日 前倒し` : '予定通り'
+  return (
+    <span className="text-[10.5px]" style={{ color: d > 0 ? '#A8442B' : '#266B53' }}>
+      {text}
+    </span>
   )
 }

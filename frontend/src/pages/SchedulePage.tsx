@@ -117,7 +117,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const visibleRows = useMemo(() => {
     if (!filtersActive) return grid.rows
     const q = filters.text.trim().toLowerCase()
-    return grid.rows.filter((r) => {
+    const match = (r: (typeof grid.rows)[number]) => {
       if (filters.assigneeId && String(r.assigneeId ?? '') !== filters.assigneeId)
         return false
       if (filters.status && (r.status?.label ?? '') !== filters.status) return false
@@ -126,7 +126,19 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
         if (!hay.includes(q)) return false
       }
       return true
-    })
+    }
+    // Keep parent/child integrity: include a matched row, plus its parent (so a
+    // matched subtask keeps its context) and — when a parent matches — its
+    // subtasks (so the roll-up stays meaningful).
+    const matched = new Set<string>()
+    for (const r of grid.rows) if (match(r)) matched.add(String(r.row.id))
+    const show = new Set<string>(matched)
+    for (const r of grid.rows) {
+      const id = String(r.row.id)
+      if (matched.has(id) && r.parentRowId) show.add(r.parentRowId)
+      if (r.parentRowId && matched.has(r.parentRowId)) show.add(id)
+    }
+    return grid.rows.filter((r) => show.has(String(r.row.id)))
   }, [grid.rows, filters, filtersActive])
 
   function stepBack() {
@@ -184,8 +196,30 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
       })
   }
 
+  function addChild(parentRow: Row) {
+    // Inherit the parent's assignee so the subtask appears in that member's
+    // 実績入力 picker right away (実績も入れれるように).
+    const memberCol = grid.columns.find((c) => c.type === 'member')
+    const data: Record<string, CellValue> = {}
+    if (memberCol && parentRow.data[memberCol.id] != null)
+      data[memberCol.id] = parentRow.data[memberCol.id]
+    api
+      .createChildRow(parentRow.id, { data })
+      .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
+      .catch(() => {
+        /* TODO: toast on failure */
+      })
+  }
+
   function deleteRow(row: Row) {
-    if (!confirm(`行「${row.key_value}」を削除しますか？`)) return
+    const childCount = grid.rows.filter(
+      (r) => r.parentRowId === String(row.id),
+    ).length
+    const msg =
+      childCount > 0
+        ? `行「${row.key_value}」と子タスク${childCount}件を削除しますか？`
+        : `行「${row.key_value}」を削除しますか？`
+    if (!confirm(msg)) return
     api
       .deleteRow(row.id)
       .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
@@ -356,6 +390,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             onEditRowCell={saveRowCell}
             onEditRowKey={saveRowKey}
             onEditMilestones={setMilestoneRow}
+            onAddChild={addChild}
             onDeleteRow={deleteRow}
           />
         )}

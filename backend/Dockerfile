@@ -17,6 +17,12 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
+RUN chmod +x /app/entrypoint.sh
+
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# entrypoint.sh stamps pre-Alembic DBs, runs `alembic upgrade head`, then execs
+# the CMD below. docker-compose.yml (dev) overrides CMD with uvicorn --reload —
+# it still goes through the entrypoint, so dev gets migrations too.
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
