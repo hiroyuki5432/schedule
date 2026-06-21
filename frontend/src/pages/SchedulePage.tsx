@@ -112,11 +112,24 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const resolveColValue = useCallback(
     (r: (typeof grid.rows)[number], col: Column): string => {
       if (col.type === 'member') return memberName.get(String(r.row.data[col.id] ?? '')) ?? ''
-      if (col.type === 'status') return r.status?.label ?? ''
+      if (col.type === 'status') {
+        // Match the grid display: auto-status shows the derived badge, otherwise
+        // the stored value wins (falling back to the derived status badge).
+        if (col.config?.auto_from_milestones) return r.status?.label ?? ''
+        const stored = r.row.data[col.id]
+        if (stored != null && stored !== '') return String(stored)
+        return r.status?.label ?? ''
+      }
       const v = r.row.data[col.id]
       return v == null ? '' : String(v)
     },
     [memberName],
+  )
+
+  // Status columns — for the 完了を隠す toggle.
+  const statusCols = useMemo(
+    () => grid.columns.filter((c) => c.type === 'status'),
+    [grid.columns],
   )
 
   // Columns offered in the 絞り込み panel (configured in sheet settings; default
@@ -145,7 +158,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
         const col = colById.get(String(colId))
         if (col && resolveColValue(r, col) !== val) return false
       }
-      if (hideDone && r.status?.label === '完了') return false
+      if (hideDone && statusCols.some((c) => resolveColValue(r, c) === '完了')) return false
       if (thisWeekOnly) {
         if (r.startIdx == null || r.finishIdx == null) return false
         if (currentWeekIdx < r.startIdx || currentWeekIdx > r.finishIdx) return false
@@ -178,6 +191,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     filtersActive,
     currentWeekIdx,
     resolveColValue,
+    statusCols,
   ])
 
   function stepBack() {

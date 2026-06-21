@@ -76,9 +76,9 @@ export function AllUsersWorklogPage() {
               <table className="w-full border-collapse text-[12.5px]">
                 <thead>
                   <tr className="border-b border-[var(--line)] text-left text-[var(--ink3)]">
+                    <th className="px-4 py-2.5 font-medium">タスク</th>
                     <th className="px-4 py-2.5 font-medium">大分類</th>
                     <th className="px-4 py-2.5 font-medium">中分類</th>
-                    <th className="px-4 py-2.5 font-medium">タスク</th>
                     <th className="px-4 py-2.5 font-medium">メモ・詳細</th>
                     <th className="px-4 py-2.5 text-right font-medium">時間(h)</th>
                   </tr>
@@ -117,9 +117,9 @@ function UserGroup({ user }: { user: UserDayWorkLog }) {
       </tr>
       {user.logs.map((l) => (
         <tr key={l.id} className="border-b border-[var(--line2)]">
+          <td className="px-4 py-2 text-[var(--ink3)]">{l.row_key_value ?? ''}</td>
           <td className="px-4 py-2 text-[var(--ink2)]">{l.cat1 ?? ''}</td>
           <td className="px-4 py-2 text-[var(--ink2)]">{l.cat2 ?? ''}</td>
-          <td className="px-4 py-2 text-[var(--ink3)]">{l.row_key_value ?? ''}</td>
           <td className="px-4 py-2">{l.memo ?? ''}</td>
           <td className="px-4 py-2 text-right">{round1(l.hours)}</td>
         </tr>
