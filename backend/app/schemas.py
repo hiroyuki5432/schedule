@@ -41,6 +41,13 @@ class OrgOut(BaseModel):
     settings: dict[str, Any]
 
 
+class OrgUpdate(BaseModel):
+    name: Optional[str] = None
+    # Shallow-merged into the existing settings (top-level keys), so updating
+    # `worklog` masters never clobbers `week_start_weekday`.
+    settings: Optional[dict[str, Any]] = None
+
+
 # ---------------------------------------------------------------------------
 # Members
 # ---------------------------------------------------------------------------
@@ -140,9 +147,17 @@ class RowOut(BaseModel):
 
     id: int
     sheet_id: int
+    # Parent task id for a subtask (子タスク); null for top-level tasks.
+    parent_row_id: Optional[int] = None
     key_value: Optional[str] = None
     data: dict[str, Any]
     version: int
+    # Manual progress 0-100 (手入力進捗%); null if unset.
+    progress: Optional[int] = None
+    # Week (week_start) the current progress applies to.
+    progress_week: Optional[date] = None
+    # Predecessor task ids (先行タスク).
+    depends_on: list[int] = Field(default_factory=list)
 
 
 class RowCreate(BaseModel):
@@ -154,6 +169,9 @@ class RowUpdate(BaseModel):
     data: dict[str, Any]
     version: int
     key_value: Optional[str] = None
+    # Optional: only applied when present in the request body.
+    progress: Optional[int] = None
+    depends_on: Optional[list[int]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +206,7 @@ class MilestoneOut(BaseModel):
     color: Optional[str] = None
     order: int
     done: bool = False
+    actual_date: Optional[date] = None
 
 
 class MilestoneIn(BaseModel):
@@ -196,6 +215,7 @@ class MilestoneIn(BaseModel):
     color: Optional[str] = None
     order: int = 0
     done: bool = False
+    actual_date: Optional[date] = None
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +241,58 @@ class AggregateRow(BaseModel):
     planned_sum: float
     actual_sum: float
     count: int
+
+
+# ---------------------------------------------------------------------------
+# Work logs (日報)
+# ---------------------------------------------------------------------------
+class WorkLogOut(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    work_date: date
+    row_id: Optional[int] = None
+    # Resolved for display (the linked task); null if unlinked or deleted.
+    row_key_value: Optional[str] = None
+    sheet_id: Optional[int] = None
+    cat1: Optional[str] = None
+    cat2: Optional[str] = None
+    memo: Optional[str] = None
+    hours: float
+
+
+class WorkLogCreate(BaseModel):
+    work_date: date
+    row_id: Optional[int] = None
+    cat1: Optional[str] = None
+    cat2: Optional[str] = None
+    memo: Optional[str] = None
+    hours: float
+
+
+class WorkLogUpdate(BaseModel):
+    work_date: Optional[date] = None
+    row_id: Optional[int] = None
+    cat1: Optional[str] = None
+    cat2: Optional[str] = None
+    memo: Optional[str] = None
+    hours: Optional[float] = None
+
+
+class TaskOption(BaseModel):
+    """A task (row) the current user is assigned to — for the 実績入力 picker."""
+    row_id: int
+    key_value: Optional[str] = None
+    title: str
+    sheet_id: int
+    sheet_name: str
+
+
+class UserDayWorkLog(BaseModel):
+    """One member's work logs for a day (みんなの入力一覧)."""
+    user_id: int
+    user_name: str
+    total_hours: float
+    logs: list[WorkLogOut]
 
 
 SheetDetailOut.model_rebuild()

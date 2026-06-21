@@ -10,8 +10,23 @@ export interface User {
   org_id: string
 }
 
+/** A node in the 実績入力 category master (大分類→中分類). */
+export interface WorkLogCategoryNode {
+  name: string
+  children?: WorkLogCategoryNode[]
+}
+
+/** Org-level 実績入力 master: 2-level cascading categories (大→中) + a shared note. */
+export interface WorkLogMaster {
+  categories?: WorkLogCategoryNode[]
+  /** Free-text 記載ルール shown at the bottom of 実績入力 for everyone. */
+  note?: string
+}
+
 export interface OrgSettings {
   week_start_weekday?: number // 1..7, default 1 (Mon)
+  /** Daily work-log masters (categories + properties). */
+  worklog?: WorkLogMaster
   [k: string]: unknown
 }
 
@@ -42,6 +57,10 @@ export interface SheetSettings {
   pinned_columns_narrow?: number
   /** Default milestones (phases) a row starts from / picks colors from. */
   default_milestones?: DefaultMilestone[]
+  /** Column ids offered as filters in the schedule 絞り込み panel. */
+  filter_columns?: string[]
+  /** When true, the manual progress column resets weekly. */
+  progress_weekly_reset?: boolean
   [k: string]: unknown
 }
 
@@ -88,6 +107,8 @@ export interface ColumnConfig {
   rules?: StatusRule[]
   /** status: when true, the badge is auto-derived from the row's milestones. */
   auto_from_milestones?: boolean
+  /** When true, this column's value resets each week (週次リセット). */
+  weekly_reset?: boolean
   // lookup. Each of local_key/match/return may be the literal "__id__"
   // (meaning the row's key_value) or a column id.
   target_sheet_id?: string
@@ -114,9 +135,17 @@ export type CellValue = string | number | boolean | null
 export interface Row {
   id: string
   sheet_id: string
+  /** Parent task id for a subtask (子タスク); null for top-level tasks. */
+  parent_row_id: string | null
   key_value: string
   data: Record<string, CellValue>
   version: number
+  /** Manual progress 0-100 (手入力進捗%); null if unset. */
+  progress: number | null
+  /** Week (YYYY-MM-DD) the current progress applies to (weekly reset). */
+  progress_week: string | null
+  /** Predecessor task ids (先行タスク). */
+  depends_on: string[]
 }
 
 export interface SheetDetail {
@@ -137,11 +166,13 @@ export interface Milestone {
   id: string
   row_id: string
   name: string
-  boundary_date: string // YYYY-MM-DD
+  boundary_date: string // YYYY-MM-DD (planned boundary)
   color: string
   order: number
   /** Whether this milestone (phase boundary) has been achieved. */
   done: boolean
+  /** Actual completion date (YYYY-MM-DD), or null. Compared to boundary_date. */
+  actual_date: string | null
 }
 
 export interface SnapshotResult {
@@ -161,4 +192,47 @@ export interface AggregateRow {
   planned_sum: number
   actual_sum: number
   count: number
+}
+
+/** A work-log line (実績入力). Hours roll up into the task's weekly actual. */
+export interface WorkLog {
+  id: string
+  user_id: string | null
+  work_date: string // YYYY-MM-DD
+  row_id: string | null
+  /** Resolved label of the linked task (read-only, from the server). */
+  row_key_value: string | null
+  sheet_id: string | null
+  cat1: string | null
+  cat2: string | null
+  memo: string | null
+  hours: number
+}
+
+// `type` (not `interface`) so it gets an implicit index signature and is
+// assignable to the http client's JSON body type (Record<string, unknown>).
+export type WorkLogInput = {
+  work_date: string
+  row_id?: string | null
+  cat1?: string | null
+  cat2?: string | null
+  memo?: string | null
+  hours: number
+}
+
+/** A task the current user is assigned to (for the 実績入力 task dropdown). */
+export interface TaskOption {
+  row_id: string
+  key_value: string | null
+  title: string
+  sheet_id: string
+  sheet_name: string
+}
+
+/** One member's work logs for a day (みんなの入力一覧). */
+export interface UserDayWorkLog {
+  user_id: string
+  user_name: string
+  total_hours: number
+  logs: WorkLog[]
 }

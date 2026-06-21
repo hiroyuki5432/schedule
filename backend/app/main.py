@@ -5,11 +5,9 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from sqlalchemy import text
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
-from app.db import Base, engine
 from app.routers import (
     aggregate,
     auth,
@@ -22,6 +20,7 @@ from app.routers import (
     rows,
     sheets,
     snapshots,
+    worklog,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -29,36 +28,6 @@ logger = logging.getLogger("uvicorn.error")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Import models so their tables register on Base.metadata before create_all.
-    from app import models  # noqa: F401
-
-    Base.metadata.create_all(bind=engine)
-
-    # Lightweight in-place migrations for columns added after the initial
-    # create_all (which never ALTERs existing tables). Idempotent.
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "ALTER TABLE row_milestones "
-                    "ADD COLUMN IF NOT EXISTS done boolean NOT NULL DEFAULT false"
-                )
-            )
-            conn.execute(
-                text(
-                    "ALTER TABLE sheets "
-                    "ADD COLUMN IF NOT EXISTS settings jsonb NOT NULL DEFAULT '{}'::jsonb"
-                )
-            )
-            # Allow duplicate key_value within a sheet (reuse the same ID for
-            # repeated work). Drop the legacy uniqueness constraint if present.
-            conn.execute(
-                text("ALTER TABLE rows DROP CONSTRAINT IF EXISTS uq_rows_sheet_key")
-            )
-        logger.info("Schema migration check complete.")
-    except Exception:  # pragma: no cover - migration must never block startup
-        logger.exception("Schema migration failed (continuing startup).")
-
     if settings.SEED_ON_STARTUP:
         try:
             from app.seed import maybe_seed
@@ -91,6 +60,7 @@ app.include_router(milestones.router)
 app.include_router(snapshots.router)
 app.include_router(aggregate.router)
 app.include_router(export.router)
+app.include_router(worklog.router)
 
 
 @app.get("/api/health", tags=["health"])

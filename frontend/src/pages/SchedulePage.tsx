@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useMembers, useWeekStartWeekday } from '@/hooks/useSheets'
 import { useScheduleData } from '@/hooks/useScheduleData'
-import type { ViewMode } from '@/hooks/useScheduleData'
+import type { ScheduleRowModel, ViewMode } from '@/hooks/useScheduleData'
 import { useEffortMutation } from '@/hooks/useEffortMutation'
 import { useRowMutation } from '@/hooks/useRowMutation'
 import * as api from '@/api/client'
@@ -10,15 +10,16 @@ import { GanttGrid } from '@/components/schedule/GanttGrid'
 import type { WeekEdit } from '@/components/schedule/GanttGrid'
 import { Legend } from '@/components/schedule/Legend'
 import { MilestoneEditor } from '@/components/schedule/MilestoneEditor'
+import { DependencyEditor } from '@/components/schedule/DependencyEditor'
 import { Button } from '@/components/ui/Button'
 import { Avatar } from '@/components/ui/Avatar'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
-import { FilterIcon, PlusIcon, XIcon } from '@/components/ui/icons'
+import { FilterIcon, PlusIcon, SearchIcon, XIcon } from '@/components/ui/icons'
 import { useAuth } from '@/hooks/useAuth'
-import { addWeeks, fmtMD, startOfWeek } from '@/lib/dates'
+import { addWeeks, fmtISO, fmtMD, startOfWeek } from '@/lib/dates'
 import { cn } from '@/lib/format'
-import type { CellValue, Row } from '@/types/api'
+import type { CellValue, Column, Row } from '@/types/api'
 
 const VIEW_MODES: Array<{ m: ViewMode; label: string }> = [
   { m: 'week', label: '週' },
@@ -26,13 +27,6 @@ const VIEW_MODES: Array<{ m: ViewMode; label: string }> = [
 ]
 const WEEK_W = 22 // weekly column width (px)
 const MONTH_W = 52 // monthly column width (px)
-
-interface Filters {
-  assigneeId: string
-  status: string
-  text: string
-}
-const EMPTY_FILTERS: Filters = { assigneeId: '', status: '', text: '' }
 
 interface Props {
   sheetId: string
@@ -56,7 +50,15 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const [extraAfter, setExtraAfter] = useState(0)
   const RANGE_STEP = 26 // ~half a year per click
   const [milestoneRow, setMilestoneRow] = useState<Row | null>(null)
-  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS)
+  const [depRow, setDepRow] = useState<Row | null>(null)
+  const [showDepLines, setShowDepLines] = useState(false)
+  // Filters: per-column value filters (configured in settings) + full-text
+  // search + quick toggles (hide-done / this-week-only).
+  const [colFilters, setColFilters] = useState<Record<string, string>>({})
+  const [search, setSearch] = useState('')
+  const [hideDone, setHideDone] = useState(false)
+  const [thisWeekOnly, setThisWeekOnly] = useState(false)
+  const [pinsCollapsed, setPinsCollapsed] = useState(false)
   const [showFilter, setShowFilter] = useState(false)
 
   // As-of stepping is meaningful in week view (column = week); disable in month.
@@ -66,14 +68,10 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     () => startOfWeek(new Date(), weekStartWeekday),
     [weekStartWeekday],
   )
-  const asOfWeekStart = live
-    ? null
-    : addWeeks(
-        `${currentWeekStart.getFullYear()}-${String(
-          currentWeekStart.getMonth() + 1,
-        ).padStart(2, '0')}-${String(currentWeekStart.getDate()).padStart(2, '0')}`,
-        asOfOffset,
-      )
+  const currentWeekIso = fmtISO(currentWeekStart)
+  const asOfWeekStart = live ? null : addWeeks(currentWeekIso, asOfOffset)
+  // Week being viewed (live current week, or as-of week) — for weekly-reset cells.
+  const viewedWeekIso = asOfWeekStart ?? currentWeekIso
 
   const grid = useScheduleData({
     sheetId,
@@ -88,14 +86,17 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const { weeks, currentWeekIdx } = grid
   const lineIndex = live ? currentWeekIdx : Math.max(0, currentWeekIdx + asOfOffset)
 
-  // Sheet-level settings: frozen-column count (2-stage, toggled by a button) +
-  // defaults. The button switches between the configured "通常" and "最小" counts
-  // so the user can collapse the frozen columns to see more of the schedule.
+  // Frozen-column count: 2-stage 通常/最小 (configured on the sheet settings
+  // page; both can extend through the summary columns up to 進捗).
   const sheetSettings = grid.detail?.sheet.settings
-  const pinnedFull = sheetSettings?.pinned_columns ?? 1
-  const pinnedMin = sheetSettings?.pinned_columns_narrow ?? Math.min(1, pinnedFull)
-  const [pinsCollapsed, setPinsCollapsed] = useState(false)
-  const pinnedCount = pinsCollapsed ? pinnedMin : pinnedFull
+  const colCount = grid.columns.length
+  const freezeMax = colCount + 4
+  const pinnedFull = Math.min(sheetSettings?.pinned_columns ?? 1, freezeMax)
+  const pinnedMin = Math.min(
+    sheetSettings?.pinned_columns_narrow ?? Math.min(1, pinnedFull),
+    freezeMax,
+  )
+  const pinnedCount = Math.max(0, pinsCollapsed ? pinnedMin : pinnedFull)
   const defaultMilestones = useMemo(
     () => sheetSettings?.default_milestones ?? [],
     [sheetSettings],
@@ -104,30 +105,94 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const effortMut = useEffortMutation(sheetId)
   const rowMut = useRowMutation(sheetId)
 
-  // Distinct status labels present, for the filter dropdown.
-  const statusOptions = useMemo(() => {
-    const set = new Set<string>()
-    for (const r of grid.rows) if (r.status) set.add(r.status.label)
-    return [...set]
-  }, [grid.rows])
+  const memberName = useMemo(
+    () => new Map(members.map((m) => [String(m.id), m.name])),
+    [members],
+  )
+  const resolveColValue = useCallback(
+    (r: (typeof grid.rows)[number], col: Column): string => {
+      if (col.type === 'member') return memberName.get(String(r.row.data[col.id] ?? '')) ?? ''
+      if (col.type === 'status') {
+        // Match the grid display: auto-status shows the derived badge, otherwise
+        // the stored value wins (falling back to the derived status badge).
+        if (col.config?.auto_from_milestones) return r.status?.label ?? ''
+        const stored = r.row.data[col.id]
+        if (stored != null && stored !== '') return String(stored)
+        return r.status?.label ?? ''
+      }
+      const v = r.row.data[col.id]
+      return v == null ? '' : String(v)
+    },
+    [memberName],
+  )
+
+  // Status columns — for the 完了を隠す toggle.
+  const statusCols = useMemo(
+    () => grid.columns.filter((c) => c.type === 'status'),
+    [grid.columns],
+  )
+
+  // Columns offered in the 絞り込み panel (configured in sheet settings; default
+  // = member + status columns).
+  const filterCols = useMemo(() => {
+    const byId = new Map(grid.columns.map((c) => [String(c.id), c]))
+    const ids = sheetSettings?.filter_columns
+    if (ids && ids.length)
+      return ids.map((id) => byId.get(String(id))).filter(Boolean) as Column[]
+    return grid.columns.filter((c) => c.type === 'member' || c.type === 'status')
+  }, [grid.columns, sheetSettings])
 
   const filtersActive =
-    filters.assigneeId !== '' || filters.status !== '' || filters.text.trim() !== ''
+    search.trim() !== '' ||
+    hideDone ||
+    thisWeekOnly ||
+    Object.values(colFilters).some((v) => v)
 
   const visibleRows = useMemo(() => {
     if (!filtersActive) return grid.rows
-    const q = filters.text.trim().toLowerCase()
-    return grid.rows.filter((r) => {
-      if (filters.assigneeId && String(r.assigneeId ?? '') !== filters.assigneeId)
-        return false
-      if (filters.status && (r.status?.label ?? '') !== filters.status) return false
+    const q = search.trim().toLowerCase()
+    const colById = new Map(grid.columns.map((c) => [String(c.id), c]))
+    const colEntries = Object.entries(colFilters).filter(([, v]) => v)
+    const match = (r: (typeof grid.rows)[number]) => {
+      for (const [colId, val] of colEntries) {
+        const col = colById.get(String(colId))
+        if (col && resolveColValue(r, col) !== val) return false
+      }
+      if (hideDone && statusCols.some((c) => resolveColValue(r, c) === '完了')) return false
+      if (thisWeekOnly) {
+        if (r.startIdx == null || r.finishIdx == null) return false
+        if (currentWeekIdx < r.startIdx || currentWeekIdx > r.finishIdx) return false
+      }
       if (q) {
-        const hay = `${r.title} ${r.keyValue}`.toLowerCase()
-        if (!hay.includes(q)) return false
+        const parts = [r.keyValue, r.title]
+        for (const c of grid.columns) parts.push(resolveColValue(r, c))
+        if (!parts.join(' ').toLowerCase().includes(q)) return false
       }
       return true
-    })
-  }, [grid.rows, filters, filtersActive])
+    }
+    // Keep parent/child integrity: include a matched row, plus its parent and —
+    // when a parent matches — its subtasks (so the roll-up stays meaningful).
+    const matched = new Set<string>()
+    for (const r of grid.rows) if (match(r)) matched.add(String(r.row.id))
+    const show = new Set<string>(matched)
+    for (const r of grid.rows) {
+      const id = String(r.row.id)
+      if (matched.has(id) && r.parentRowId) show.add(r.parentRowId)
+      if (r.parentRowId && matched.has(r.parentRowId)) show.add(id)
+    }
+    return grid.rows.filter((r) => show.has(String(r.row.id)))
+  }, [
+    grid.rows,
+    grid.columns,
+    colFilters,
+    search,
+    hideDone,
+    thisWeekOnly,
+    filtersActive,
+    currentWeekIdx,
+    resolveColValue,
+    statusCols,
+  ])
 
   function stepBack() {
     if (currentWeekIdx + asOfOffset > 1) setAsOfOffset((o) => o - 1)
@@ -168,12 +233,27 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   }
 
   function saveRowCell(row: Row, colId: string, value: CellValue) {
-    rowMut.mutate({ row, patch: { [colId]: value } })
+    const col = grid.columns.find((c) => String(c.id) === String(colId))
+    const patch: Record<string, CellValue> = { [colId]: value }
+    // Weekly-reset columns: stamp the current week so the value shows this week
+    // and clears next week (visible again when stepping back to this week).
+    if (col?.config?.weekly_reset) patch[`__wk_${colId}`] = currentWeekIso
+    rowMut.mutate({ row, patch })
   }
 
   function saveRowKey(row: Row, key: string) {
     rowMut.mutate({ row, patch: {}, keyValue: key })
   }
+
+  function saveProgress(row: Row, value: number | null) {
+    rowMut.mutate({ row, patch: {}, progress: value })
+  }
+
+  // Candidate predecessor tasks for the dependency picker.
+  const depCandidates = useMemo(
+    () => grid.rows.map((r) => ({ id: r.row.id, key_value: r.keyValue, title: r.title })),
+    [grid.rows],
+  )
 
   function newRow() {
     api
@@ -184,8 +264,30 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
       })
   }
 
+  function addChild(parentRow: Row) {
+    // Inherit the parent's assignee so the subtask appears in that member's
+    // 実績入力 picker right away (実績も入れれるように).
+    const memberCol = grid.columns.find((c) => c.type === 'member')
+    const data: Record<string, CellValue> = {}
+    if (memberCol && parentRow.data[memberCol.id] != null)
+      data[memberCol.id] = parentRow.data[memberCol.id]
+    api
+      .createChildRow(parentRow.id, { data })
+      .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
+      .catch(() => {
+        /* TODO: toast on failure */
+      })
+  }
+
   function deleteRow(row: Row) {
-    if (!confirm(`行「${row.key_value}」を削除しますか？`)) return
+    const childCount = grid.rows.filter(
+      (r) => r.parentRowId === String(row.id),
+    ).length
+    const msg =
+      childCount > 0
+        ? `行「${row.key_value}」と子タスク${childCount}件を削除しますか？`
+        : `行「${row.key_value}」を削除しますか？`
+    if (!confirm(msg)) return
     api
       .deleteRow(row.id)
       .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
@@ -265,20 +367,6 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             </button>
           </div>
 
-          {/* freeze (pinned columns) toggle — collapse to see more schedule */}
-          <button
-            onClick={() => setPinsCollapsed((c) => !c)}
-            title="左の固定列を最小化／通常に切り替え（固定列数は設定で変更）"
-            className={cn(
-              'rounded-[9px] border px-3 py-1.5 text-[12px]',
-              pinsCollapsed
-                ? 'border-[var(--green)] bg-[var(--green)] font-medium text-white'
-                : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink2)] hover:bg-[var(--line2)]',
-            )}
-          >
-            固定列: {pinsCollapsed ? '最小' : '通常'}
-          </button>
-
           {/* week / month view */}
           <div className="flex items-center overflow-hidden rounded-[9px] border border-[var(--line)] bg-[var(--surface)]">
             {VIEW_MODES.map((v) => (
@@ -298,9 +386,85 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             ))}
           </div>
 
+          {/* dependency lines toggle (先行→後段の依存・逆ザヤを線で表示) */}
+          <button
+            onClick={() => setShowDepLines((v) => !v)}
+            title="タスク依存（先行→後段）を線で表示。逆ザヤ（後段が先行の完了前に開始）は赤線。"
+            className={cn(
+              'rounded-[9px] border px-3 py-1.5 text-[12px]',
+              showDepLines
+                ? 'border-[var(--green)] bg-[var(--green)] font-medium text-white'
+                : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink2)] hover:bg-[var(--line2)]',
+            )}
+          >
+            依存線
+          </button>
+
+          {/* frozen columns 通常/最小 toggle (列数はシート設定) */}
+          <button
+            onClick={() => setPinsCollapsed((c) => !c)}
+            title="固定列を通常／最小に切替（固定する列数はシート設定で指定。最小は狭い画面向け）"
+            className={cn(
+              'rounded-[9px] border px-3 py-1.5 text-[12px]',
+              pinsCollapsed
+                ? 'border-[var(--green)] bg-[var(--green)] font-medium text-white'
+                : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink2)] hover:bg-[var(--line2)]',
+            )}
+          >
+            固定列: {pinsCollapsed ? '最小' : '通常'}
+          </button>
+
+          {/* hide completed */}
+          <button
+            onClick={() => setHideDone((v) => !v)}
+            title="ステータスが「完了」の行を隠す"
+            className={cn(
+              'rounded-[9px] border px-3 py-1.5 text-[12px]',
+              hideDone
+                ? 'border-[var(--green)] bg-[var(--green)] font-medium text-white'
+                : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink2)] hover:bg-[var(--line2)]',
+            )}
+          >
+            完了を隠す
+          </button>
+
+          {/* this week only */}
+          <button
+            onClick={() => setThisWeekOnly((v) => !v)}
+            title="今週に稼働のあるタスクだけ表示"
+            className={cn(
+              'rounded-[9px] border px-3 py-1.5 text-[12px]',
+              thisWeekOnly
+                ? 'border-[var(--green)] bg-[var(--green)] font-medium text-white'
+                : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink2)] hover:bg-[var(--line2)]',
+            )}
+          >
+            今週のみ
+          </button>
+
+          {/* full-text search (all columns) */}
+          <div className="flex items-center gap-1 rounded-[9px] border border-[var(--line)] bg-[var(--surface)] px-2">
+            <SearchIcon className="h-[14px] w-[14px] flex-shrink-0 text-[var(--ink3)]" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="検索（全列）"
+              className="w-[150px] bg-transparent py-1.5 text-[12px] outline-none"
+            />
+            {search && (
+              <button
+                onClick={() => setSearch('')}
+                className="flex-shrink-0 text-[var(--ink3)] hover:text-[var(--ink)]"
+                title="検索クリア"
+              >
+                <XIcon className="h-[14px] w-[14px]" />
+              </button>
+            )}
+          </div>
+
           <div className="relative">
             <Button
-              variant={filtersActive ? 'primary' : 'outline'}
+              variant={Object.values(colFilters).some((v) => v) ? 'primary' : 'outline'}
               size="sm"
               onClick={() => setShowFilter((s) => !s)}
             >
@@ -314,11 +478,14 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             </Button>
             {showFilter && (
               <FilterPopover
-                filters={filters}
-                members={members}
-                statusOptions={statusOptions}
-                onChange={setFilters}
-                onClear={() => setFilters(EMPTY_FILTERS)}
+                filterCols={filterCols}
+                rows={grid.rows}
+                colFilters={colFilters}
+                resolveValue={resolveColValue}
+                onChange={(colId, value) =>
+                  setColFilters((f) => ({ ...f, [colId]: value }))
+                }
+                onClear={() => setColFilters({})}
                 onClose={() => setShowFilter(false)}
               />
             )}
@@ -352,10 +519,15 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             viewMode={viewMode}
             editable={live}
             pinnedCount={pinnedCount}
+            showDepLines={showDepLines}
+            viewedWeekIso={viewedWeekIso}
             onSaveWeek={saveWeek}
             onEditRowCell={saveRowCell}
             onEditRowKey={saveRowKey}
             onEditMilestones={setMilestoneRow}
+            onAddChild={addChild}
+            onEditProgress={saveProgress}
+            onEditDeps={setDepRow}
             onDeleteRow={deleteRow}
           />
         )}
@@ -369,6 +541,15 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           row={milestoneRow}
           defaults={defaultMilestones}
           onClose={() => setMilestoneRow(null)}
+        />
+      )}
+
+      {depRow && (
+        <DependencyEditor
+          row={depRow}
+          candidates={depCandidates}
+          sheetId={sheetId}
+          onClose={() => setDepRow(null)}
         />
       )}
     </>
@@ -440,17 +621,19 @@ function SheetTitleInline({ sheetId, name }: { sheetId: string; name: string }) 
 }
 
 function FilterPopover({
-  filters,
-  members,
-  statusOptions,
+  filterCols,
+  rows,
+  colFilters,
+  resolveValue,
   onChange,
   onClear,
   onClose,
 }: {
-  filters: Filters
-  members: { id: string; name: string }[]
-  statusOptions: string[]
-  onChange: (f: Filters) => void
+  filterCols: Column[]
+  rows: ScheduleRowModel[]
+  colFilters: Record<string, string>
+  resolveValue: (r: ScheduleRowModel, col: Column) => string
+  onChange: (colId: string, value: string) => void
   onClear: () => void
   onClose: () => void
 }) {
@@ -462,6 +645,20 @@ function FilterPopover({
     document.addEventListener('mousedown', onDoc)
     return () => document.removeEventListener('mousedown', onDoc)
   }, [onClose])
+
+  // Distinct values present for each configured filter column.
+  const optionsByCol = useMemo(() => {
+    const m = new Map<string, string[]>()
+    for (const col of filterCols) {
+      const set = new Set<string>()
+      for (const r of rows) {
+        const v = resolveValue(r, col)
+        if (v) set.add(v)
+      }
+      m.set(String(col.id), [...set].sort((a, b) => a.localeCompare(b, 'ja')))
+    }
+    return m
+  }, [filterCols, rows, resolveValue])
 
   return (
     <div
@@ -477,46 +674,30 @@ function FilterPopover({
           <XIcon className="h-4 w-4" />
         </button>
       </div>
-      <label className="mb-2 block text-[11.5px] text-[var(--ink2)]">
-        担当
-        <Select
-          className="mt-1 w-full"
-          value={filters.assigneeId}
-          onChange={(e) => onChange({ ...filters, assigneeId: e.target.value })}
-        >
-          <option value="">（すべて）</option>
-          {members.map((m) => (
-            <option key={m.id} value={String(m.id)}>
-              {m.name}
-            </option>
-          ))}
-        </Select>
-      </label>
-      <label className="mb-2 block text-[11.5px] text-[var(--ink2)]">
-        ステータス
-        <Select
-          className="mt-1 w-full"
-          value={filters.status}
-          onChange={(e) => onChange({ ...filters, status: e.target.value })}
-        >
-          <option value="">（すべて）</option>
-          {statusOptions.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </Select>
-      </label>
-      <label className="mb-3 block text-[11.5px] text-[var(--ink2)]">
-        件名で検索
-        <Input
-          className="mt-1"
-          placeholder="キーワード"
-          value={filters.text}
-          onChange={(e) => onChange({ ...filters, text: e.target.value })}
-        />
-      </label>
-      <div className="flex justify-between">
+      {filterCols.length === 0 ? (
+        <p className="mb-2 text-[11.5px] text-[var(--ink3)]">
+          絞り込みに使う列が未設定です。シート設定で指定してください。
+        </p>
+      ) : (
+        filterCols.map((col) => (
+          <label key={col.id} className="mb-2 block text-[11.5px] text-[var(--ink2)]">
+            {col.name}
+            <Select
+              className="mt-1 w-full"
+              value={colFilters[String(col.id)] ?? ''}
+              onChange={(e) => onChange(String(col.id), e.target.value)}
+            >
+              <option value="">（すべて）</option>
+              {(optionsByCol.get(String(col.id)) ?? []).map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </Select>
+          </label>
+        ))
+      )}
+      <div className="mt-1 flex justify-between">
         <Button variant="ghost" size="sm" onClick={onClear}>
           クリア
         </Button>

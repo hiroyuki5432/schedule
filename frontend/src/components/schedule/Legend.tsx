@@ -56,11 +56,24 @@ export function Legend({ rows, defaultMilestones = [] }: Props) {
         ))
       )}
       <Item>
+        <span className="flex flex-col items-center leading-none">
+          <span className="text-[8px] text-[#8a8778]">8</span>
+          <span className="h-px w-3" style={{ background: 'rgba(51,50,44,.14)' }} />
+          <span className="text-[8px] font-semibold text-[#33322c]">10</span>
+        </span>
+        週セル：上＝予定 / 下＝実績（実績が予定超過＝赤）
+      </Item>
+      <Item>
         <span
           className="h-[9px] w-[9px] border-[1.6px] border-[var(--ink)] bg-white"
           style={{ transform: 'rotate(45deg)' }}
         />
-        マイルストン
+        予定（中空）
+        <span
+          className="ml-1.5 h-[9px] w-[9px] border-[1.6px] border-[var(--ink)] bg-[var(--ink)]"
+          style={{ transform: 'rotate(45deg)' }}
+        />
+        実績（塗り）＝マイルストン
       </Item>
       <Item>
         <span className="font-semibold text-[var(--accent)]">20</span>

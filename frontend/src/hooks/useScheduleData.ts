@@ -42,6 +42,27 @@ export interface ScheduleRowModel {
   status: StatusBadge | null
   milestones: Milestone[]
   gantt: RowGantt
+  /** Parent task id (子タスクのとき); null for top-level tasks. */
+  parentRowId: string | null
+  /** True when this top-level task has subtasks — its gantt is their roll-up. */
+  hasChildren: boolean
+  /** Number of direct subtasks. */
+  childCount: number
+  /** 0 = top-level task, 1 = subtask (one level of nesting). */
+  depth: number
+  /** Effective progress 0-100 (手入力; parents = effort-weighted roll-up). null=unset. */
+  progress: number | null
+  /** True when progress is a read-only roll-up (parent with children). */
+  progressRollup: boolean
+  /** Fraction the plan expects done by today (planned-to-date / planned-total). */
+  expectedPct: number
+  /** Behind schedule: progress below the expected fraction. */
+  behind: boolean
+  /** Week index of first / last planned-effort week (task span); null if none. */
+  startIdx: number | null
+  finishIdx: number | null
+  /** 逆ザヤ: predecessors whose finish is after this task's start. */
+  depViolations: Array<{ predKey: string; weeks: number }>
 }
 
 export interface ScheduleData {
@@ -111,9 +132,13 @@ function aggregateRowToMonths(g: RowGantt, cols: MonthCol[]): RowGantt {
     let color = ''
     let label = ''
     let marker = false
+    let markerActual = false
     let markerDone = false
     let late = false
     let changed = false
+    let msPlannedDate: string | null = null
+    let msActualDate: string | null = null
+    let msDelayDays: number | null = null
     for (const k of col.weekIdxs) {
       const c = g.cells[k]
       if (!c) continue
@@ -124,28 +149,36 @@ function aggregateRowToMonths(g: RowGantt, cols: MonthCol[]): RowGantt {
         color = c.color
         label = c.phaseLabel
       }
-      if (c.milestoneMarker && !marker) {
-        marker = true
+      if ((c.milestoneMarker || c.milestoneActual) && msPlannedDate === null && msActualDate === null) {
         markerDone = c.milestoneDone
+        msPlannedDate = c.msPlannedDate
+        msActualDate = c.msActualDate
+        msDelayDays = c.msDelayDays
         if (!label) label = c.phaseLabel
       }
+      if (c.milestoneMarker) marker = true
+      if (c.milestoneActual) markerActual = true
       if (c.late) late = true
       if (c.changed) changed = true
     }
-    if (hours <= 0 && !marker) return null
+    if (hours <= 0 && !marker && !markerActual) return null
     return {
       hours,
       color,
       milestoneMarker: marker,
+      milestoneActual: markerActual,
       milestoneDone: markerDone,
       phaseLabel: label,
       changed,
       late,
       planned,
       actual,
+      msPlannedDate,
+      msActualDate,
+      msDelayDays,
     }
   })
-  return { cells, plannedSum: g.plannedSum }
+  return { cells, plannedSum: g.plannedSum, actualSum: g.actualSum }
 }
 
 function pickColumn(columns: Column[], type: Column['type']): Column | undefined {
@@ -170,6 +203,58 @@ function plannedOf(e: Effort | undefined): number {
   if (v == null) return 0
   const n = typeof v === 'number' ? v : Number(v)
   return Number.isFinite(n) ? n : 0
+}
+
+function numOf(v: number | string | null | undefined): number {
+  if (v == null) return 0
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+
+/** Task span (first/last planned-effort week) + planned hours up to today. */
+function spanAndToDate(g: RowGantt, currentWeekIdx: number) {
+  let startIdx: number | null = null
+  let finishIdx: number | null = null
+  let plannedToDate = 0
+  g.cells.forEach((c, i) => {
+    if (!c) return
+    if (c.planned > 0) {
+      if (startIdx === null) startIdx = i
+      finishIdx = i
+    }
+    if (i <= currentWeekIdx) plannedToDate += c.planned
+  })
+  return { startIdx, finishIdx, plannedToDate }
+}
+
+/** Roll a parent task's weekly effort up from its subtasks: per week, the sum of
+ *  all children's planned/actual. The parent itself holds no own effort, so this
+ *  is the "上位ではまとめた工数" view (子の合算). */
+function aggregateChildEffort(
+  childRows: Row[],
+  effortByRow: Map<string, Map<string, Effort>>,
+): Map<string, Effort> {
+  const acc = new Map<string, { planned: number; actual: number }>()
+  for (const c of childRows) {
+    const m = effortByRow.get(c.id)
+    if (!m) continue
+    for (const [wk, e] of m) {
+      const cur = acc.get(wk) ?? { planned: 0, actual: 0 }
+      cur.planned += numOf(e.planned_hours)
+      cur.actual += numOf(e.actual_hours)
+      acc.set(wk, cur)
+    }
+  }
+  const out = new Map<string, Effort>()
+  for (const [wk, v] of acc) {
+    out.set(wk, {
+      row_id: '',
+      week_start: wk,
+      planned_hours: v.planned || null,
+      actual_hours: v.actual || null,
+    })
+  }
+  return out
 }
 
 /**
@@ -294,6 +379,17 @@ export function useScheduleData({
       m.set(e.week_start, e)
     }
 
+    // Subtask tree: group children under their parent (one level of nesting).
+    const childrenByParent = new Map<string, Row[]>()
+    for (const r of sheetRows) {
+      if (r.parent_row_id != null) {
+        const pid = String(r.parent_row_id)
+        const arr = childrenByParent.get(pid) ?? []
+        arr.push(r)
+        childrenByParent.set(pid, arr)
+      }
+    }
+
     // Default milestone colors by phase name (per sheet). The gantt bar color is
     // derived from the matching default — per-row colors are no longer set.
     const defaultColorByName = new Map<string, string>(
@@ -317,19 +413,33 @@ export function useScheduleData({
     // Auto-status (Feature 6) only when the status column opts in.
     const autoStatus = statusCol?.config?.auto_from_milestones === true
 
+    // Weekly-reset of the manual progress: show it only for the viewed week
+    // (live current week, or the as-of week when stepping back).
+    const progressWeeklyReset = detailQ.data?.sheet?.settings?.progress_weekly_reset === true
+    const viewedWeekIso = asOfWeek ?? currentWeekIso
+
     const built: ScheduleRowModel[] = sheetRows.map((row, idx) => {
       // Milestone colors come from the sheet's default phase of the same name.
       const ms: Milestone[] = (milestoneQs[idx]?.data ?? []).map((m) => ({
         ...m,
         color: defaultColorByName.get(m.name) ?? m.color,
       }))
-      const effortByWeek = effortByRow.get(row.id) ?? new Map<string, Effort>()
+
+      // A parent task's effort is the roll-up of its subtasks (read-only); a
+      // leaf task (childless, incl. subtasks) uses its own weekly effort.
+      const childRows = childrenByParent.get(String(row.id)) ?? []
+      const hasChildren = childRows.length > 0
+      const effortByWeek = hasChildren
+        ? aggregateChildEffort(childRows, effortByRow)
+        : effortByRow.get(row.id) ?? new Map<string, Effort>()
 
       // Change points: a week whose planned hours differ from this week's
-      // snapshot baseline (= changed since the start of this week).
-      const changedWeekIdx = asOfWeek
-        ? new Set<number>()
-        : changedVsBaseline(weeks, effortByWeek, baselineByRow.get(row.id))
+      // snapshot baseline (= changed since the start of this week). Roll-up
+      // parents don't highlight change points (the breakdown lives on children).
+      const changedWeekIdx =
+        asOfWeek || hasChildren
+          ? new Set<number>()
+          : changedVsBaseline(weeks, effortByWeek, baselineByRow.get(row.id))
 
       const gantt = buildRowGantt({
         weeks,
@@ -357,6 +467,20 @@ export function useScheduleData({
 
       const title = ttlCol ? String(row.data[ttlCol.id] ?? '') : ''
 
+      const { startIdx, finishIdx, plannedToDate } = spanAndToDate(gantt, currentWeekIdx)
+      const expectedPct = gantt.plannedSum > 0 ? plannedToDate / gantt.plannedSum : 0
+      // Leaf tasks use the manual %, parents get an effort-weighted roll-up below.
+      let leafProgress =
+        hasChildren || typeof row.progress !== 'number' ? null : row.progress
+      // Weekly reset: progress shows only for the week it was entered — it clears
+      // at the start of a new week, but reappears when stepping back to that week.
+      if (
+        leafProgress != null &&
+        progressWeeklyReset &&
+        row.progress_week !== viewedWeekIso
+      )
+        leafProgress = null
+
       return {
         row,
         keyValue: row.key_value,
@@ -366,8 +490,58 @@ export function useScheduleData({
         status,
         milestones: ms,
         gantt,
+        parentRowId: row.parent_row_id != null ? String(row.parent_row_id) : null,
+        hasChildren,
+        childCount: childRows.length,
+        depth: row.parent_row_id != null ? 1 : 0,
+        progress: leafProgress,
+        progressRollup: hasChildren,
+        expectedPct,
+        behind: false, // filled in the cross-row pass below
+        startIdx,
+        finishIdx,
+        depViolations: [], // filled in the cross-row pass below
       }
     })
+
+    // Cross-row pass: parent progress roll-up, behind flag, and 逆ザヤ detection.
+    const byId = new Map(built.map((m) => [String(m.row.id), m]))
+    for (const m of built) {
+      if (m.progressRollup) {
+        // Effort-weighted average of children's manual progress (read-only).
+        let wsum = 0
+        let psum = 0
+        let cnt = 0
+        let psimple = 0
+        for (const k of childrenByParent.get(String(m.row.id)) ?? []) {
+          const km = byId.get(String(k.id))
+          if (!km || km.progress == null) continue
+          const w = km.gantt.plannedSum || 0
+          wsum += w
+          psum += km.progress * w
+          cnt += 1
+          psimple += km.progress
+        }
+        m.progress =
+          cnt === 0 ? null : wsum > 0 ? Math.round(psum / wsum) : Math.round(psimple / cnt)
+      }
+    }
+    for (const m of built) {
+      m.behind =
+        m.progress != null && m.gantt.plannedSum > 0 && m.progress / 100 < m.expectedPct - 0.01
+      const deps = (m.row.depends_on ?? []) as Array<string | number>
+      const sIdx = m.startIdx
+      if (deps.length && sIdx != null) {
+        const v: Array<{ predKey: string; weeks: number }> = []
+        for (const pid of deps) {
+          const pm = byId.get(String(pid))
+          const fIdx = pm?.finishIdx
+          if (!pm || fIdx == null) continue
+          if (sIdx < fIdx) v.push({ predKey: pm.keyValue, weeks: fIdx - sIdx })
+        }
+        m.depViolations = v
+      }
+    }
 
     const loading = detailQ.isLoading || effortQ.isLoading || !milestonesAllLoaded
 

@@ -17,17 +17,23 @@ interface Vars {
   patch: Record<string, CellValue>
   /** When set, also rename the row's key_value (ID). Duplicates are allowed. */
   keyValue?: string
+  /** When set, update the manual progress % (null clears it). */
+  progress?: number | null
+  /** When set, update the predecessor task ids (先行タスク). */
+  dependsOn?: string[]
 }
 
 export function useRowMutation(sheetId: string | undefined) {
   const qc = useQueryClient()
 
   return useMutation({
-    mutationFn: ({ row, patch, keyValue }: Vars) =>
+    mutationFn: ({ row, patch, keyValue, progress, dependsOn }: Vars) =>
       api.updateRow(row.id, {
         data: { ...row.data, ...patch },
         version: row.version,
         ...(keyValue !== undefined ? { key_value: keyValue } : {}),
+        ...(progress !== undefined ? { progress } : {}),
+        ...(dependsOn !== undefined ? { depends_on: dependsOn } : {}),
       }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['sheet', sheetId] })

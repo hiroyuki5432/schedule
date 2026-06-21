@@ -5,7 +5,10 @@ import { LoginPage } from '@/pages/LoginPage'
 import { SheetPage } from '@/pages/SheetPage'
 import { SheetIndexRedirect } from '@/pages/SheetIndexRedirect'
 import { DashboardPage } from '@/pages/DashboardPage'
+import { AnnualPlanPage } from '@/pages/AnnualPlanPage'
+import { AllUsersWorklogPage } from '@/pages/AllUsersWorklogPage'
 import { MyTasksPage } from '@/pages/MyTasksPage'
+import { WorkLogPage } from '@/pages/WorkLogPage'
 import { MembersPage } from '@/pages/MembersPage'
 import { SheetSettingsPage } from '@/pages/SheetSettingsPage'
 
@@ -42,6 +45,9 @@ export default function App() {
         <Route path="/sheets/:sheetId" element={<SheetPage />} />
         <Route path="/sheets/:sheetId/settings" element={<SheetSettingsPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/annual" element={<AnnualPlanPage />} />
+        <Route path="/worklog" element={<WorkLogPage />} />
+        <Route path="/all-worklog" element={<AllUsersWorklogPage />} />
         <Route path="/my-tasks" element={<MyTasksPage />} />
         <Route path="/members" element={<MembersPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

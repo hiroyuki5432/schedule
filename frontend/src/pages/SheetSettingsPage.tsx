@@ -14,6 +14,7 @@ import { DropdownOptionsEditor } from '@/components/settings/DropdownOptionsEdit
 import { StatusRuleBuilder } from '@/components/settings/StatusRuleBuilder'
 import { LookupConfigEditor } from '@/components/settings/LookupConfigEditor'
 import { PlusIcon } from '@/components/ui/icons'
+import { cn } from '@/lib/format'
 import type { Column, ColumnType, DefaultMilestone, SheetSettings } from '@/types/api'
 
 const TYPE_LABEL: Record<ColumnType, string> = {
@@ -286,6 +287,12 @@ function ColumnDetailEditor({
     mutationFn: () => api.updateColumn(column.id, { name: name.trim(), type }),
     onSuccess: onDone,
   })
+  const weeklyResetMut = useMutation({
+    mutationFn: (v: boolean) =>
+      api.updateColumn(column.id, { config: { ...(column.config ?? {}), weekly_reset: v } }),
+    onSuccess: onDone,
+  })
+  const canWeeklyReset = ['text', 'number', 'date', 'dropdown'].includes(type)
 
   const dirty = name.trim() !== column.name || type !== column.type
 
@@ -319,6 +326,22 @@ function ColumnDetailEditor({
                 ))}
               </Select>
             </label>
+            {canWeeklyReset && (
+              <label className="flex items-start gap-2 text-[12px] text-[var(--ink2)]">
+                <input
+                  type="checkbox"
+                  checked={!!column.config?.weekly_reset}
+                  className="mt-0.5 h-4 w-4 accent-[var(--green)]"
+                  onChange={(e) => weeklyResetMut.mutate(e.target.checked)}
+                />
+                <span>
+                  週次リセット
+                  <span className="block text-[11px] text-[var(--ink3)]">
+                    毎週、未入力（空）から再入力。先週分は基準週を戻すと表示されます。
+                  </span>
+                </span>
+              </label>
+            )}
             <div className="flex justify-end">
               <Button
                 size="sm"
@@ -371,13 +394,22 @@ function SheetLevelSettings({
     },
   })
 
+  // Freezable = attribute columns + the 4 summary columns (予定計/実績計/差/進捗),
+  // so the freeze can extend up to 進捗.
+  const SUMMARY_LABELS = ['予定計', '実績計', '差', '進捗']
   const pinned = settings.pinned_columns ?? 1
-  const pinnedNarrow = settings.pinned_columns_narrow ?? Math.min(1, pinned)
-  const freezeOptions = Array.from({ length: columns.length + 1 }, (_, n) => (
-    <option key={n} value={String(n)}>
-      {n === 0 ? 'ID のみ固定' : `ID ＋ 先頭${n}列を固定`}
-    </option>
-  ))
+  const nCols = columns.length
+  const freezeOptions = Array.from({ length: nCols + 1 + SUMMARY_LABELS.length }, (_, n) => {
+    let label: string
+    if (n === 0) label = 'ID のみ固定'
+    else if (n <= nCols) label = `ID ＋ 先頭${n}列を固定`
+    else label = `ID ＋ 全${nCols}列 ＋ ${SUMMARY_LABELS.slice(0, n - nCols).join('・')}`
+    return (
+      <option key={n} value={String(n)}>
+        {label}
+      </option>
+    )
+  })
 
   return (
     <Card>
@@ -387,7 +419,7 @@ function SheetLevelSettings({
       <CardBody>
         <div className="flex flex-col gap-3">
           <label className="text-[12px] text-[var(--ink2)]">
-            左端に固定する列数（通常）
+            左端に固定する列
             <Select
               className="mt-1 w-full"
               value={String(pinned)}
@@ -399,12 +431,15 @@ function SheetLevelSettings({
             >
               {freezeOptions}
             </Select>
+            <span className="mt-1 block text-[11px] text-[var(--ink3)]">
+              スクロールしても左端に固定する列（通常時）。IDは常に固定。属性列に加えて、予定計・実績計・差・進捗まで固定できます。
+            </span>
           </label>
           <label className="text-[12px] text-[var(--ink2)]">
-            左端に固定する列数（最小化時）
+            左端に固定する列（最小化時）
             <Select
               className="mt-1 w-full"
-              value={String(pinnedNarrow)}
+              value={String(settings.pinned_columns_narrow ?? Math.min(1, pinned))}
               onChange={(e) =>
                 mutation.mutate({
                   settings: { ...settings, pinned_columns_narrow: Number(e.target.value) },
@@ -414,7 +449,63 @@ function SheetLevelSettings({
               {freezeOptions}
             </Select>
             <span className="mt-1 block text-[11px] text-[var(--ink3)]">
-              スケジュール画面の「固定列: 通常／最小」ボタンで、この2つの固定列数を切り替えられます。狭い画面で表が見えない時は「最小」に。
+              スケジュール画面の「固定列: 通常／最小」ボタンで、この2つを切り替えられます。
+            </span>
+          </label>
+
+          <div className="text-[12px] text-[var(--ink2)]">
+            絞り込みに使う列
+            <div className="mt-1 flex flex-wrap gap-2">
+              {columns.map((c) => {
+                const ids = (settings.filter_columns ?? []).map(String)
+                const on = ids.includes(String(c.id))
+                return (
+                  <label
+                    key={c.id}
+                    className={cn(
+                      'flex cursor-pointer items-center gap-1.5 rounded-[8px] border px-2 py-1 text-[12px]',
+                      on
+                        ? 'border-[var(--green)] bg-[var(--green-l)]/10'
+                        : 'border-[var(--line)] hover:bg-[var(--line2)]',
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      className="h-3.5 w-3.5 accent-[var(--green)]"
+                      onChange={() => {
+                        const next = on
+                          ? ids.filter((x) => x !== String(c.id))
+                          : [...ids, String(c.id)]
+                        mutation.mutate({ settings: { ...settings, filter_columns: next } })
+                      }}
+                    />
+                    {c.name}
+                  </label>
+                )
+              })}
+            </div>
+            <span className="mt-1 block text-[11px] text-[var(--ink3)]">
+              スケジュールの「絞り込み」パネルに、ここで選んだ列が値ドロップダウンで出ます（未選択なら担当・ステータス）。
+            </span>
+          </div>
+
+          <label className="flex items-start gap-2 text-[12px] text-[var(--ink2)]">
+            <input
+              type="checkbox"
+              checked={!!settings.progress_weekly_reset}
+              className="mt-0.5 h-4 w-4 accent-[var(--green)]"
+              onChange={(e) =>
+                mutation.mutate({
+                  settings: { ...settings, progress_weekly_reset: e.target.checked },
+                })
+              }
+            />
+            <span>
+              進捗を週次リセット
+              <span className="block text-[11px] text-[var(--ink3)]">
+                毎週、進捗は未入力（—）から再入力。先週分は基準週を戻すと表示されます。
+              </span>
             </span>
           </label>
           <label className="text-[12px] text-[var(--ink2)]">

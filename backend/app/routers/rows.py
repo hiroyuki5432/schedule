@@ -13,6 +13,8 @@ from app.deps import get_row_for_user, get_sheet_for_user
 from app.models import Row, Sheet, User
 from app.schemas import RowCreate, RowOut, RowUpdate
 from app.security import current_user
+from app.weeks import current_week_start
+from app.worklog_service import org_week_start_weekday
 
 router = APIRouter(prefix="/api", tags=["rows"])
 
@@ -27,6 +29,21 @@ def _next_key_value(db: Session, sheet: Sheet) -> str:
     rule["next_seq"] = next_seq + 1
     sheet.numbering_rule = rule
     return key
+
+
+def _next_child_key_value(db: Session, parent: Row) -> str:
+    """Subtask id = parent key + '-' + 2-digit sequence (e.g. P26-001 -> P26-001-01).
+    Sequence = max existing child suffix + 1, so deletes don't reuse ids."""
+    base = parent.key_value or ""
+    prefix = f"{base}-"
+    max_seq = 0
+    for c in db.execute(select(Row).where(Row.parent_row_id == parent.id)).scalars():
+        kv = c.key_value or ""
+        if kv.startswith(prefix):
+            suffix = kv[len(prefix):]
+            if suffix.isdigit():
+                max_seq = max(max_seq, int(suffix))
+    return f"{base}-{max_seq + 1:02d}"
 
 
 @router.get("/sheets/{sheet_id}/rows", response_model=list[RowOut])
@@ -72,6 +89,52 @@ def create_row(
     return row
 
 
+@router.post(
+    "/rows/{parent_id}/children",
+    response_model=RowOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_child_row(
+    parent_id: int,
+    payload: RowCreate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Row:
+    """Create a subtask (子タスク) under a top-level task. Subtasks are real rows
+    that inherit weekly effort, milestones and 日報-driven actuals; the parent
+    aggregates them. Nesting is one level only."""
+    parent = get_row_for_user(db, parent_id, user)
+    if parent.parent_row_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="サブタスクの下にさらに子タスクは作れません",
+        )
+    key_value = payload.key_value
+    if key_value is None or key_value == "":
+        key_value = _next_child_key_value(db, parent)
+
+    row = Row(
+        sheet_id=parent.sheet_id,
+        parent_row_id=parent.id,
+        key_value=key_value,
+        data=payload.data or {},
+        version=1,
+        created_by=user.id,
+        updated_by=user.id,
+    )
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"key_value '{key_value}' already exists in this sheet",
+        )
+    db.refresh(row)
+    return row
+
+
 @router.patch("/rows/{row_id}")
 def update_row(
     row_id: int,
@@ -94,6 +157,19 @@ def update_row(
     if payload.key_value is not None and payload.key_value != row.key_value:
         row.key_value = payload.key_value
     row.data = payload.data
+    # progress / depends_on are applied only when present in the body (so a normal
+    # data edit never clears them); an explicit null clears progress.
+    fields = payload.model_dump(exclude_unset=True)
+    if "progress" in fields:
+        row.progress = payload.progress
+        # Stamp the week this progress applies to (for weekly-reset display).
+        row.progress_week = (
+            None
+            if payload.progress is None
+            else current_week_start(org_week_start_weekday(db, user.org_id))
+        )
+    if "depends_on" in fields:
+        row.depends_on = payload.depends_on or []
     row.version = row.version + 1
     row.updated_by = user.id
     try:

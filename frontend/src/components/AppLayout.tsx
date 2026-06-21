@@ -20,6 +20,9 @@ import type { Sheet } from '@/types/api'
 
 const FIXED_NAV = [
   { to: '/dashboard', label: 'ダッシュボード', Icon: ChartIcon },
+  { to: '/annual', label: '年間計画', Icon: TableIcon },
+  { to: '/worklog', label: '実績入力', Icon: CalendarIcon },
+  { to: '/all-worklog', label: 'みんなの入力一覧', Icon: MembersIcon },
   { to: '/my-tasks', label: 'マイタスク', Icon: TasksIcon },
   { to: '/members', label: 'メンバー管理', Icon: MembersIcon },
 ]

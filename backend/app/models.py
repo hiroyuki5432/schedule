@@ -8,9 +8,11 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -109,8 +111,24 @@ class Row(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     sheet_id: Mapped[int] = mapped_column(ForeignKey("sheets.id", ondelete="CASCADE"), nullable=False)
+    # Parent task for a subtask (子タスク). Null = top-level task. One level only:
+    # a subtask never has its own children. Deleting a parent cascades to children
+    # (and their effort/milestones) at the DB level.
+    parent_row_id: Mapped[int | None] = mapped_column(
+        ForeignKey("rows.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     key_value: Mapped[str | None] = mapped_column(String(255), nullable=True)
     data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Manual progress 0-100 (手入力の進捗%). Null = not set. A parent with
+    # children shows an effort-weighted roll-up instead (computed on the front end).
+    progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Week (week_start) the current progress applies to. With weekly-reset on, the
+    # progress shows only for its own week, so it clears at the start of a new week
+    # but is still visible when stepping back to that week (as-of).
+    progress_week: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Predecessor task ids (先行タスク). The task should start only after these
+    # finish; the front end flags 逆ザヤ (starting before a predecessor ends).
+    depends_on: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -166,6 +184,9 @@ class RowMilestone(Base):
     order: Mapped[int] = mapped_column("order", Integer, nullable=False, default=0)
     # Achievement flag: whether this milestone (phase boundary) has been reached.
     done: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Actual completion date (実績完了日). Set when achieved; compared with
+    # boundary_date (planned) to show 遅延日数. Null until done.
+    actual_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     row: Mapped["Row"] = relationship(back_populates="milestones")
 
@@ -185,4 +206,44 @@ class SheetSnapshot(Base):
 
     __table_args__ = (
         UniqueConstraint("sheet_id", "for_week", name="uq_snapshot_sheet_week"),
+    )
+
+
+class WorkLog(Base):
+    """One work-log line (実績入力). Hours roll up into the weekly EffortEntry
+    actual_hours for the linked task (row) — see app.worklog_service.
+
+    Categories (cat1=大分類, cat2=中分類) are stored as plain strings (snapshots of
+    the org master at entry time) so renaming/reordering the master never orphans
+    historical logs. row_id is SET NULL on task delete to preserve the record.
+    """
+
+    __tablename__ = "work_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    work_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # Linked task. Nullable + SET NULL: deleting a task keeps the historical log.
+    row_id: Mapped[int | None] = mapped_column(
+        ForeignKey("rows.id", ondelete="SET NULL"), nullable=True
+    )
+    cat1: Mapped[str | None] = mapped_column(String(255), nullable=True)  # 大分類
+    cat2: Mapped[str | None] = mapped_column(String(255), nullable=True)  # 中分類
+    memo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hours: Mapped[float] = mapped_column(Numeric(8, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_worklog_row_date", "row_id", "work_date"),
+        Index("ix_worklog_org_user_date", "org_id", "user_id", "work_date"),
     )

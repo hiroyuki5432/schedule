@@ -16,7 +16,11 @@ import type {
   SheetDetail,
   SheetSettings,
   SnapshotResult,
+  TaskOption,
   User,
+  UserDayWorkLog,
+  WorkLog,
+  WorkLogInput,
 } from '@/types/api'
 
 // ---- Auth ----
@@ -29,6 +33,9 @@ export const me = () => http.get<{ user: User }>('/api/auth/me')
 
 // ---- Org / Members ----
 export const getOrg = () => http.get<Org>('/api/org')
+
+export const updateOrg = (body: { name?: string; settings?: Org['settings'] }) =>
+  http.patch<Org>('/api/org', body)
 
 export const getMembers = () => http.get<Member[]>('/api/members')
 
@@ -90,9 +97,22 @@ export const createRow = (
   body: { key_value?: string; data: Row['data'] },
 ) => http.post<Row>(`/api/sheets/${sheetId}/rows`, body)
 
+/** Create a subtask (子タスク) under a parent task. Inherits weekly effort,
+ *  milestones and 日報-driven actuals like any task; id = parent key + '-NN'. */
+export const createChildRow = (
+  parentId: string,
+  body: { key_value?: string; data: Row['data'] },
+) => http.post<Row>(`/api/rows/${parentId}/children`, body)
+
 export const updateRow = (
   id: string,
-  body: { data: Row['data']; version: number; key_value?: string },
+  body: {
+    data: Row['data']
+    version: number
+    key_value?: string
+    progress?: number | null
+    depends_on?: string[]
+  },
 ) => http.patch<Row>(`/api/rows/${id}`, body)
 
 export const deleteRow = (id: string) => http.del<void>(`/api/rows/${id}`)
@@ -141,3 +161,27 @@ export const getAggregate = (
 
 // ---- Export ----
 export const exportCsvUrl = (sheetId: string) => `/api/sheets/${sheetId}/export.csv`
+
+// ---- Work logs (日報) ----
+export const getWorkLogs = (params?: { from?: string; to?: string; userId?: string }) => {
+  const q = new URLSearchParams()
+  if (params?.from) q.set('from', params.from)
+  if (params?.to) q.set('to', params.to)
+  if (params?.userId) q.set('user_id', params.userId)
+  const qs = q.toString()
+  return http.get<WorkLog[]>(`/api/worklog${qs ? `?${qs}` : ''}`)
+}
+
+// Tasks the current user is assigned to (across all sheets) for the picker.
+export const getMyTasks = () => http.get<TaskOption[]>('/api/worklog/tasks')
+
+// Every member's work logs for one day (みんなの入力一覧).
+export const getAllUsersWorklog = (date: string) =>
+  http.get<UserDayWorkLog[]>(`/api/worklog/all?date=${date}`)
+
+export const createWorkLog = (body: WorkLogInput) => http.post<WorkLog>('/api/worklog', body)
+
+export const updateWorkLog = (id: string, body: Partial<WorkLogInput>) =>
+  http.patch<WorkLog>(`/api/worklog/${id}`, body)
+
+export const deleteWorkLog = (id: string) => http.del<void>(`/api/worklog/${id}`)
