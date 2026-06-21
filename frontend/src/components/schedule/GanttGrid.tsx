@@ -134,8 +134,8 @@ function SortArrow({ dir }: { dir: SortDir | null }) {
   return <span className="ml-0.5 text-[9px] leading-none">{dir === 'asc' ? '▲' : '▼'}</span>
 }
 
-/** Attribute-column width, by type. */
-function colWidth(c: Column): number {
+/** Fallback attribute-column width, by type (used before content is measured). */
+function defaultColWidth(c: Column): number {
   switch (c.type) {
     case 'status':
       return 96
@@ -152,6 +152,50 @@ function colWidth(c: Column): number {
     default:
       return 128
   }
+}
+
+/** [min, max] width clamp per column type — keeps content-fit from overflowing. */
+function widthRange(t: Column['type']): [number, number] {
+  switch (t) {
+    case 'status':
+      return [72, 140]
+    case 'member':
+      return [92, 150]
+    case 'date':
+      return [96, 124]
+    case 'number':
+      return [60, 110]
+    case 'text':
+      return [96, 240]
+    case 'lookup':
+      return [96, 200]
+    default:
+      return [80, 150]
+  }
+}
+
+/** Rough text width: CJK ~9px, other ~6px per char (for content-fit columns). */
+function textPx(s: string): number {
+  let px = 0
+  for (const ch of s) px += ch.charCodeAt(0) > 0x2e7f ? 9 : 6
+  return px
+}
+
+/** Display string for a cell, used only to measure content width. */
+function measureValue(
+  c: Column,
+  r: ScheduleRowModel,
+  members: Member[],
+  lookupValue: (column: Column, row: Row) => string | null,
+): string {
+  if (c.type === 'member') {
+    const id = r.row.data[c.id]
+    return members.find((m) => String(m.id) === String(id ?? ''))?.name ?? ''
+  }
+  if (c.type === 'status') return r.status?.label ?? ''
+  if (c.type === 'lookup') return lookupValue(c, r.row) ?? ''
+  const v = r.row.data[c.id]
+  return v == null ? '' : String(v)
 }
 
 export interface WeekEdit {
@@ -177,6 +221,8 @@ interface Props {
   pinnedCount: number
   /** Draw predecessor→successor dependency lines over the gantt (toggle). */
   showDepLines: boolean
+  /** Week being viewed (live or as-of) — for weekly-reset column display. */
+  viewedWeekIso?: string
   onSaveWeek: (edit: WeekEdit) => void
   onEditRowCell: (row: Row, colId: string, value: CellValue) => void
   onEditRowKey: (row: Row, key: string) => void
@@ -214,6 +260,7 @@ export function GanttGrid({
   editable,
   pinnedCount,
   showDepLines,
+  viewedWeekIso,
   onSaveWeek,
   onEditRowCell,
   onEditRowKey,
@@ -243,6 +290,22 @@ export function GanttGrid({
     [columns],
   )
   const { lookupValue } = useLookupTargets(columns, members)
+
+  // Content-fit column widths: size each attribute column to its longest value
+  // (header included), clamped per type so nothing gets too wide or too narrow.
+  const colWidths = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const c of ordered) {
+      let maxPx = textPx(c.name)
+      for (const r of rows)
+        maxPx = Math.max(maxPx, textPx(measureValue(c, r, members, lookupValue)))
+      const pad = c.type === 'member' ? 54 : c.type === 'status' || c.type === 'dropdown' ? 34 : 24
+      const [min, max] = widthRange(c.type)
+      m.set(c.id, Math.round(Math.max(min, Math.min(max, pad + maxPx))))
+    }
+    return m
+  }, [ordered, rows, members, lookupValue])
+  const cw = (c: Column) => colWidths.get(c.id) ?? defaultColWidth(c)
 
   // Tree display order: top-level tasks (client-sortable) each followed by their
   // subtasks (子タスク, key_value asc) when expanded. Subtasks always stay grouped
@@ -324,10 +387,10 @@ export function GanttGrid({
 
   const pinnedW =
     ID_W +
-    pinnedCols.reduce((s, c) => s + colWidth(c), 0) +
+    pinnedCols.reduce((s, c) => s + cw(c), 0) +
     pinnedSummary.reduce((s, c) => s + c.w, 0)
   const attrW =
-    scrollCols.reduce((s, c) => s + colWidth(c), 0) +
+    scrollCols.reduce((s, c) => s + cw(c), 0) +
     scrollSummary.reduce((s, c) => s + c.w, 0)
 
   const rowVirt = useVirtualizer({
@@ -483,7 +546,7 @@ export function GanttGrid({
               {pinnedCols.map((c) => (
                 <HeadCell
                   key={c.id}
-                  style={{ width: colWidth(c) }}
+                  style={{ width: cw(c) }}
                   sortDir={dirFor(c.id)}
                   onClick={() => onSortClick(c.id)}
                 >
@@ -497,7 +560,7 @@ export function GanttGrid({
               {scrollCols.map((c) => (
                 <HeadCell
                   key={c.id}
-                  style={{ width: colWidth(c) }}
+                  style={{ width: cw(c) }}
                   sortDir={dirFor(c.id)}
                   onClick={() => onSortClick(c.id)}
                 >
@@ -679,7 +742,7 @@ export function GanttGrid({
                     )}
                   </div>
                   {pinnedCols.map((c) => (
-                    <div key={c.id} className="h-full overflow-hidden" style={{ width: colWidth(c) }}>
+                    <div key={c.id} className="h-full overflow-hidden" style={{ width: cw(c) }}>
                       <AttrCell
                         row={model.row}
                         column={c}
@@ -690,6 +753,7 @@ export function GanttGrid({
                         autoStatusBadge={
                           c.id === autoStatusColId ? model.status : undefined
                         }
+                        viewedWeekIso={viewedWeekIso}
                         onSave={(v) => onEditRowCell(model.row, c.id, v)}
                       />
                     </div>
@@ -708,7 +772,7 @@ export function GanttGrid({
                   style={{ width: attrW, height: ROW_H }}
                 >
                   {scrollCols.map((c) => (
-                    <div key={c.id} className="h-full overflow-hidden" style={{ width: colWidth(c) }}>
+                    <div key={c.id} className="h-full overflow-hidden" style={{ width: cw(c) }}>
                       <AttrCell
                         row={model.row}
                         column={c}
@@ -719,6 +783,7 @@ export function GanttGrid({
                         autoStatusBadge={
                           c.id === autoStatusColId ? model.status : undefined
                         }
+                        viewedWeekIso={viewedWeekIso}
                         onSave={(v) => onEditRowCell(model.row, c.id, v)}
                       />
                     </div>
@@ -915,7 +980,7 @@ export function GanttGrid({
                 週計
               </div>
               {pinnedCols.map((c) => (
-                <div key={c.id} style={{ width: colWidth(c) }} />
+                <div key={c.id} style={{ width: cw(c) }} />
               ))}
               <FooterSummaryCells cols={pinnedSummary} footTotals={footTotals} />
             </div>
@@ -924,7 +989,7 @@ export function GanttGrid({
               style={{ width: attrW, height: FOOT_H }}
             >
               {scrollCols.map((c) => (
-                <div key={c.id} style={{ width: colWidth(c) }} />
+                <div key={c.id} style={{ width: cw(c) }} />
               ))}
               <FooterSummaryCells cols={scrollSummary} footTotals={footTotals} />
             </div>
@@ -1099,6 +1164,7 @@ function AttrCell({
   lookupValue,
   editable,
   autoStatusBadge,
+  viewedWeekIso,
   onSave,
 }: {
   row: Row
@@ -1108,8 +1174,17 @@ function AttrCell({
   lookupValue: (column: Column, row: Row) => string | null
   editable: boolean
   autoStatusBadge?: StatusBadge | null
+  /** Viewed week — weekly-reset columns blank their value outside this week. */
+  viewedWeekIso?: string
   onSave: (v: CellValue) => void
 }) {
+  // Weekly-reset: outside the value's own week, show empty (still editable to set
+  // this week's value). onSave still writes to the real row (via the parent).
+  const stale =
+    !!column.config?.weekly_reset &&
+    !!viewedWeekIso &&
+    row.data[`__wk_${column.id}`] !== viewedWeekIso
+  const effRow = stale ? { ...row, data: { ...row.data, [column.id]: null } } : row
   // Auto-derived status (read-only computed badge).
   if (column.type === 'status' && autoStatusBadge !== undefined) {
     return (
@@ -1144,7 +1219,7 @@ function AttrCell({
   if (editable || column.type === 'status') {
     return (
       <InlineCell
-        row={row}
+        row={effRow}
         column={column}
         members={members}
         rows={rows}
@@ -1155,7 +1230,7 @@ function AttrCell({
       />
     )
   }
-  return <ReadonlyCell row={row} column={column} members={members} lookupValue={lookupValue} />
+  return <ReadonlyCell row={effRow} column={column} members={members} lookupValue={lookupValue} />
 }
 
 function ReadonlyCell({

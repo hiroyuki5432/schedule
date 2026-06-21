@@ -122,6 +122,10 @@ class Row(Base):
     # Manual progress 0-100 (手入力の進捗%). Null = not set. A parent with
     # children shows an effort-weighted roll-up instead (computed on the front end).
     progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Week (week_start) the current progress applies to. With weekly-reset on, the
+    # progress shows only for its own week, so it clears at the start of a new week
+    # but is still visible when stepping back to that week (as-of).
+    progress_week: Mapped[date | None] = mapped_column(Date, nullable=True)
     # Predecessor task ids (先行タスク). The task should start only after these
     # finish; the front end flags 逆ザヤ (starting before a predecessor ends).
     depends_on: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)

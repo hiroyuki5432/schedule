@@ -13,6 +13,8 @@ from app.deps import get_row_for_user, get_sheet_for_user
 from app.models import Row, Sheet, User
 from app.schemas import RowCreate, RowOut, RowUpdate
 from app.security import current_user
+from app.weeks import current_week_start
+from app.worklog_service import org_week_start_weekday
 
 router = APIRouter(prefix="/api", tags=["rows"])
 
@@ -160,6 +162,12 @@ def update_row(
     fields = payload.model_dump(exclude_unset=True)
     if "progress" in fields:
         row.progress = payload.progress
+        # Stamp the week this progress applies to (for weekly-reset display).
+        row.progress_week = (
+            None
+            if payload.progress is None
+            else current_week_start(org_week_start_weekday(db, user.org_id))
+        )
     if "depends_on" in fields:
         row.depends_on = payload.depends_on or []
     row.version = row.version + 1

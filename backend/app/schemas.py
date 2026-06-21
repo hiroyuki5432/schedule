@@ -154,6 +154,8 @@ class RowOut(BaseModel):
     version: int
     # Manual progress 0-100 (手入力進捗%); null if unset.
     progress: Optional[int] = None
+    # Week (week_start) the current progress applies to.
+    progress_week: Optional[date] = None
     # Predecessor task ids (先行タスク).
     depends_on: list[int] = Field(default_factory=list)
 
@@ -283,6 +285,14 @@ class TaskOption(BaseModel):
     title: str
     sheet_id: int
     sheet_name: str
+
+
+class UserDayWorkLog(BaseModel):
+    """One member's work logs for a day (みんなの入力一覧)."""
+    user_id: int
+    user_name: str
+    total_hours: float
+    logs: list[WorkLogOut]
 
 
 SheetDetailOut.model_rebuild()

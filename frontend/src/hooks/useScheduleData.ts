@@ -413,6 +413,11 @@ export function useScheduleData({
     // Auto-status (Feature 6) only when the status column opts in.
     const autoStatus = statusCol?.config?.auto_from_milestones === true
 
+    // Weekly-reset of the manual progress: show it only for the viewed week
+    // (live current week, or the as-of week when stepping back).
+    const progressWeeklyReset = detailQ.data?.sheet?.settings?.progress_weekly_reset === true
+    const viewedWeekIso = asOfWeek ?? currentWeekIso
+
     const built: ScheduleRowModel[] = sheetRows.map((row, idx) => {
       // Milestone colors come from the sheet's default phase of the same name.
       const ms: Milestone[] = (milestoneQs[idx]?.data ?? []).map((m) => ({
@@ -465,8 +470,16 @@ export function useScheduleData({
       const { startIdx, finishIdx, plannedToDate } = spanAndToDate(gantt, currentWeekIdx)
       const expectedPct = gantt.plannedSum > 0 ? plannedToDate / gantt.plannedSum : 0
       // Leaf tasks use the manual %, parents get an effort-weighted roll-up below.
-      const leafProgress =
+      let leafProgress =
         hasChildren || typeof row.progress !== 'number' ? null : row.progress
+      // Weekly reset: progress shows only for the week it was entered — it clears
+      // at the start of a new week, but reappears when stepping back to that week.
+      if (
+        leafProgress != null &&
+        progressWeeklyReset &&
+        row.progress_week !== viewedWeekIso
+      )
+        leafProgress = null
 
       return {
         row,

@@ -17,7 +17,12 @@ import { parseDate } from '@/lib/dates'
 import { cn } from '@/lib/format'
 import type { Column, Effort, Member, Row } from '@/types/api'
 
-const MONTHS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']
+// Fiscal year: April(4) through next March(3).
+const MONTHS = ['4', '5', '6', '7', '8', '9', '10', '11', '12', '1', '2', '3']
+/** Fiscal year a date belongs to (Apr–Dec → that year; Jan–Mar → prev year). */
+const fiscalYearOf = (d: Date) => (d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1)
+/** Column index 0..11 for a date within the fiscal year (April = 0). */
+const fiscalCol = (d: Date) => (d.getMonth() - 3 + 12) % 12
 const PALETTE = [
   '#A7D0BE', '#CBD9EE', '#F1DBAC', '#E8B6A6',
   '#C7B8DE', '#BFE2D3', '#E0CDA9', '#9FC7D6',
@@ -146,11 +151,11 @@ export function AnnualPlanPage() {
     const set = new Set<number>()
     for (const e of effort) {
       if (num(e.planned_hours) <= 0 && num(e.actual_hours) <= 0) continue
-      set.add(parseDate(e.week_start).getFullYear())
+      set.add(fiscalYearOf(parseDate(e.week_start)))
     }
     return [...set].sort()
   }, [effort])
-  const thisYear = new Date().getFullYear()
+  const thisYear = fiscalYearOf(new Date())
   const [yearState, setYearState] = useState<number | null>(null)
   const year = yearState ?? (years.includes(thisYear) ? thisYear : years[0] ?? thisYear)
 
@@ -173,7 +178,7 @@ export function AnnualPlanPage() {
     const add = (rowId: string) => {
       for (const w of effortWeeksByRow.get(rowId) ?? []) {
         const d = parseDate(w)
-        if (d.getFullYear() === year) out[d.getMonth()] = true
+        if (fiscalYearOf(d) === year) out[fiscalCol(d)] = true
       }
     }
     add(row.id)
@@ -233,7 +238,7 @@ export function AnnualPlanPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, big, mid, small, year, membersById, childrenByParent, effortWeeksByRow])
 
-  const currentMonth = year === thisYear ? new Date().getMonth() : -1
+  const currentMonth = year === thisYear ? fiscalCol(new Date()) : -1
   const loading = detailQ.isLoading || effortQ.isLoading
 
   const midOptions = groupable.filter((c) => String(c.id) !== String(big))
@@ -263,11 +268,11 @@ export function AnnualPlanPage() {
             </label>
           )}
           <label className="flex items-center gap-2">
-            年
+            年度
             <Select value={String(year)} onChange={(e) => setYearState(Number(e.target.value))}>
               {(years.length ? years : [thisYear]).map((y) => (
                 <option key={y} value={y}>
-                  {y}年
+                  {y}年度（{y}/4〜{y + 1}/3）
                 </option>
               ))}
             </Select>
@@ -316,7 +321,7 @@ export function AnnualPlanPage() {
               <div className="px-5 py-8 text-center text-[var(--ink3)]">読み込み中…</div>
             ) : tree.length === 0 ? (
               <div className="px-5 py-8 text-center text-[var(--ink3)]">
-                {year}年に予定のあるタスクがありません。
+                {year}年度に予定のあるタスクがありません。
               </div>
             ) : (
               <div className="min-w-[680px]">
