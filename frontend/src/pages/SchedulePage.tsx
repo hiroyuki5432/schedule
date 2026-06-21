@@ -58,6 +58,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const RANGE_STEP = 26 // ~half a year per click
   const [milestoneRow, setMilestoneRow] = useState<Row | null>(null)
   const [depRow, setDepRow] = useState<Row | null>(null)
+  const [showDepLines, setShowDepLines] = useState(false)
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS)
   const [showFilter, setShowFilter] = useState(false)
 
@@ -90,14 +91,25 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const { weeks, currentWeekIdx } = grid
   const lineIndex = live ? currentWeekIdx : Math.max(0, currentWeekIdx + asOfOffset)
 
-  // Sheet-level settings: frozen-column count (2-stage, toggled by a button) +
-  // defaults. The button switches between the configured "通常" and "最小" counts
-  // so the user can collapse the frozen columns to see more of the schedule.
+  // Frozen-column count: directly adjustable on the schedule top bar (0..列数).
+  // Persisted to the sheet's pinned_columns so it sticks. A local override gives
+  // instant feedback while the save round-trips.
   const sheetSettings = grid.detail?.sheet.settings
-  const pinnedFull = sheetSettings?.pinned_columns ?? 1
-  const pinnedMin = sheetSettings?.pinned_columns_narrow ?? Math.min(1, pinnedFull)
-  const [pinsCollapsed, setPinsCollapsed] = useState(false)
-  const pinnedCount = pinsCollapsed ? pinnedMin : pinnedFull
+  const savedPinned = sheetSettings?.pinned_columns ?? 1
+  const colCount = grid.columns.length
+  const [pinnedOverride, setPinnedOverride] = useState<number | null>(null)
+  useEffect(() => setPinnedOverride(null), [sheetId])
+  const pinnedCount = Math.max(0, Math.min(pinnedOverride ?? savedPinned, colCount))
+  function setPinned(n: number) {
+    const v = Math.max(0, Math.min(n, colCount))
+    setPinnedOverride(v)
+    api
+      .updateSheet(sheetId, { settings: { ...sheetSettings, pinned_columns: v } })
+      .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
+      .catch(() => {
+        /* TODO: toast on failure */
+      })
+  }
   const defaultMilestones = useMemo(
     () => sheetSettings?.default_milestones ?? [],
     [sheetSettings],
@@ -311,19 +323,30 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             </button>
           </div>
 
-          {/* freeze (pinned columns) toggle — collapse to see more schedule */}
-          <button
-            onClick={() => setPinsCollapsed((c) => !c)}
-            title="左の固定列を最小化／通常に切り替え（固定列数は設定で変更）"
-            className={cn(
-              'rounded-[9px] border px-3 py-1.5 text-[12px]',
-              pinsCollapsed
-                ? 'border-[var(--green)] bg-[var(--green)] font-medium text-white'
-                : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink2)] hover:bg-[var(--line2)]',
-            )}
+          {/* frozen-column count stepper (ID + 先頭N列を固定) */}
+          <div
+            className="flex items-center overflow-hidden rounded-[9px] border border-[var(--line)] bg-[var(--surface)]"
+            title="左端に固定する列数（IDは常に固定）。スケジュールを広く見たいときは減らす。"
           >
-            固定列: {pinsCollapsed ? '最小' : '通常'}
-          </button>
+            <span className="px-2.5 text-[12px] text-[var(--ink2)]">固定列</span>
+            <button
+              onClick={() => setPinned(pinnedCount - 1)}
+              disabled={pinnedCount <= 0}
+              className="border-l border-[var(--line)] px-2.5 py-1.5 text-[14px] leading-none text-[var(--ink2)] hover:bg-[var(--line2)] disabled:opacity-40"
+            >
+              −
+            </button>
+            <span className="min-w-[22px] text-center text-[12px] font-medium tabular-nums">
+              {pinnedCount}
+            </span>
+            <button
+              onClick={() => setPinned(pinnedCount + 1)}
+              disabled={pinnedCount >= colCount}
+              className="border-l border-[var(--line)] px-2.5 py-1.5 text-[14px] leading-none text-[var(--ink2)] hover:bg-[var(--line2)] disabled:opacity-40"
+            >
+              ＋
+            </button>
+          </div>
 
           {/* week / month view */}
           <div className="flex items-center overflow-hidden rounded-[9px] border border-[var(--line)] bg-[var(--surface)]">
@@ -343,6 +366,20 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
               </button>
             ))}
           </div>
+
+          {/* dependency lines toggle (先行→後段の依存・逆ザヤを線で表示) */}
+          <button
+            onClick={() => setShowDepLines((v) => !v)}
+            title="タスク依存（先行→後段）を線で表示。逆ザヤ（後段が先行の完了前に開始）は赤線。"
+            className={cn(
+              'rounded-[9px] border px-3 py-1.5 text-[12px]',
+              showDepLines
+                ? 'border-[var(--green)] bg-[var(--green)] font-medium text-white'
+                : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink2)] hover:bg-[var(--line2)]',
+            )}
+          >
+            依存線
+          </button>
 
           <div className="relative">
             <Button
@@ -398,6 +435,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             viewMode={viewMode}
             editable={live}
             pinnedCount={pinnedCount}
+            showDepLines={showDepLines}
             onSaveWeek={saveWeek}
             onEditRowCell={saveRowCell}
             onEditRowKey={saveRowKey}

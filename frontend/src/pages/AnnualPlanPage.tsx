@@ -12,7 +12,6 @@ import { useMembers, useSheets } from '@/hooks/useSheets'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
 import { Select } from '@/components/ui/Select'
-import { ChevronDownIcon, ChevronUpIcon } from '@/components/ui/icons'
 import { parseDate } from '@/lib/dates'
 import type { Column, Effort, Member, Row } from '@/types/api'
 
@@ -276,15 +275,6 @@ export function AnnualPlanPage() {
   const catCount = (lane: CategoryLane) =>
     subCol ? lane.subs.reduce((s, sub) => s + sub.tasks.length, 0) : lane.tasks.length
 
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const toggle = (name: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
-      return next
-    })
-
   const currentMonth = year === thisYear ? new Date().getMonth() : -1
   const loading = detailQ.isLoading || effortQ.isLoading
 
@@ -361,16 +351,10 @@ export function AnnualPlanPage() {
                 <MonthHeader currentMonth={currentMonth} />
                 {lanes.map((lane) => (
                   <div key={lane.name}>
-                    {/* 大分類 lane */}
+                    {/* 大分類 group header band (always shown — flat, no nesting) */}
                     <LaneRow
                       label={
-                        <button
-                          type="button"
-                          onClick={() => toggle(lane.name)}
-                          className="flex w-full items-center gap-1 overflow-hidden text-left text-[12.5px] font-medium text-[var(--ink)] hover:text-[var(--green-d)]"
-                          title="クリックで内訳を表示"
-                        >
-                          <Chevron open={expanded.has(lane.name)} />
+                        <div className="flex items-center gap-1.5 overflow-hidden text-[12.5px] font-medium text-[var(--ink)]">
                           <span className="h-2.5 w-2.5 flex-shrink-0 rounded-sm" style={{ background: lane.color }} />
                           <span className="overflow-hidden text-ellipsis whitespace-nowrap">
                             {lane.name}
@@ -378,66 +362,55 @@ export function AnnualPlanPage() {
                           <span className="flex-shrink-0 text-[10.5px] text-[var(--ink3)]">
                             {catCount(lane)}
                           </span>
-                        </button>
+                        </div>
                       }
                       months={lane.months}
                       color={lane.color}
                       currentMonth={currentMonth}
                       tier="cat"
                     />
-                    {expanded.has(lane.name) &&
-                      (subCol
-                        ? lane.subs.map((sub) => {
-                            const subKey = lane.name + SEP + sub.name
-                            return (
-                              <div key={subKey}>
-                                {/* 中分類 sub-lane */}
-                                <LaneRow
-                                  label={
-                                    <button
-                                      type="button"
-                                      onClick={() => toggle(subKey)}
-                                      className="flex w-full items-center gap-1 overflow-hidden pl-4 text-left text-[12px] text-[var(--ink2)] hover:text-[var(--green-d)]"
-                                      title="クリックでタスクを表示"
-                                    >
-                                      <Chevron open={expanded.has(subKey)} />
-                                      <span className="overflow-hidden text-ellipsis whitespace-nowrap">
-                                        {sub.name}
-                                      </span>
-                                      <span className="flex-shrink-0 text-[10.5px] text-[var(--ink3)]">
-                                        {sub.tasks.length}
-                                      </span>
-                                    </button>
-                                  }
-                                  months={sub.months}
-                                  color={lane.color}
-                                  currentMonth={currentMonth}
-                                  tier="sub"
-                                />
-                                {expanded.has(subKey) &&
-                                  sub.tasks.map((t, i) => (
-                                    <LaneRow
-                                      key={`${t.key}-${i}`}
-                                      label={<TaskLabel t={t} pad="pl-9" />}
-                                      months={t.months}
-                                      color={lane.color}
-                                      currentMonth={currentMonth}
-                                      tier="task"
-                                    />
-                                  ))}
-                              </div>
-                            )
-                          })
-                        : lane.tasks.map((t, i) => (
+                    {subCol
+                      ? lane.subs.map((sub) => (
+                          <div key={lane.name + SEP + sub.name}>
+                            {/* 中分類 sub-header */}
                             <LaneRow
-                              key={`${t.key}-${i}`}
-                              label={<TaskLabel t={t} pad="pl-5" />}
-                              months={t.months}
+                              label={
+                                <div className="flex items-center gap-1.5 overflow-hidden pl-4 text-[12px] text-[var(--ink2)]">
+                                  <span className="overflow-hidden text-ellipsis whitespace-nowrap">
+                                    {sub.name}
+                                  </span>
+                                  <span className="flex-shrink-0 text-[10.5px] text-[var(--ink3)]">
+                                    {sub.tasks.length}
+                                  </span>
+                                </div>
+                              }
+                              months={sub.months}
                               color={lane.color}
                               currentMonth={currentMonth}
-                              tier="task"
+                              tier="sub"
                             />
-                          )))}
+                            {sub.tasks.map((t, i) => (
+                              <LaneRow
+                                key={`${t.key}-${i}`}
+                                label={<TaskLabel t={t} pad="pl-9" />}
+                                months={t.months}
+                                color={lane.color}
+                                currentMonth={currentMonth}
+                                tier="task"
+                              />
+                            ))}
+                          </div>
+                        ))
+                      : lane.tasks.map((t, i) => (
+                          <LaneRow
+                            key={`${t.key}-${i}`}
+                            label={<TaskLabel t={t} pad="pl-5" />}
+                            months={t.months}
+                            color={lane.color}
+                            currentMonth={currentMonth}
+                            tier="task"
+                          />
+                        ))}
                   </div>
                 ))}
               </div>
@@ -481,14 +454,6 @@ function cnMonth(isCurrent: boolean): string {
     'border-l border-[var(--line2)] py-2 text-center text-[11px]',
     isCurrent ? 'bg-[var(--green-l)]/15 font-semibold text-[var(--green-d)]' : 'text-[var(--ink3)]',
   ].join(' ')
-}
-
-function Chevron({ open }: { open: boolean }) {
-  return open ? (
-    <ChevronUpIcon className="h-3.5 w-3.5 flex-shrink-0 text-[var(--ink3)]" />
-  ) : (
-    <ChevronDownIcon className="h-3.5 w-3.5 flex-shrink-0 text-[var(--ink3)]" />
-  )
 }
 
 function TaskLabel({ t, pad }: { t: TaskLane; pad: string }) {

@@ -164,6 +164,8 @@ interface Props {
   editable: boolean
   /** How many leading attribute columns stay frozen next to the ID. */
   pinnedCount: number
+  /** Draw predecessor→successor dependency lines over the gantt (toggle). */
+  showDepLines: boolean
   onSaveWeek: (edit: WeekEdit) => void
   onEditRowCell: (row: Row, colId: string, value: CellValue) => void
   onEditRowKey: (row: Row, key: string) => void
@@ -200,6 +202,7 @@ export function GanttGrid({
   viewMode = 'week',
   editable,
   pinnedCount,
+  showDepLines,
   onSaveWeek,
   onEditRowCell,
   onEditRowKey,
@@ -345,6 +348,34 @@ export function GanttGrid({
     }
     return { planned, actual, plannedSum, actualSum }
   }, [rows, weeks.length])
+
+  // Dependency connector lines (predecessor finish → successor start). Y is
+  // deterministic from the display index (fixed row height), so lines draw even
+  // for virtualized rows. Red + backward = 逆ザヤ (its length shows the overlap).
+  const depLines = useMemo(() => {
+    if (!showDepLines) return []
+    const idxById = new Map(displayRows.map((m, i) => [String(m.row.id), i]))
+    const out: Array<{ x1: number; y1: number; x2: number; y2: number; violation: boolean }> = []
+    for (const m of displayRows) {
+      const sIdx = m.startIdx
+      const succIndex = idxById.get(String(m.row.id))
+      if (sIdx == null || succIndex == null) continue
+      for (const pid of (m.row.depends_on ?? []) as Array<string | number>) {
+        const pIndex = idxById.get(String(pid))
+        if (pIndex == null) continue
+        const pm = displayRows[pIndex]
+        if (pm.finishIdx == null) continue
+        out.push({
+          x1: (pm.finishIdx + 1) * weekColWidth,
+          y1: pIndex * ROW_H + ROW_H / 2,
+          x2: sIdx * weekColWidth,
+          y2: succIndex * ROW_H + ROW_H / 2,
+          violation: sIdx < pm.finishIdx,
+        })
+      }
+    }
+    return out
+  }, [showDepLines, displayRows, weekColWidth])
 
   const monthSpans = useMemo(() => {
     const spans: Array<{ startIdx: number; span: number; month: number }> = []
@@ -777,10 +808,87 @@ export function GanttGrid({
                       />
                     )
                   })}
+                  {/* progress / delay bar: thin line under the task span. green =
+                      progress, red = behind (expected − progress). Shows 遅れ量. */}
+                  {(() => {
+                    const s = model.startIdx
+                    const f = model.finishIdx
+                    if (s == null || f == null || model.progress == null) return null
+                    if (model.gantt.plannedSum <= 0) return null
+                    const x0 = s * weekColWidth
+                    const spanW = (f - s + 1) * weekColWidth
+                    const pf = Math.max(0, Math.min(1, model.progress / 100))
+                    const ef = Math.max(0, Math.min(1, model.expectedPct))
+                    return (
+                      <div
+                        className="pointer-events-none absolute z-[2]"
+                        style={{ left: x0, bottom: 2, width: spanW, height: 3 }}
+                        title={`進捗 ${model.progress}%${
+                          model.behind ? `／予定比 遅れ ${Math.round((ef - pf) * 100)}pt` : '（オントラック）'
+                        }`}
+                      >
+                        <div
+                          className="absolute inset-0 rounded-full"
+                          style={{ background: 'rgba(51,50,44,.10)' }}
+                        />
+                        <div
+                          className="absolute top-0 h-full rounded-full"
+                          style={{
+                            left: 0,
+                            width: `${pf * 100}%`,
+                            background: model.behind ? '#6FA98F' : '#266B53',
+                          }}
+                        />
+                        {model.behind && ef > pf && (
+                          <div
+                            className="absolute top-0 h-full rounded-full"
+                            style={{
+                              left: `${pf * 100}%`,
+                              width: `${(ef - pf) * 100}%`,
+                              background: '#A8442B',
+                            }}
+                          />
+                        )}
+                      </div>
+                    )
+                  })()}
                 </div>
               </div>
             )
           })}
+
+          {/* ---- Dependency lines (toggle) — SVG overlay in the week area.
+              Positioned after pinned+attr so it can't paint over the frozen
+              columns (which are sticky z-20 and cover it on horizontal scroll). */}
+          {showDepLines && depLines.length > 0 && (
+            <svg
+              className="pointer-events-none absolute z-[12]"
+              style={{ left: pinnedW + attrW, top: HEAD_H, width: gridW, height: totalH }}
+              width={gridW}
+              height={totalH}
+            >
+              <defs>
+                <marker id="dep-a" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto">
+                  <path d="M0,0 L6,3 L0,6 Z" fill="var(--ink3)" />
+                </marker>
+                <marker id="dep-av" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto">
+                  <path d="M0,0 L6,3 L0,6 Z" fill="#A8442B" />
+                </marker>
+              </defs>
+              {depLines.map((l, i) => (
+                <path
+                  key={i}
+                  d={`M ${l.x1} ${l.y1} L ${l.x2} ${l.y2}`}
+                  fill="none"
+                  stroke={l.violation ? '#A8442B' : 'var(--ink3)'}
+                  strokeWidth={l.violation ? 1.8 : 1.3}
+                  strokeDasharray={l.violation ? undefined : '3 2'}
+                  markerEnd={`url(#${l.violation ? 'dep-av' : 'dep-a'})`}
+                  opacity={0.85}
+                />
+              ))}
+            </svg>
+          )}
 
           {/* ---- Vertical today / as-of line (in the week area) ----
               z-10: above the colored week cells but BELOW the frozen columns
