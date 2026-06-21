@@ -1,0 +1,51 @@
+name: schedule
+
+# GitHub を使わないサーバー向け。サーバー上でイメージを「その場で組み立てて（build）」動かします。
+# 使い方（くわしくは オフライン導入手順.md）:
+#   1) このフォルダ一式をサーバーにコピー
+#   2) 同じ場所に .env を作る（.env.prod.example をコピーして編集）
+#   3) docker compose -f docker-compose.offline.yml up -d --build
+#   4) ブラウザで http://<サーバーのIP>:8080 を開く
+#
+# 注意: HTTPS を使わず http で開く場合は、.env の COOKIE_SECURE=false にしてください
+#       （true のままだとログインできません）。
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+    # 起動時に entrypoint.sh が自動でデータベースの更新（マイグレーション）を行います。
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    # パソコン側の 8080 番ポートで画面を出します（http://<サーバーのIP>:8080）。
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:
