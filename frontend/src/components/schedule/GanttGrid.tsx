@@ -35,6 +35,17 @@ const ACTUAL_W = 60 // 実績計 column
 const DIFF_W = 60 // 差（予定−実績）column
 const PROG_W = 66 // 進捗 column (手入力%、ビハインド色)
 
+// The trailing summary columns. They follow the attribute columns and can be
+// frozen too: the freeze count covers [attribute cols…, summary cols…], so the
+// freeze can extend up to 進捗.
+const SUMMARY_COLS = [
+  { key: 'plan', w: TOTAL_W, label: '予定計' },
+  { key: 'actual', w: ACTUAL_W, label: '実績計' },
+  { key: 'diff', w: DIFF_W, label: '差' },
+  { key: 'prog', w: PROG_W, label: '進捗' },
+] as const
+type SummaryDescriptor = (typeof SUMMARY_COLS)[number]
+
 /** Round to 1 decimal for compact hour totals. */
 const round1 = (x: number) => Math.round(x * 10) / 10
 
@@ -291,12 +302,17 @@ export function GanttGrid({
 
   // Plain rows (for status option lists) + lookup resolver for lookup columns.
   const plainRows = useMemo(() => displayRows.map((r) => r.row), [displayRows])
-  // Column order is fully user-controlled. The first `pinnedCount` attribute
-  // columns stay frozen next to the ID (Feature 1); the rest scroll. The ID
-  // (key_value) is always the leftmost frozen column.
-  const pinCount = Math.max(0, Math.min(pinnedCount, ordered.length))
-  const pinnedCols = useMemo(() => ordered.slice(0, pinCount), [ordered, pinCount])
-  const scrollCols = useMemo(() => ordered.slice(pinCount), [ordered, pinCount])
+  // Freezable sequence = [attribute columns…, summary columns…]. The first
+  // `pinnedCount` of them stay frozen next to the ID; the rest scroll. So the
+  // freeze can reach the summary columns (予定計…進捗) once all attrs are frozen.
+  const N = ordered.length
+  const pinCount = Math.max(0, Math.min(pinnedCount, N + SUMMARY_COLS.length))
+  const pinAttrCount = Math.min(pinCount, N)
+  const pinSummaryCount = Math.max(0, pinCount - N)
+  const pinnedCols = useMemo(() => ordered.slice(0, pinAttrCount), [ordered, pinAttrCount])
+  const scrollCols = useMemo(() => ordered.slice(pinAttrCount), [ordered, pinAttrCount])
+  const pinnedSummary = SUMMARY_COLS.slice(0, pinSummaryCount)
+  const scrollSummary = SUMMARY_COLS.slice(pinSummaryCount)
   // The status column auto-derives its badge from milestones (Feature 6) when
   // its config opts in; then the gantt shows the computed badge read-only.
   const autoStatusColId = useMemo(
@@ -306,15 +322,13 @@ export function GanttGrid({
     [ordered],
   )
 
-  const pinnedW = useMemo(
-    () => ID_W + pinnedCols.reduce((s, c) => s + colWidth(c), 0),
-    [pinnedCols],
-  )
-  const attrW = useMemo(
-    () =>
-      scrollCols.reduce((s, c) => s + colWidth(c), 0) + TOTAL_W + ACTUAL_W + DIFF_W + PROG_W,
-    [scrollCols],
-  )
+  const pinnedW =
+    ID_W +
+    pinnedCols.reduce((s, c) => s + colWidth(c), 0) +
+    pinnedSummary.reduce((s, c) => s + c.w, 0)
+  const attrW =
+    scrollCols.reduce((s, c) => s + colWidth(c), 0) +
+    scrollSummary.reduce((s, c) => s + c.w, 0)
 
   const rowVirt = useVirtualizer({
     count: displayRows.length,
@@ -476,6 +490,7 @@ export function GanttGrid({
                   {c.name}
                 </HeadCell>
               ))}
+              <SummaryHeads cols={pinnedSummary} />
             </div>
             {/* attr headers (scroll, sortable) */}
             <div className="flex flex-shrink-0" style={{ width: attrW, height: HEAD_H }}>
@@ -489,18 +504,7 @@ export function GanttGrid({
                   {c.name}
                 </HeadCell>
               ))}
-              <HeadCell style={{ width: TOTAL_W }} className="justify-end text-right">
-                予定計
-              </HeadCell>
-              <HeadCell style={{ width: ACTUAL_W }} className="justify-end text-right">
-                実績計
-              </HeadCell>
-              <HeadCell style={{ width: DIFF_W }} className="justify-end text-right">
-                差
-              </HeadCell>
-              <HeadCell style={{ width: PROG_W }} className="justify-end text-right">
-                進捗
-              </HeadCell>
+              <SummaryHeads cols={scrollSummary} />
             </div>
             {/* year band (top) + month spans (below) + today caption */}
             <div className="relative" style={{ width: gridW, height: HEAD_H }}>
@@ -690,6 +694,12 @@ export function GanttGrid({
                       />
                     </div>
                   ))}
+                  <RowSummaryCells
+                    cols={pinnedSummary}
+                    model={model}
+                    editable={editable}
+                    onEditProgress={onEditProgress}
+                  />
                 </div>
 
                 {/* attr block (scrolls) */}
@@ -713,35 +723,11 @@ export function GanttGrid({
                       />
                     </div>
                   ))}
-                  <div
-                    className="px-2.5 text-right text-[12.5px] font-medium text-[var(--ink2)]"
-                    style={{ width: TOTAL_W }}
-                  >
-                    {round1(model.gantt.plannedSum)}h
-                  </div>
-                  <div
-                    className="px-2.5 text-right text-[12.5px] font-medium text-[var(--ink2)]"
-                    style={{ width: ACTUAL_W }}
-                  >
-                    {round1(model.gantt.actualSum)}h
-                  </div>
-                  {(() => {
-                    const diff = round1(model.gantt.plannedSum - model.gantt.actualSum)
-                    return (
-                      <div
-                        className="px-2.5 text-right text-[12.5px] font-medium"
-                        style={{ width: DIFF_W, color: diff < 0 ? '#A8442B' : 'var(--ink3)' }}
-                        title="予定計 − 実績計（マイナス＝予定超過）"
-                      >
-                        {diff > 0 ? '+' : ''}
-                        {diff}h
-                      </div>
-                    )
-                  })()}
-                  <ProgressCell
+                  <RowSummaryCells
+                    cols={scrollSummary}
                     model={model}
                     editable={editable}
-                    onEdit={(v) => onEditProgress(model.row, v)}
+                    onEditProgress={onEditProgress}
                   />
                 </div>
 
@@ -931,6 +917,7 @@ export function GanttGrid({
               {pinnedCols.map((c) => (
                 <div key={c.id} style={{ width: colWidth(c) }} />
               ))}
+              <FooterSummaryCells cols={pinnedSummary} footTotals={footTotals} />
             </div>
             <div
               className="flex flex-shrink-0 items-center border-r border-[var(--line2)] bg-[#F4F1E8]"
@@ -939,31 +926,7 @@ export function GanttGrid({
               {scrollCols.map((c) => (
                 <div key={c.id} style={{ width: colWidth(c) }} />
               ))}
-              <div
-                className="px-2.5 text-right text-[12px] font-semibold text-[var(--ink)]"
-                style={{ width: TOTAL_W }}
-              >
-                {Math.round(footTotals.plannedSum)}h
-              </div>
-              <div
-                className="px-2.5 text-right text-[12px] font-semibold text-[var(--ink)]"
-                style={{ width: ACTUAL_W }}
-              >
-                {Math.round(footTotals.actualSum)}h
-              </div>
-              {(() => {
-                const diff = Math.round(footTotals.plannedSum - footTotals.actualSum)
-                return (
-                  <div
-                    className="px-2.5 text-right text-[12px] font-semibold"
-                    style={{ width: DIFF_W, color: diff < 0 ? '#A8442B' : 'var(--ink3)' }}
-                  >
-                    {diff > 0 ? '+' : ''}
-                    {diff}h
-                  </div>
-                )
-              })()}
-              <div style={{ width: PROG_W }} />
+              <FooterSummaryCells cols={scrollSummary} footTotals={footTotals} />
             </div>
             <div className="relative flex-shrink-0" style={{ width: gridW, height: FOOT_H }}>
               {weeks.map((_w, wi) => {
@@ -1516,5 +1479,130 @@ function ProgressCell({
         {p == null ? '—' : `${p}%`}
       </span>
     </button>
+  )
+}
+
+/** Header cells for a subset of the summary columns (予定計/実績計/差/進捗). */
+function SummaryHeads({ cols }: { cols: ReadonlyArray<SummaryDescriptor> }) {
+  return (
+    <>
+      {cols.map((col) => (
+        <HeadCell key={col.key} style={{ width: col.w }} className="justify-end text-right">
+          {col.label}
+        </HeadCell>
+      ))}
+    </>
+  )
+}
+
+/** Per-row summary cells for a subset of the summary columns. */
+function RowSummaryCells({
+  cols,
+  model,
+  editable,
+  onEditProgress,
+}: {
+  cols: ReadonlyArray<SummaryDescriptor>
+  model: ScheduleRowModel
+  editable: boolean
+  onEditProgress: (row: Row, value: number | null) => void
+}) {
+  return (
+    <>
+      {cols.map((col) => {
+        if (col.key === 'plan')
+          return (
+            <div
+              key="plan"
+              className="px-2.5 text-right text-[12.5px] font-medium text-[var(--ink2)]"
+              style={{ width: col.w }}
+            >
+              {round1(model.gantt.plannedSum)}h
+            </div>
+          )
+        if (col.key === 'actual')
+          return (
+            <div
+              key="actual"
+              className="px-2.5 text-right text-[12.5px] font-medium text-[var(--ink2)]"
+              style={{ width: col.w }}
+            >
+              {round1(model.gantt.actualSum)}h
+            </div>
+          )
+        if (col.key === 'diff') {
+          const diff = round1(model.gantt.plannedSum - model.gantt.actualSum)
+          return (
+            <div
+              key="diff"
+              className="px-2.5 text-right text-[12.5px] font-medium"
+              style={{ width: col.w, color: diff < 0 ? '#A8442B' : 'var(--ink3)' }}
+              title="予定計 − 実績計（マイナス＝予定超過）"
+            >
+              {diff > 0 ? '+' : ''}
+              {diff}h
+            </div>
+          )
+        }
+        return (
+          <ProgressCell
+            key="prog"
+            model={model}
+            editable={editable}
+            onEdit={(v) => onEditProgress(model.row, v)}
+          />
+        )
+      })}
+    </>
+  )
+}
+
+/** Footer cells for a subset of the summary columns (進捗 left blank). */
+function FooterSummaryCells({
+  cols,
+  footTotals,
+}: {
+  cols: ReadonlyArray<SummaryDescriptor>
+  footTotals: { plannedSum: number; actualSum: number }
+}) {
+  return (
+    <>
+      {cols.map((col) => {
+        if (col.key === 'plan')
+          return (
+            <div
+              key="plan"
+              className="px-2.5 text-right text-[12px] font-semibold text-[var(--ink)]"
+              style={{ width: col.w }}
+            >
+              {Math.round(footTotals.plannedSum)}h
+            </div>
+          )
+        if (col.key === 'actual')
+          return (
+            <div
+              key="actual"
+              className="px-2.5 text-right text-[12px] font-semibold text-[var(--ink)]"
+              style={{ width: col.w }}
+            >
+              {Math.round(footTotals.actualSum)}h
+            </div>
+          )
+        if (col.key === 'diff') {
+          const diff = Math.round(footTotals.plannedSum - footTotals.actualSum)
+          return (
+            <div
+              key="diff"
+              className="px-2.5 text-right text-[12px] font-semibold"
+              style={{ width: col.w, color: diff < 0 ? '#A8442B' : 'var(--ink3)' }}
+            >
+              {diff > 0 ? '+' : ''}
+              {diff}h
+            </div>
+          )
+        }
+        return <div key="prog" style={{ width: col.w }} />
+      })}
+    </>
   )
 }

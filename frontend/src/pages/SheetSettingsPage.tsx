@@ -371,13 +371,22 @@ function SheetLevelSettings({
     },
   })
 
+  // Freezable = attribute columns + the 4 summary columns (予定計/実績計/差/進捗),
+  // so the freeze can extend up to 進捗.
+  const SUMMARY_LABELS = ['予定計', '実績計', '差', '進捗']
   const pinned = settings.pinned_columns ?? 1
-  const pinnedNarrow = settings.pinned_columns_narrow ?? Math.min(1, pinned)
-  const freezeOptions = Array.from({ length: columns.length + 1 }, (_, n) => (
-    <option key={n} value={String(n)}>
-      {n === 0 ? 'ID のみ固定' : `ID ＋ 先頭${n}列を固定`}
-    </option>
-  ))
+  const nCols = columns.length
+  const freezeOptions = Array.from({ length: nCols + 1 + SUMMARY_LABELS.length }, (_, n) => {
+    let label: string
+    if (n === 0) label = 'ID のみ固定'
+    else if (n <= nCols) label = `ID ＋ 先頭${n}列を固定`
+    else label = `ID ＋ 全${nCols}列 ＋ ${SUMMARY_LABELS.slice(0, n - nCols).join('・')}`
+    return (
+      <option key={n} value={String(n)}>
+        {label}
+      </option>
+    )
+  })
 
   return (
     <Card>
@@ -387,7 +396,7 @@ function SheetLevelSettings({
       <CardBody>
         <div className="flex flex-col gap-3">
           <label className="text-[12px] text-[var(--ink2)]">
-            左端に固定する列数（通常）
+            左端に固定する列
             <Select
               className="mt-1 w-full"
               value={String(pinned)}
@@ -399,22 +408,8 @@ function SheetLevelSettings({
             >
               {freezeOptions}
             </Select>
-          </label>
-          <label className="text-[12px] text-[var(--ink2)]">
-            左端に固定する列数（最小化時）
-            <Select
-              className="mt-1 w-full"
-              value={String(pinnedNarrow)}
-              onChange={(e) =>
-                mutation.mutate({
-                  settings: { ...settings, pinned_columns_narrow: Number(e.target.value) },
-                })
-              }
-            >
-              {freezeOptions}
-            </Select>
             <span className="mt-1 block text-[11px] text-[var(--ink3)]">
-              スケジュール画面の「固定列: 通常／最小」ボタンで、この2つの固定列数を切り替えられます。狭い画面で表が見えない時は「最小」に。
+              スクロールしても左端に固定する列。IDは常に固定。属性列に加えて、予定計・実績計・差・進捗まで固定できます。
             </span>
           </label>
           <label className="text-[12px] text-[var(--ink2)]">
