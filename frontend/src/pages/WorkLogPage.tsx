@@ -3,12 +3,14 @@
 // a line as soon as you enter hours — no separate "add" click. Hours roll up into
 // each task's weekly actual (see backend worklog_service).
 
-import { useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useOrg } from '@/hooks/useSheets'
 import { useAuth } from '@/hooks/useAuth'
 import { useWorkLogs, useWorkLogMutations } from '@/hooks/useWorkLog'
 import { WorkLogRow } from '@/components/worklog/WorkLogRow'
+import { WorkLogCard } from '@/components/worklog/WorkLogCard'
 import type { WorkLogRowValue } from '@/components/worklog/WorkLogRow'
 import { WorklogMasterEditor } from '@/components/worklog/WorklogMasterEditor'
 import { PageHeader } from '@/components/PageHeader'
@@ -54,10 +56,21 @@ function toInput(v: WorkLogRowValue, work_date: string): WorkLogInput {
 const TH = 'px-2 py-2.5 font-medium'
 
 export function WorkLogPage() {
-  const [date, setDate] = useState(() => fmtISO(new Date()))
+  // Deep-link from a 未入力 notification: ?date=YYYY-MM-DD opens that day.
+  const [searchParams] = useSearchParams()
+  const [date, setDate] = useState(() => searchParams.get('date') || fmtISO(new Date()))
   const [draft, setDraft] = useState<WorkLogRowValue>(EMPTY_DRAFT)
   const [draftKey, setDraftKey] = useState(0) // bump to remount the draft row after create
   const [showSettings, setShowSettings] = useState(false)
+
+  // Follow later ?date changes (e.g. clicking another 未入力 notification).
+  const dateParam = searchParams.get('date')
+  useEffect(() => {
+    if (dateParam) setDate(dateParam)
+  }, [dateParam])
+
+  const [copying, setCopying] = useState(false)
+  const qc = useQueryClient()
 
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
@@ -79,6 +92,40 @@ export function WorkLogPage() {
     const d = parseDate(date)
     d.setDate(d.getDate() + delta)
     setDate(fmtISO(d))
+  }
+
+  // Duplicate the previous day's lines into the current date — for people whose
+  // work is similar day to day (just tweak the hours). Skips if there are none.
+  async function copyYesterday() {
+    const d = parseDate(date)
+    d.setDate(d.getDate() - 1)
+    const yIso = fmtISO(d)
+    setCopying(true)
+    try {
+      const prev = await api.getWorkLogs({ from: yIso, to: yIso })
+      if (prev.length === 0) {
+        alert('前日の実績入力がありません。')
+        return
+      }
+      await Promise.all(
+        prev.map((l) =>
+          api.createWorkLog({
+            work_date: date,
+            row_id: l.row_id,
+            cat1: l.cat1,
+            cat2: l.cat2,
+            memo: l.memo,
+            hours: l.hours,
+          }),
+        ),
+      )
+      qc.invalidateQueries({ queryKey: ['worklogs'] })
+      qc.invalidateQueries({ queryKey: ['effort'] })
+      qc.invalidateQueries({ queryKey: ['aggregate'] })
+      qc.invalidateQueries({ queryKey: ['sheet'] })
+    } finally {
+      setCopying(false)
+    }
   }
 
   // Draft row: merge edits; once hours > 0 is entered, auto-create the line.
@@ -128,6 +175,15 @@ export function WorkLogPage() {
             <Button variant="outline" size="sm" onClick={() => setDate(fmtISO(new Date()))}>
               今日
             </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={copyYesterday}
+              disabled={copying}
+              title="前日の入力をこの日にコピー（時間だけ直せばOK）"
+            >
+              前日コピー
+            </Button>
             {isAdmin && (
               <Button
                 variant={showSettings ? 'primary' : 'outline'}
@@ -153,7 +209,8 @@ export function WorkLogPage() {
           </div>
         )}
 
-        <Card>
+        {/* Desktop: dense table. Mobile: stacked cards (see below). */}
+        <Card className="hidden md:block">
           <CardBody className="overflow-x-auto px-0 py-0">
             <table className="w-full min-w-[720px] border-collapse text-[12.5px]">
               <thead>
@@ -211,6 +268,41 @@ export function WorkLogPage() {
             </div>
           </CardBody>
         </Card>
+
+        {/* Mobile: stacked cards (big tap targets, decimal keypad for hours). */}
+        <div className="flex flex-col gap-2 md:hidden">
+          {logsQ.isLoading ? (
+            <div className="rounded-[12px] border border-[var(--line)] bg-[var(--surface)] px-3 py-4 text-[12.5px] text-[var(--ink3)]">
+              読み込み中…
+            </div>
+          ) : (
+            logs.map((l) => (
+              <WorkLogCard
+                key={l.id}
+                value={toRowValue(l)}
+                tasks={tasks}
+                multiSheet={multiSheet}
+                master={master}
+                onChange={(patch) => updateLog(l.id, patch)}
+                onDelete={() => remove.mutate(l.id)}
+              />
+            ))
+          )}
+          <WorkLogCard
+            key={`draft-card-${draftKey}`}
+            value={draft}
+            tasks={tasks}
+            multiSheet={multiSheet}
+            master={master}
+            onChange={onDraftChange}
+          />
+          <div className="flex items-center justify-between px-1 py-1 text-[12px] text-[var(--ink2)]">
+            <span className="text-[var(--ink3)]">時間を入れると自動で追加されます。</span>
+            <span>
+              合計 <b className="text-[var(--ink)]">{total}</b> h
+            </span>
+          </div>
+        </div>
 
         {note && (
           <div className="rounded-[10px] border border-[var(--line)] bg-[#FBFAF5] px-3.5 py-2.5 text-[12px] leading-relaxed text-[var(--ink2)]">

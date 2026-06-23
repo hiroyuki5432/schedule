@@ -1,7 +1,7 @@
 """Pydantic v2 request/response models. Field names mirror docs/API.md exactly."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal, Optional
 
@@ -58,6 +58,8 @@ class MemberOut(BaseModel):
     name: str
     email: str
     role: Role
+    # Whether this user files a daily 日報 (drives 未入力 reminders).
+    worklog_required: bool = True
 
 
 class MemberCreate(BaseModel):
@@ -65,12 +67,14 @@ class MemberCreate(BaseModel):
     email: str
     password: str
     role: Role = "member"
+    worklog_required: bool = True
 
 
 class MemberUpdate(BaseModel):
     name: Optional[str] = None
     role: Optional[Role] = None
     password: Optional[str] = None
+    worklog_required: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +206,7 @@ class MilestoneOut(BaseModel):
     id: int
     row_id: int
     name: str
+    kind: Literal["phase", "milestone"] = "phase"
     boundary_date: date
     color: Optional[str] = None
     order: int
@@ -211,6 +216,7 @@ class MilestoneOut(BaseModel):
 
 class MilestoneIn(BaseModel):
     name: str
+    kind: Literal["phase", "milestone"] = "phase"
     boundary_date: date
     color: Optional[str] = None
     order: int = 0
@@ -293,6 +299,46 @@ class UserDayWorkLog(BaseModel):
     user_name: str
     total_hours: float
     logs: list[WorkLogOut]
+
+
+# ---------------------------------------------------------------------------
+# Notifications (アプリ内通知・ベル)
+# ---------------------------------------------------------------------------
+NotificationType = Literal["behind", "dep", "overrun", "milestone", "worklog_missing"]
+
+
+class NotificationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    type: NotificationType
+    title: str
+    body: Optional[str] = None
+    ref_kind: Optional[str] = None
+    ref_id: Optional[str] = None
+    created_at: datetime
+    read_at: Optional[datetime] = None
+
+
+class NotificationItem(BaseModel):
+    """One alert the front end detected while rendering the schedule. Addressed to
+    `target_user_id` (the task assignee). `dedupe_key` makes it idempotent."""
+    target_user_id: int
+    type: NotificationType
+    title: str
+    body: Optional[str] = None
+    ref_kind: Optional[str] = None
+    ref_id: Optional[str] = None
+    dedupe_key: str
+
+
+class NotificationRegister(BaseModel):
+    items: list[NotificationItem] = Field(default_factory=list)
+
+
+class MarkReadRequest(BaseModel):
+    # When omitted/empty, marks ALL of the caller's notifications read.
+    ids: Optional[list[int]] = None
 
 
 SheetDetailOut.model_rebuild()

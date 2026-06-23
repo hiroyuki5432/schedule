@@ -6,12 +6,29 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.deps import get_row_for_user
-from app.models import RowMilestone, User
+from app.deps import get_row_for_user, get_sheet_for_user
+from app.models import Row, RowMilestone, User
 from app.schemas import MilestoneIn, MilestoneOut
 from app.security import current_user
 
 router = APIRouter(prefix="/api", tags=["milestones"])
+
+
+@router.get("/sheets/{sheet_id}/milestones", response_model=list[MilestoneOut])
+def list_sheet_milestones(
+    sheet_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> list[RowMilestone]:
+    """All milestones for every row in a sheet, in one query (avoids the N+1
+    per-row fetch the schedule used to do — big load-time win)."""
+    get_sheet_for_user(db, sheet_id, user)
+    return list(
+        db.execute(
+            select(RowMilestone)
+            .join(Row, Row.id == RowMilestone.row_id)
+            .where(Row.sheet_id == sheet_id)
+            .order_by(RowMilestone.row_id, RowMilestone.order, RowMilestone.boundary_date)
+        ).scalars()
+    )
 
 
 @router.get("/rows/{row_id}/milestones", response_model=list[MilestoneOut])
@@ -49,6 +66,7 @@ def replace_milestones(
         m = RowMilestone(
             row_id=row_id,
             name=item.name,
+            kind=item.kind,
             boundary_date=item.boundary_date,
             color=item.color,
             order=item.order if item.order is not None else idx,

@@ -105,34 +105,55 @@ export function literalStatusBadge(value: string): StatusBadge | null {
 }
 
 /**
- * Auto-derive a status badge from a row's milestones + today (Feature 6):
- *   all milestones done                              → 完了
- *   a boundary < today exists that is not done       → 遅延
- *   any milestone done, or today ≥ earliest boundary → 進行中
- *   else                                             → 未着手
- * Reuses the literal status palette. Returns null when there are no milestones.
+ * Auto-derive a status badge from a row's PHASES + milestones (Feature 3):
+ *   - No actual effort and no achieved milestone        → 未着手 (grey)
+ *   - Otherwise the badge is the CURRENT PHASE name/color. The active phase
+ *     advances to the next phase each time the milestone between them is
+ *     achieved (done). 「マイルストン達成で次フェーズへ移行」.
+ *   - When the final milestone (no phase after it) is achieved → 完了 (green)
+ * The 遅延 indicator (何週遅延) is shown separately by the grid; here we only
+ * pick the phase label/color. Returns null when there are no milestones/phases.
  */
-export function statusFromMilestones(
+export function statusFromPhases(
   milestones: Milestone[],
-  today: Date = new Date(),
+  ctx: { actualSum: number },
 ): StatusBadge | null {
   if (milestones.length === 0) return null
-  const t = today.getTime()
-
-  if (milestones.every((m) => m.done)) return literalStatusBadge('完了')
-
-  const overdue = milestones.some(
-    (m) => !m.done && parseDate(m.boundary_date).getTime() < t,
+  const sorted = [...milestones].sort(
+    (a, b) =>
+      a.order - b.order ||
+      parseDate(a.boundary_date).getTime() - parseDate(b.boundary_date).getTime(),
   )
-  if (overdue) return literalStatusBadge('遅延')
+  const isMilestone = (m: Milestone) => m.kind === 'milestone'
+  const phases = sorted.filter((m) => !isMilestone(m))
+  const anyDone = sorted.some((m) => m.done)
 
-  const earliest = Math.min(
-    ...milestones.map((m) => parseDate(m.boundary_date).getTime()),
-  )
-  if (milestones.some((m) => m.done) || t >= earliest)
-    return literalStatusBadge('進行中')
+  if (ctx.actualSum <= 0 && !anyDone) return literalStatusBadge('未着手')
 
-  return literalStatusBadge('未着手')
+  // No phases configured (milestones only): fall back to done-based state.
+  if (phases.length === 0) {
+    return literalStatusBadge(sorted.every((m) => m.done) ? '完了' : '進行中')
+  }
+
+  // Walk the ordered list; each achieved milestone advances to the next phase.
+  let active = phases[0]
+  let completed = false
+  for (let i = 0; i < sorted.length; i++) {
+    const m = sorted[i]
+    if (isMilestone(m) && m.done) {
+      const next = sorted.slice(i + 1).find((x) => !isMilestone(x))
+      if (next) {
+        active = next
+        completed = false
+      } else {
+        completed = true
+      }
+    }
+  }
+  if (completed) return literalStatusBadge('完了')
+
+  const bg = active.color || '#EFEDE4'
+  return { label: active.name, bg, color: readableInk(bg) }
 }
 
 /** Default status values offered even when not yet present in the data. */

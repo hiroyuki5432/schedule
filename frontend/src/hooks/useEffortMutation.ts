@@ -18,8 +18,16 @@ export function useEffortMutation(sheetId: string | undefined) {
   const key = ['effort', sheetId]
 
   return useMutation({
-    mutationFn: ({ rowId, weekStart, field, value }: Vars) =>
-      api.putEffort(rowId, weekStart, { [field]: value }),
+    mutationFn: ({ rowId, weekStart, field, value }: Vars) => {
+      // Send the current cell's version so a concurrent edit is detected (409)
+      // rather than silently last-write-wins. New cells have no version → create.
+      const cached = qc.getQueryData<Effort[]>(key) ?? []
+      const cur = cached.find((e) => e.row_id === rowId && e.week_start === weekStart)
+      return api.putEffort(rowId, weekStart, {
+        [field]: value,
+        ...(cur?.version != null ? { version: cur.version } : {}),
+      })
+    },
     onMutate: async (vars) => {
       await qc.cancelQueries({ queryKey: key })
       const prev = qc.getQueryData<Effort[]>(key) ?? []

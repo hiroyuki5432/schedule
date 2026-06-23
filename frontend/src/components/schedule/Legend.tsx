@@ -29,6 +29,9 @@ export function Legend({ rows, defaultMilestones = [] }: Props) {
     // source of truth for what each color means.
     const seen = new Map<string, string>()
     for (const d of defaultMilestones) {
+      // Milestone-kind presets are ◇ points (covered by the ◇ legend item below),
+      // not colored spans — only phases contribute a color swatch.
+      if (d.kind === 'milestone') continue
       const label = d.name?.trim()
       if (label && !seen.has(label)) seen.set(label, d.color || 'var(--p-neutral)')
     }
@@ -61,23 +64,22 @@ export function Legend({ rows, defaultMilestones = [] }: Props) {
           <span className="h-px w-3" style={{ background: 'rgba(51,50,44,.14)' }} />
           <span className="text-[8px] font-semibold text-[#33322c]">10</span>
         </span>
-        週セル：上＝予定 / 下＝実績（実績が予定超過＝赤）
+        上＝予定 / 下＝実績
       </Item>
       <Item>
         <span
           className="h-[9px] w-[9px] border-[1.6px] border-[var(--ink)] bg-white"
           style={{ transform: 'rotate(45deg)' }}
         />
-        予定（中空）
         <span
-          className="ml-1.5 h-[9px] w-[9px] border-[1.6px] border-[var(--ink)] bg-[var(--ink)]"
+          className="ml-1 h-[9px] w-[9px] border-[1.6px] border-[var(--ink)] bg-[var(--ink)]"
           style={{ transform: 'rotate(45deg)' }}
         />
-        実績（塗り）＝マイルストン
+        予定／実績の節目
       </Item>
       <Item>
         <span className="font-semibold text-[var(--accent)]">20</span>
-        変化点（今週の断面から変更＝文字色）
+        前週から変更
       </Item>
       <HelpButton />
     </div>
@@ -108,7 +110,7 @@ function HelpButton() {
       </button>
       {open && (
         <div className="absolute left-0 top-6 z-40 w-[240px] rounded-[10px] border border-[var(--line)] bg-[var(--ink)] px-3 py-2 text-[11.5px] leading-relaxed text-white shadow-lg">
-          色は設定画面の「既定マイルストン」で定義し、各行はその色を引き継ぎます（◇で日付・達成を設定）。遅延=最後の節目を過ぎて未達成。変化点=今週の断面（週初に自動取得）から工数を変えた所＝編集した週だけ赤。
+          色は設定画面の「既定マイルストン」で定義（◇で日付・達成を設定）。遅延=最後の節目を過ぎて未達成。前週から予定を変えた週は文字色が変わります。
         </div>
       )}
     </div>

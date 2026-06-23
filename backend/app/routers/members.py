@@ -35,6 +35,7 @@ def create_member(
         email=payload.email,
         name=payload.name,
         role=payload.role,
+        worklog_required=payload.worklog_required,
         password_hash=hash_password(payload.password),
     )
     db.add(member)
@@ -62,6 +63,8 @@ def update_member(
         member.name = payload.name
     if payload.role is not None:
         member.role = payload.role
+    if payload.worklog_required is not None:
+        member.worklog_required = payload.worklog_required
     if payload.password is not None:
         member.password_hash = hash_password(payload.password)
     db.commit()

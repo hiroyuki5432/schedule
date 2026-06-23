@@ -8,6 +8,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Avatar } from '@/components/ui/Avatar'
 import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { Modal } from '@/components/ui/Modal'
 import { deriveStatus, literalStatusBadge, statusOptions } from '@/lib/status'
 import { cn } from '@/lib/format'
 import type { CellValue, Column, Member, Row } from '@/types/api'
@@ -92,7 +94,7 @@ export function InlineCell({
           pad,
           className,
         )}
-        title="参照列（読み取り専用）"
+        title={text ? `${text}（参照列・読み取り専用）` : '参照列（読み取り専用）'}
       >
         {text}
       </div>
@@ -146,6 +148,20 @@ export function InlineCell({
     )
   }
 
+  // --- Editable: multi-line free text (large input mode) → modal textarea ---
+  if (column.type === 'text' && column.config?.multiline) {
+    return (
+      <MultilineCell
+        value={value == null ? '' : String(value)}
+        editable={editable}
+        pad={pad}
+        label={column.name}
+        className={className}
+        onSave={(v) => onSave(v === '' ? null : v)}
+      />
+    )
+  }
+
   // --- Editable: text / number / date (text inputs) ---
   const inputType = column.type === 'number' ? 'number' : column.type === 'date' ? 'date' : 'text'
   const display =
@@ -160,6 +176,8 @@ export function InlineCell({
       <button
         type="button"
         onClick={() => setEditing(true)}
+        // Full value on hover so narrow columns stay readable (truncated text).
+        title={value == null || value === '' ? undefined : String(value)}
         className={cn(
           'box-border flex h-full w-full items-center overflow-hidden text-ellipsis whitespace-nowrap rounded text-left text-[12.5px] hover:bg-[var(--line2)]',
           pad,
@@ -188,11 +206,111 @@ export function InlineCell({
   )
 }
 
+/** Free-text cell with the 複数行入力 flag: the cell shows the first line; clicking
+ *  opens a roomy textarea modal for multi-line editing (Feature: 大規模入力). */
+function MultilineCell({
+  value,
+  editable,
+  pad,
+  label,
+  className,
+  onSave,
+}: {
+  value: string
+  editable: boolean
+  pad: string
+  label: string
+  className?: string
+  onSave: (v: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const firstLine = value.split('\n')[0]
+  const hasMore = value.includes('\n')
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => editable && setOpen(true)}
+        title={value || undefined}
+        className={cn(
+          'box-border flex h-full w-full items-center gap-1 overflow-hidden rounded text-left text-[12.5px] hover:bg-[var(--line2)]',
+          pad,
+          className,
+        )}
+      >
+        <span className="overflow-hidden text-ellipsis whitespace-nowrap">
+          {value === '' ? <span className="text-[var(--ink3)]">—</span> : firstLine}
+        </span>
+        {hasMore && <span className="flex-shrink-0 text-[10px] text-[var(--ink3)]">⋯</span>}
+      </button>
+      {open && (
+        <MultilineCellEditor
+          initial={value}
+          label={label}
+          onCancel={() => setOpen(false)}
+          onSave={(v) => {
+            setOpen(false)
+            onSave(v)
+          }}
+        />
+      )}
+    </>
+  )
+}
+
+function MultilineCellEditor({
+  initial,
+  label,
+  onSave,
+  onCancel,
+}: {
+  initial: string
+  label: string
+  onSave: (v: string) => void
+  onCancel: () => void
+}) {
+  const [val, setVal] = useState(initial)
+  const ref = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    ref.current?.focus()
+  }, [])
+  return (
+    <Modal title={label || '入力'} onClose={onCancel} widthClass="w-[560px]">
+      <textarea
+        ref={ref}
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        onKeyDown={(e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            e.preventDefault()
+            onSave(val.trim())
+          }
+        }}
+        rows={12}
+        className="w-full resize-y rounded-[8px] border border-[var(--line)] bg-[var(--surface)] p-2.5 text-[13px] leading-relaxed outline-none focus:border-[var(--green-l)]"
+      />
+      <div className="mt-3 flex items-center justify-between">
+        <span className="text-[11px] text-[var(--ink3)]">
+          Ctrl/⌘+Enter で保存 ・ Esc で取消
+        </span>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={onCancel}>
+            キャンセル
+          </Button>
+          <Button size="sm" onClick={() => onSave(val.trim())}>
+            保存
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 function MemberChip({ members, id }: { members: Member[]; id: string }) {
   const m = members.find((x) => String(x.id) === id)
   if (!m) return <span className="text-[12px] text-[var(--ink3)]">—</span>
   return (
-    <span className="flex items-center gap-1.5 overflow-hidden">
+    <span className="flex items-center gap-1.5 overflow-hidden" title={m.name}>
       <Avatar name={m.name} seed={String(m.id)} />
       <span className="overflow-hidden text-ellipsis whitespace-nowrap text-[12px]">
         {m.name}

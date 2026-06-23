@@ -2,7 +2,7 @@
 // Each cell is editable per column type via InlineCell (text/number/date inputs,
 // dropdown/member selects, lookup read-only, status badge computed). Add row.
 import { useEffect, useMemo, useState } from 'react'
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { useMembers } from '@/hooks/useSheets'
 import { useRowMutation } from '@/hooks/useRowMutation'
@@ -12,7 +12,7 @@ import { Card } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { InlineCell } from '@/components/schedule/InlineCell'
-import { statusFromMilestones } from '@/lib/status'
+import { statusFromPhases } from '@/lib/status'
 import { PlusIcon, TrashIcon } from '@/components/ui/icons'
 import type { CellValue, Column, Milestone, Row } from '@/types/api'
 
@@ -84,28 +84,32 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
         ?.id ?? null,
     [columns],
   )
-  const milestoneQs = useQueries({
-    queries: rows.map((r) => ({
-      queryKey: ['milestones', r.id],
-      queryFn: () => api.getMilestones(r.id),
-      enabled: !!autoStatusColId,
-    })),
+  const milestonesQ = useQuery({
+    queryKey: ['sheet-milestones', sheetId],
+    queryFn: () => api.getSheetMilestones(sheetId),
+    enabled: !!autoStatusColId,
   })
   const autoStatusByRow = useMemo(() => {
-    const map = new Map<string, ReturnType<typeof statusFromMilestones>>()
+    const map = new Map<string, ReturnType<typeof statusFromPhases>>()
     if (!autoStatusColId) return map
-    const today = new Date()
-    rows.forEach((r, idx) => {
-      const ms: Milestone[] = milestoneQs[idx]?.data ?? []
-      map.set(r.id, statusFromMilestones(ms, today))
+    const byRow = new Map<string, Milestone[]>()
+    for (const ms of milestonesQ.data ?? []) {
+      const arr = byRow.get(String(ms.row_id))
+      if (arr) arr.push(ms)
+      else byRow.set(String(ms.row_id), [ms])
+    }
+    rows.forEach((r) => {
+      // No effort data in the table view → don't force 未着手 by effort; show the
+      // current phase (or 完了 when the final milestone is achieved).
+      map.set(
+        r.id,
+        statusFromPhases(byRow.get(String(r.id)) ?? [], {
+          actualSum: Number.POSITIVE_INFINITY,
+        }),
+      )
     })
     return map
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    rows,
-    autoStatusColId,
-    milestoneQs.map((q) => q.dataUpdatedAt).join(','),
-  ])
+  }, [rows, autoStatusColId, milestonesQ.data])
 
   // Client-side sort on the displayed rows (Feature 1).
   const [sort, setSort] = useState<SortState | null>(null)
@@ -319,7 +323,7 @@ function SortHeader({
 function AutoStatusCell({
   badge,
 }: {
-  badge: ReturnType<typeof statusFromMilestones>
+  badge: ReturnType<typeof statusFromPhases>
 }) {
   return (
     <div

@@ -42,12 +42,19 @@ export interface Member {
   name: string
   email: string
   role: Role
+  /** Whether this user files a daily 日報 (drives 未入力 reminders). */
+  worklog_required: boolean
 }
 
-/** A default phase (milestone) preset configured per sheet. */
+/** A default phase/milestone preset configured per sheet. */
 export interface DefaultMilestone {
   name: string
   color: string
+  /** 'phase' = colored span (default); 'milestone' = ◇ point. Legacy = phase. */
+  kind?: 'phase' | 'milestone'
+  /** Phase only: relative width used to auto-distribute milestone dates across a
+   *  row's 開始日→完了日 span. Default 1. */
+  weight?: number
 }
 
 export interface SheetSettings {
@@ -109,6 +116,8 @@ export interface ColumnConfig {
   auto_from_milestones?: boolean
   /** When true, this column's value resets each week (週次リセット). */
   weekly_reset?: boolean
+  /** text only: edit in a large multi-line textarea (modal) instead of a single line. */
+  multiline?: boolean
   // lookup. Each of local_key/match/return may be the literal "__id__"
   // (meaning the row's key_value) or a column id.
   target_sheet_id?: string
@@ -166,6 +175,8 @@ export interface Milestone {
   id: string
   row_id: string
   name: string
+  /** 'phase' = colored gantt segment start; 'milestone' = ◇ point between phases. */
+  kind: 'phase' | 'milestone'
   boundary_date: string // YYYY-MM-DD (planned boundary)
   color: string
   order: number
@@ -235,4 +246,34 @@ export interface UserDayWorkLog {
   user_name: string
   total_hours: number
   logs: WorkLog[]
+}
+
+// ---- Notifications (アプリ内通知・ベル) ----
+export type NotificationType =
+  | 'behind'
+  | 'dep'
+  | 'overrun'
+  | 'milestone'
+  | 'worklog_missing'
+
+export interface Notification {
+  id: string
+  type: NotificationType
+  title: string
+  body: string | null
+  ref_kind: string | null
+  ref_id: string | null
+  created_at: string
+  read_at: string | null
+}
+
+/** One alert detected on the front end while rendering the schedule. */
+export interface NotificationItem {
+  target_user_id: string
+  type: NotificationType
+  title: string
+  body?: string | null
+  ref_kind?: string | null
+  ref_id?: string | null
+  dedupe_key: string
 }

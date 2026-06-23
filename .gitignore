@@ -32,3 +32,6 @@ Thumbs.db
 
 # Docker
 pgdata/
+
+# Database backups (scripts/backup.sh, db-backup service)
+/backups/

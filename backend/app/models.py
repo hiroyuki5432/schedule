@@ -48,6 +48,9 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False, default="member")  # 'admin' | 'member'
+    # Whether this user is expected to file a daily work-log (日報). When false
+    # (e.g. admins, 外注), they never receive 未入力 reminders. Default true.
+    worklog_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -179,6 +182,9 @@ class RowMilestone(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     row_id: Mapped[int] = mapped_column(ForeignKey("rows.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 'phase' (色付き区間の開始境界) | 'milestone' (フェーズ間の◇点). Phases define
+    # the colored gantt segment; milestones draw a diamond marker only.
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="phase")
     boundary_date: Mapped[date] = mapped_column(Date, nullable=False)
     color: Mapped[str | None] = mapped_column(String(64), nullable=True)
     order: Mapped[int] = mapped_column("order", Integer, nullable=False, default=0)
@@ -246,4 +252,43 @@ class WorkLog(Base):
     __table_args__ = (
         Index("ix_worklog_row_date", "row_id", "work_date"),
         Index("ix_worklog_org_user_date", "org_id", "user_id", "work_date"),
+    )
+
+
+class Notification(Base):
+    """An in-app notification (ベル). Created lazily on access — no cron:
+
+    - behind / dep(逆ザヤ) / overrun / milestone超過 are registered by the front
+      end when it detects the condition while rendering the schedule, addressed to
+      the task's assignee.
+    - worklog_missing is generated server-side when the recipient opens the app
+      (GET /api/notifications) for past business days they have no 日報.
+
+    `dedupe_key` (unique per user) makes every condition-occurrence idempotent, so
+    re-detection on each page view never creates duplicates.
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ref_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)  # 'row' | 'worklog_day'
+    ref_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "dedupe_key", name="uq_notif_user_dedupe"),
+        Index("ix_notif_user_unread", "user_id", "read_at", "created_at"),
     )

@@ -16,6 +16,7 @@ from app.routers import (
     export,
     members,
     milestones,
+    notifications,
     org,
     rows,
     sheets,
@@ -61,6 +62,7 @@ app.include_router(snapshots.router)
 app.include_router(aggregate.router)
 app.include_router(export.router)
 app.include_router(worklog.router)
+app.include_router(notifications.router)
 
 
 @app.get("/api/health", tags=["health"])

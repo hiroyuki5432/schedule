@@ -31,6 +31,28 @@ docker compose up --build
 - backend: `cd backend && python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt && uvicorn app.main:app --reload`
 - frontend: `cd frontend && npm install && npm run dev`
 
+## テスト
+- バックエンド（pytest、専用の `<db>_test` データベースを自動作成。本番データには触れません）:
+  ```bash
+  docker compose exec backend pip install -r requirements-dev.txt   # 初回のみ
+  docker compose exec backend python -m pytest
+  ```
+- フロントエンド（vitest、純ロジックの単体テスト）:
+  ```bash
+  cd frontend && npm test
+  ```
+
+## バックアップ / リストア
+プレーンSQLのgzipダンプを `./backups` に出力します（`--clean --if-exists` 付きで上書き復元可）。
+
+- 手動バックアップ: `sh scripts/backup.sh`
+- 復元（**現在のDBを上書き**）: `sh scripts/restore.sh backups/schedule_YYYYMMDD_HHMMSS.sql.gz`
+- 自動バックアップ（cron不要のループ。既定で1日1回、最新14世代を保持）:
+  ```bash
+  docker compose --profile backup up -d
+  ```
+  間隔・保持数は `BACKUP_INTERVAL_SECONDS` / `BACKUP_KEEP` で調整（`.env` 可）。
+
 ## ディレクトリ
 ```
 backend/    FastAPI アプリ・モデル・API・seed・Alembic

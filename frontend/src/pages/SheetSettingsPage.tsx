@@ -153,10 +153,11 @@ export function SheetSettingsPage() {
                   </tbody>
                 </table>
               )}
+              <div className="border-t border-[var(--line)] px-5 py-4">
+                <AddColumnForm sheetId={sheetId} onDone={invalidate} />
+              </div>
             </CardBody>
           </Card>
-
-          <AddColumnForm sheetId={sheetId} onDone={invalidate} />
 
           {sheet && (
             <SheetLevelSettings
@@ -235,37 +236,33 @@ function AddColumnForm({ sheetId, onDone }: { sheetId: string; onDone: () => voi
   })
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>列を追加</CardTitle>
-      </CardHeader>
-      <CardBody>
-        <form
-          className="flex flex-wrap items-center gap-2"
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (name.trim()) mutation.mutate()
-          }}
-        >
-          <Input
-            placeholder="列名"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="flex-1"
-          />
-          <Select value={type} onChange={(e) => setType(e.target.value as ColumnType)}>
-            {(Object.keys(TYPE_LABEL) as ColumnType[]).map((t) => (
-              <option key={t} value={t}>
-                {TYPE_LABEL[t]}
-              </option>
-            ))}
-          </Select>
-          <Button type="submit" disabled={mutation.isPending}>
-            追加
-          </Button>
-        </form>
-      </CardBody>
-    </Card>
+    <div>
+      <div className="mb-2 text-[12px] font-medium text-[var(--ink2)]">列を追加</div>
+      <form
+        className="flex flex-wrap items-center gap-2"
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (name.trim()) mutation.mutate()
+        }}
+      >
+        <Input
+          placeholder="列名"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="flex-1"
+        />
+        <Select value={type} onChange={(e) => setType(e.target.value as ColumnType)}>
+          {(Object.keys(TYPE_LABEL) as ColumnType[]).map((t) => (
+            <option key={t} value={t}>
+              {TYPE_LABEL[t]}
+            </option>
+          ))}
+        </Select>
+        <Button type="submit" disabled={mutation.isPending}>
+          追加
+        </Button>
+      </form>
+    </div>
   )
 }
 
@@ -290,6 +287,11 @@ function ColumnDetailEditor({
   const weeklyResetMut = useMutation({
     mutationFn: (v: boolean) =>
       api.updateColumn(column.id, { config: { ...(column.config ?? {}), weekly_reset: v } }),
+    onSuccess: onDone,
+  })
+  const multilineMut = useMutation({
+    mutationFn: (v: boolean) =>
+      api.updateColumn(column.id, { config: { ...(column.config ?? {}), multiline: v } }),
     onSuccess: onDone,
   })
   const canWeeklyReset = ['text', 'number', 'date', 'dropdown'].includes(type)
@@ -338,6 +340,22 @@ function ColumnDetailEditor({
                   週次リセット
                   <span className="block text-[11px] text-[var(--ink3)]">
                     毎週、未入力（空）から再入力。先週分は基準週を戻すと表示されます。
+                  </span>
+                </span>
+              </label>
+            )}
+            {type === 'text' && (
+              <label className="flex items-start gap-2 text-[12px] text-[var(--ink2)]">
+                <input
+                  type="checkbox"
+                  checked={!!column.config?.multiline}
+                  className="mt-0.5 h-4 w-4 accent-[var(--green)]"
+                  onChange={(e) => multilineMut.mutate(e.target.checked)}
+                />
+                <span>
+                  複数行入力（大規模入力）
+                  <span className="block text-[11px] text-[var(--ink3)]">
+                    セルをクリックすると広いテキストエリア（モーダル）で複数行入力できます。
                   </span>
                 </span>
               </label>
@@ -396,7 +414,7 @@ function SheetLevelSettings({
 
   // Freezable = attribute columns + the 4 summary columns (予定計/実績計/差/進捗),
   // so the freeze can extend up to 進捗.
-  const SUMMARY_LABELS = ['予定計', '実績計', '差', '進捗']
+  const SUMMARY_LABELS = ['予定計', '実績計', '差', '進捗', '予実差']
   const pinned = settings.pinned_columns ?? 1
   const nCols = columns.length
   const freezeOptions = Array.from({ length: nCols + 1 + SUMMARY_LABELS.length }, (_, n) => {
@@ -432,7 +450,7 @@ function SheetLevelSettings({
               {freezeOptions}
             </Select>
             <span className="mt-1 block text-[11px] text-[var(--ink3)]">
-              スクロールしても左端に固定する列（通常時）。IDは常に固定。属性列に加えて、予定計・実績計・差・進捗まで固定できます。
+              通常時の固定列（IDは常に固定／進捗まで指定可）。
             </span>
           </label>
           <label className="text-[12px] text-[var(--ink2)]">
@@ -449,7 +467,7 @@ function SheetLevelSettings({
               {freezeOptions}
             </Select>
             <span className="mt-1 block text-[11px] text-[var(--ink3)]">
-              スケジュール画面の「固定列: 通常／最小」ボタンで、この2つを切り替えられます。
+              「固定列: 通常／最小」ボタンで切替。
             </span>
           </label>
 
@@ -486,7 +504,7 @@ function SheetLevelSettings({
               })}
             </div>
             <span className="mt-1 block text-[11px] text-[var(--ink3)]">
-              スケジュールの「絞り込み」パネルに、ここで選んだ列が値ドロップダウンで出ます（未選択なら担当・ステータス）。
+              絞り込みパネルに出す列（未選択なら担当・ステータス）。
             </span>
           </div>
 
@@ -504,7 +522,7 @@ function SheetLevelSettings({
             <span>
               進捗を週次リセット
               <span className="block text-[11px] text-[var(--ink3)]">
-                毎週、進捗は未入力（—）から再入力。先週分は基準週を戻すと表示されます。
+                毎週、進捗は未入力（—）から再入力。
               </span>
             </span>
           </label>
@@ -572,7 +590,12 @@ function DefaultMilestonesEditor({
         settings: {
           ...settings,
           default_milestones: items
-            .map((m) => ({ name: m.name.trim(), color: m.color }))
+            .map((m) => ({
+              name: m.name.trim(),
+              color: m.color,
+              kind: m.kind === 'milestone' ? ('milestone' as const) : ('phase' as const),
+              ...(m.kind === 'milestone' ? {} : { weight: m.weight ?? 1 }),
+            }))
             .filter((m) => m.name !== ''),
         },
       }),
@@ -596,11 +619,12 @@ function DefaultMilestonesEditor({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>既定マイルストン（フェーズ）</CardTitle>
+        <CardTitle>既定マイルストン（フェーズ・節目）</CardTitle>
       </CardHeader>
       <CardBody>
-        <p className="mb-3 text-[12px] text-[var(--ink2)]">
-          新しい行のフェーズの初期値・色になります（各行の◇から個別に変更可）。凡例にも表示されます。
+        <p className="mb-3 text-[12px] text-[var(--ink3)]">
+          新しい行の初期値。フェーズ＝色付き区間、マイルストン＝◇の節目。各行で開始日・完了日を入れると、
+          フェーズの「割合」に応じて間のマイルストン日付が自動配置されます。
         </p>
         <div className="flex flex-col gap-2">
           {items.length === 0 && (
@@ -631,23 +655,72 @@ function DefaultMilestonesEditor({
                   <ChevronDownIcon className="h-3.5 w-3.5" />
                 </button>
               </div>
-              <input
-                type="color"
-                className="h-7 w-9 flex-shrink-0 cursor-pointer rounded border border-[var(--line)] bg-transparent p-0.5"
-                value={m.color}
+              <Select
+                className="w-[104px] flex-shrink-0"
+                value={m.kind ?? 'phase'}
                 onChange={(e) =>
-                  setItems(items.map((x, j) => (j === i ? { ...x, color: e.target.value } : x)))
+                  setItems(
+                    items.map((x, j) =>
+                      j === i
+                        ? { ...x, kind: e.target.value as DefaultMilestone['kind'] }
+                        : x,
+                    ),
+                  )
                 }
-                title="色を選択"
-              />
+              >
+                <option value="phase">フェーズ</option>
+                <option value="milestone">マイルストン</option>
+              </Select>
+              {(m.kind ?? 'phase') === 'phase' ? (
+                <input
+                  type="color"
+                  className="h-7 w-9 flex-shrink-0 cursor-pointer rounded border border-[var(--line)] bg-transparent p-0.5"
+                  value={m.color}
+                  onChange={(e) =>
+                    setItems(items.map((x, j) => (j === i ? { ...x, color: e.target.value } : x)))
+                  }
+                  title="色を選択"
+                />
+              ) : (
+                <span
+                  className="h-[13px] w-[13px] flex-shrink-0 border-[1.6px] border-[var(--ink)] bg-white"
+                  style={{ transform: 'rotate(45deg)' }}
+                  title="マイルストン（◇の節目）"
+                />
+              )}
               <Input
                 className="flex-1"
-                placeholder="フェーズ名（例: 設計）"
+                placeholder={
+                  (m.kind ?? 'phase') === 'phase'
+                    ? 'フェーズ名（例: 設計）'
+                    : 'マイルストン名（例: 確認）'
+                }
                 value={m.name}
                 onChange={(e) =>
                   setItems(items.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
                 }
               />
+              {(m.kind ?? 'phase') === 'phase' && (
+                <label
+                  className="flex flex-shrink-0 items-center gap-1 text-[11px] text-[var(--ink3)]"
+                  title="割合：各行の開始〜完了の間で、この区間が占める長さの比率"
+                >
+                  割合
+                  <Input
+                    type="number"
+                    min={1}
+                    className="w-[56px]"
+                    value={String(m.weight ?? 1)}
+                    onChange={(e) =>
+                      setItems(
+                        items.map((x, j) =>
+                          j === i ? { ...x, weight: Number(e.target.value) || 1 } : x,
+                        ),
+                      )
+                    }
+                  />
+                </label>
+              )}
               <button
                 className="rounded p-1 text-[var(--ink3)] hover:bg-[#FAE6E0] hover:text-[#A8442B]"
                 title="削除"
@@ -658,13 +731,24 @@ function DefaultMilestonesEditor({
             </div>
           ))}
         </div>
-        <button
-          onClick={() => setItems([...items, { name: '', color: '#a7d0be' }])}
-          className="mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-[10px] border border-dashed border-[var(--line)] py-2 text-[12.5px] text-[var(--ink2)] hover:bg-[var(--line2)]"
-        >
-          <PlusIcon className="h-[15px] w-[15px]" />
-          フェーズを追加
-        </button>
+        <div className="mt-2.5 flex gap-2">
+          <button
+            onClick={() => setItems([...items, { name: '', color: '#a7d0be', kind: 'phase' }])}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-dashed border-[var(--line)] py-2 text-[12.5px] text-[var(--ink2)] hover:bg-[var(--line2)]"
+          >
+            <PlusIcon className="h-[15px] w-[15px]" />
+            フェーズを追加
+          </button>
+          <button
+            onClick={() =>
+              setItems([...items, { name: '', color: '#cfd8e6', kind: 'milestone' }])
+            }
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-dashed border-[var(--line)] py-2 text-[12.5px] text-[var(--ink2)] hover:bg-[var(--line2)]"
+          >
+            <PlusIcon className="h-[15px] w-[15px]" />
+            マイルストンを追加
+          </button>
+        </div>
         <div className="mt-3 flex justify-end">
           <Button size="sm" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
             既定マイルストンを保存

@@ -46,6 +46,9 @@ def _serialize_state(db: Session, sheet: Sheet) -> dict[str, Any]:
             "key_value": r.key_value,
             "data": r.data or {},
             "version": r.version,
+            # Manual progress (手入力進捗%) so week-over-week 進捗 diffs work.
+            "progress": r.progress,
+            "progress_week": r.progress_week.isoformat() if r.progress_week else None,
             "effort": effort_by_row.get(r.id, []),
         }
 
@@ -112,6 +115,8 @@ def snapshot_as_of(db: Session, sheet: Sheet, week: date) -> dict[str, Any]:
                 "key_value": rstate.get("key_value"),
                 "data": rstate.get("data", {}),
                 "version": rstate.get("version"),
+                "progress": rstate.get("progress"),
+                "progress_week": rstate.get("progress_week"),
             }
         )
         for e in rstate.get("effort", []):

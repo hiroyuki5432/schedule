@@ -2,9 +2,10 @@
 // per-row gantt model. Effort + milestones are fetched in batch and memoized.
 
 import { useMemo } from 'react'
-import { useQueries, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import {
+  addWeeks,
   buildWeeks,
   monthStarts,
   startOfWeek,
@@ -15,7 +16,7 @@ import type { RowGantt } from '@/lib/gantt'
 import {
   deriveStatus,
   literalStatusBadge,
-  statusFromMilestones,
+  statusFromPhases,
 } from '@/lib/status'
 import type { StatusBadge } from '@/lib/status'
 import type {
@@ -52,12 +53,24 @@ export interface ScheduleRowModel {
   depth: number
   /** Effective progress 0-100 (手入力; parents = effort-weighted roll-up). null=unset. */
   progress: number | null
+  /** Progress one week ago. 0 when last week was unset (so the week-over-week
+   *  delta is visible); null only when there is no baseline at all. Leaf only. */
+  progressPrev: number | null
+  /** Planned/actual totals one week ago (前週), for the 予定計/実績計 delta.
+   *  null when no baseline (as-of view or no previous snapshot). */
+  plannedPrev: number | null
+  actualPrev: number | null
   /** True when progress is a read-only roll-up (parent with children). */
   progressRollup: boolean
+  /** For parents: sum of children's planned hours per week_start (合算の下限). */
+  childPlannedByWeek?: Map<string, number>
   /** Fraction the plan expects done by today (planned-to-date / planned-total). */
   expectedPct: number
   /** Behind schedule: progress below the expected fraction. */
   behind: boolean
+  /** Weeks behind schedule (何週遅延) when `behind`; null otherwise. Shown next to
+   *  the auto-derived phase status. */
+  statusDelayWeeks: number | null
   /** Week index of first / last planned-effort week (task span); null if none. */
   startIdx: number | null
   finishIdx: number | null
@@ -211,6 +224,26 @@ function numOf(v: number | string | null | undefined): number {
   return Number.isFinite(n) ? n : 0
 }
 
+/** How many weeks behind schedule: the gap between today and the week the plan
+ *  expected the current progress level to be reached (累積予定がprogress分に達する週).
+ *  Null when not measurable. */
+function weeksLate(
+  g: RowGantt,
+  currentWeekIdx: number,
+  progress: number | null,
+): number | null {
+  if (progress == null || g.plannedSum <= 0) return null
+  const target = (progress / 100) * g.plannedSum
+  let cum = 0
+  for (let i = 0; i < g.cells.length; i++) {
+    const p = g.cells[i]?.planned ?? 0
+    if (p <= 0) continue
+    cum += p
+    if (target <= 0 || cum >= target) return Math.max(0, currentWeekIdx - i)
+  }
+  return null
+}
+
 /** Task span (first/last planned-effort week) + planned hours up to today. */
 function spanAndToDate(g: RowGantt, currentWeekIdx: number) {
   let startIdx: number | null = null
@@ -227,17 +260,18 @@ function spanAndToDate(g: RowGantt, currentWeekIdx: number) {
   return { startIdx, finishIdx, plannedToDate }
 }
 
-/** Roll a parent task's weekly effort up from its subtasks: per week, the sum of
- *  all children's planned/actual. The parent itself holds no own effort, so this
- *  is the "上位ではまとめた工数" view (子の合算). */
+/** Roll a parent task's weekly effort up: per week, the parent's OWN effort PLUS
+ *  the sum of all children's planned/actual (合算 = 親の分＋子の分). Including the
+ *  parent's own entries means effort entered directly on a task is never hidden
+ *  when subtasks are added — it stays in the total (past weeks included). */
 function aggregateChildEffort(
   childRows: Row[],
   effortByRow: Map<string, Map<string, Effort>>,
+  ownEffort?: Map<string, Effort>,
 ): Map<string, Effort> {
   const acc = new Map<string, { planned: number; actual: number }>()
-  for (const c of childRows) {
-    const m = effortByRow.get(c.id)
-    if (!m) continue
+  const addFrom = (m: Map<string, Effort> | undefined) => {
+    if (!m) return
     for (const [wk, e] of m) {
       const cur = acc.get(wk) ?? { planned: 0, actual: 0 }
       cur.planned += numOf(e.planned_hours)
@@ -245,6 +279,8 @@ function aggregateChildEffort(
       acc.set(wk, cur)
     }
   }
+  addFrom(ownEffort)
+  for (const c of childRows) addFrom(effortByRow.get(c.id))
   const out = new Map<string, Effort>()
   for (const [wk, v] of acc) {
     out.set(wk, {
@@ -257,12 +293,27 @@ function aggregateChildEffort(
   return out
 }
 
+/** Sum of children's PLANNED hours per week_start — the floor a parent's combined
+ *  value can't drop below (editing the parent only changes the parent's own part). */
+function sumChildPlannedByWeek(
+  childRows: Row[],
+  effortByRow: Map<string, Map<string, Effort>>,
+): Map<string, number> {
+  const m = new Map<string, number>()
+  for (const c of childRows) {
+    const em = effortByRow.get(c.id)
+    if (!em) continue
+    for (const [wk, e] of em) m.set(wk, (m.get(wk) ?? 0) + plannedOf(e))
+  }
+  return m
+}
+
 /**
- * Change points: a week whose current PLANNED hours differ from the weekly
- * snapshot baseline (the cross-section auto-captured at the start of this week).
- * So red = "changed since this week's snapshot" — editing a week flags only that
- * week (its neighbors are compared to their own baseline, not to it). When no
- * baseline is available, nothing is flagged.
+ * Change points: a week whose current PLANNED hours differ from the PREVIOUS
+ * week's snapshot baseline (the cross-section auto-captured at the start of last
+ * week). So red = "changed since last week" (前週からの変更) — editing a week
+ * flags only that week (each week is compared to its own value a week ago, not
+ * to its neighbors). When no baseline is available, nothing is flagged.
  */
 function changedVsBaseline(
   weeks: Date[],
@@ -300,16 +351,22 @@ export function useScheduleData({
     enabled: !!sheetId,
   })
 
-  const rows = detailQ.data?.rows ?? []
-
-  // Batch milestones for every row (Promise.all under the hood via useQueries).
-  const milestoneQs = useQueries({
-    queries: rows.map((r) => ({
-      queryKey: ['milestones', r.id],
-      queryFn: () => api.getMilestones(r.id),
-      enabled: !!sheetId,
-    })),
+  // All milestones for the sheet in ONE request (was an N+1 per-row fetch, the
+  // main cause of the slow schedule load).
+  const milestonesQ = useQuery({
+    queryKey: ['sheet-milestones', sheetId],
+    queryFn: () => api.getSheetMilestones(sheetId!),
+    enabled: !!sheetId,
   })
+  const milestonesByRow = useMemo(() => {
+    const m = new Map<string, Milestone[]>()
+    for (const ms of milestonesQ.data ?? []) {
+      const arr = m.get(String(ms.row_id))
+      if (arr) arr.push(ms)
+      else m.set(String(ms.row_id), [ms])
+    }
+    return m
+  }, [milestonesQ.data])
 
   // As-of snapshot (only when a past week is selected).
   const snapshotQ = useQuery({
@@ -325,13 +382,18 @@ export function useScheduleData({
     [today, weekStartWeekday],
   )
   const currentWeekIso = isoKey(currentWeekStart)
+  // Previous week's start — baseline for week-over-week change points (前週からの変更).
+  const prevWeekIso = addWeeks(currentWeekIso, -1)
 
-  // Change-point baseline: the weekly snapshot auto-captured at the start of
-  // this week (lazily on first access — no cron). Comparing the live plan to it
-  // highlights what changed since the start of the week. Live mode only.
+  // Change-point baseline: the weekly snapshot from the PREVIOUS week (前週). Each
+  // week's snapshot is auto-captured on first access that week (lazily — no cron),
+  // so comparing the live plan against last week's snapshot highlights exactly
+  // what changed week-over-week. Using last week's (already-committed) snapshot
+  // also makes this deterministic — it doesn't depend on this week's snapshot,
+  // which is created by the sheet GET in a separate request. Live mode only.
   const baselineQ = useQuery({
-    queryKey: ['snapshot', sheetId, currentWeekIso],
-    queryFn: () => api.getSnapshot(sheetId!, currentWeekIso),
+    queryKey: ['snapshot', sheetId, prevWeekIso],
+    queryFn: () => api.getSnapshot(sheetId!, prevWeekIso),
     enabled: !!sheetId && !asOfWeek,
   })
 
@@ -352,7 +414,7 @@ export function useScheduleData({
     [weeks, currentWeekStart],
   )
 
-  const milestonesAllLoaded = milestoneQs.every((q) => !q.isLoading)
+  const milestonesAllLoaded = !milestonesQ.isLoading
 
   const model: ScheduleData = useMemo(() => {
     const columns = detailQ.data?.columns ?? []
@@ -392,13 +454,24 @@ export function useScheduleData({
 
     // Default milestone colors by phase name (per sheet). The gantt bar color is
     // derived from the matching default — per-row colors are no longer set.
+    // Phase color by name — PHASE presets only. (A milestone preset can share a
+    // name with a phase, e.g. 「リリース」; including milestones here would let the
+    // milestone's neutral color clobber the phase color.)
     const defaultColorByName = new Map<string, string>(
-      (detailQ.data?.sheet?.settings?.default_milestones ?? []).map((d) => [d.name, d.color]),
+      (detailQ.data?.sheet?.settings?.default_milestones ?? [])
+        .filter((d) => d.kind !== 'milestone')
+        .map((d) => [d.name, d.color]),
     )
 
-    // Baseline planned hours per row -> (week_start -> planned) from this week's
+    // Baseline planned hours per row -> (week_start -> planned) from last week's
     // snapshot. Live mode only; as-of view never highlights change points.
     const baselineByRow = new Map<string, Map<string, number>>()
+    // Full baseline effort per row (planned + actual) for the 予定計/実績計 前週差分.
+    const baselineEffortByRow = new Map<string, Map<string, Effort>>()
+    // Last week's manual progress per row (for the 進捗 week-over-week diff).
+    const prevProgressByRow = new Map<string, number>()
+    // Whether last week's snapshot exists at all (else prev totals are unknown).
+    const baselineAvailable = !asOfWeek && !!baselineQ.data
     if (!asOfWeek) {
       for (const e of baselineQ.data?.effort ?? []) {
         let m = baselineByRow.get(e.row_id)
@@ -407,6 +480,15 @@ export function useScheduleData({
           baselineByRow.set(e.row_id, m)
         }
         m.set(e.week_start, plannedOf(e))
+        let me = baselineEffortByRow.get(e.row_id)
+        if (!me) {
+          me = new Map()
+          baselineEffortByRow.set(e.row_id, me)
+        }
+        me.set(e.week_start, e)
+      }
+      for (const r of baselineQ.data?.rows ?? []) {
+        if (typeof r.progress === 'number') prevProgressByRow.set(String(r.id), r.progress)
       }
     }
 
@@ -418,9 +500,9 @@ export function useScheduleData({
     const progressWeeklyReset = detailQ.data?.sheet?.settings?.progress_weekly_reset === true
     const viewedWeekIso = asOfWeek ?? currentWeekIso
 
-    const built: ScheduleRowModel[] = sheetRows.map((row, idx) => {
+    const built: ScheduleRowModel[] = sheetRows.map((row) => {
       // Milestone colors come from the sheet's default phase of the same name.
-      const ms: Milestone[] = (milestoneQs[idx]?.data ?? []).map((m) => ({
+      const ms: Milestone[] = (milestonesByRow.get(String(row.id)) ?? []).map((m) => ({
         ...m,
         color: defaultColorByName.get(m.name) ?? m.color,
       }))
@@ -430,16 +512,21 @@ export function useScheduleData({
       const childRows = childrenByParent.get(String(row.id)) ?? []
       const hasChildren = childRows.length > 0
       const effortByWeek = hasChildren
-        ? aggregateChildEffort(childRows, effortByRow)
+        ? aggregateChildEffort(childRows, effortByRow, effortByRow.get(row.id))
         : effortByRow.get(row.id) ?? new Map<string, Effort>()
 
-      // Change points: a week whose planned hours differ from this week's
-      // snapshot baseline (= changed since the start of this week). Roll-up
+      // Change points: a week whose planned hours differ from last week's
+      // snapshot baseline (= changed since last week / 前週からの変更). Roll-up
       // parents don't highlight change points (the breakdown lives on children).
       const changedWeekIdx =
         asOfWeek || hasChildren
           ? new Set<number>()
           : changedVsBaseline(weeks, effortByWeek, baselineByRow.get(row.id))
+
+      // Task span (開始日/完了日) stored in reserved row.data keys — bounds the
+      // gantt coloring (範囲外は無色). Absent on legacy rows → unbounded (legacy).
+      const schedStart = (row.data.__sched_start as string | null) ?? null
+      const schedEnd = (row.data.__sched_end as string | null) ?? null
 
       const gantt = buildRowGantt({
         weeks,
@@ -447,6 +534,8 @@ export function useScheduleData({
         milestones: ms,
         currentWeekIdx,
         changedWeekIdx,
+        startDate: schedStart,
+        endDate: schedEnd,
       })
 
       const assigneeId = memberCol
@@ -456,7 +545,7 @@ export function useScheduleData({
 
       let status: StatusBadge | null
       if (autoStatus) {
-        status = statusFromMilestones(ms, today)
+        status = statusFromPhases(ms, { actualSum: gantt.actualSum })
       } else {
         status = deriveStatus(row, statusCol)
         if (!status && statusCol) {
@@ -481,6 +570,28 @@ export function useScheduleData({
       )
         leafProgress = null
 
+      // 前週（last week's snapshot）の予定計/実績計 — parents aggregate their
+      // children's baseline just like the live roll-up.
+      let plannedPrev: number | null = null
+      let actualPrev: number | null = null
+      if (baselineAvailable) {
+        const prevEffort = hasChildren
+          ? aggregateChildEffort(
+              childRows,
+              baselineEffortByRow,
+              baselineEffortByRow.get(row.id),
+            )
+          : baselineEffortByRow.get(row.id) ?? new Map<string, Effort>()
+        let ps = 0
+        let as_ = 0
+        for (const e of prevEffort.values()) {
+          ps += numOf(e.planned_hours)
+          as_ += numOf(e.actual_hours)
+        }
+        plannedPrev = ps
+        actualPrev = as_
+      }
+
       return {
         row,
         keyValue: row.key_value,
@@ -495,9 +606,21 @@ export function useScheduleData({
         childCount: childRows.length,
         depth: row.parent_row_id != null ? 1 : 0,
         progress: leafProgress,
+        // Week-over-week 進捗 diff (leaf only; parents are a roll-up). When last
+        // week was unset, baseline = 0 so this week's value shows as +N. null
+        // only when there's no baseline snapshot at all.
+        progressPrev: hasChildren
+          ? null
+          : prevProgressByRow.get(String(row.id)) ?? (baselineAvailable ? 0 : null),
+        plannedPrev,
+        actualPrev,
         progressRollup: hasChildren,
+        childPlannedByWeek: hasChildren
+          ? sumChildPlannedByWeek(childRows, effortByRow)
+          : undefined,
         expectedPct,
         behind: false, // filled in the cross-row pass below
+        statusDelayWeeks: null, // filled in the cross-row pass below
         startIdx,
         finishIdx,
         depViolations: [], // filled in the cross-row pass below
@@ -529,6 +652,9 @@ export function useScheduleData({
     for (const m of built) {
       m.behind =
         m.progress != null && m.gantt.plannedSum > 0 && m.progress / 100 < m.expectedPct - 0.01
+      m.statusDelayWeeks = m.behind
+        ? weeksLate(m.gantt, currentWeekIdx, m.progress)
+        : null
       const deps = (m.row.depends_on ?? []) as Array<string | number>
       const sIdx = m.startIdx
       if (deps.length && sIdx != null) {
@@ -595,8 +721,7 @@ export function useScheduleData({
     currentWeekIdx,
     currentWeekStart,
     milestonesAllLoaded,
-    // milestoneQs identity changes each render; depend on loaded flag + data length
-    milestoneQs.map((q) => q.dataUpdatedAt).join(','),
+    milestonesByRow,
   ])
 
   return model

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useMembers, useWeekStartWeekday } from '@/hooks/useSheets'
 import { useScheduleData } from '@/hooks/useScheduleData'
@@ -19,7 +20,7 @@ import { FilterIcon, PlusIcon, SearchIcon, XIcon } from '@/components/ui/icons'
 import { useAuth } from '@/hooks/useAuth'
 import { addWeeks, fmtISO, fmtMD, startOfWeek } from '@/lib/dates'
 import { cn } from '@/lib/format'
-import type { CellValue, Column, Row } from '@/types/api'
+import type { CellValue, Column, NotificationItem, Row } from '@/types/api'
 
 const VIEW_MODES: Array<{ m: ViewMode; label: string }> = [
   { m: 'week', label: '週' },
@@ -36,6 +37,10 @@ interface Props {
 export function SchedulePage({ sheetId, sheetName }: Props) {
   const { user } = useAuth()
   const qc = useQueryClient()
+  // Notification deep-link: ?focus=<rowId>&t=<nonce> scrolls to + highlights a task.
+  const [searchParams] = useSearchParams()
+  const focusRowId = searchParams.get('focus')
+  const focusNonce = Number(searchParams.get('t') ?? 0)
   const weekStartWeekday = useWeekStartWeekday()
   const membersQ = useMembers()
   const members = useMemo(() => membersQ.data ?? [], [membersQ.data])
@@ -45,10 +50,6 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   // as-of stepping: 0 = today (live); negative offset = weeks back. Lets the
   // user view a past week's recorded plan (週次スナップショット). Week view only.
   const [asOfOffset, setAsOfOffset] = useState(0)
-  // Optional range extension (weeks) before / after the default ~3yr window.
-  const [extraBefore, setExtraBefore] = useState(0)
-  const [extraAfter, setExtraAfter] = useState(0)
-  const RANGE_STEP = 26 // ~half a year per click
   const [milestoneRow, setMilestoneRow] = useState<Row | null>(null)
   const [depRow, setDepRow] = useState<Row | null>(null)
   const [showDepLines, setShowDepLines] = useState(false)
@@ -78,8 +79,6 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     weekStartWeekday,
     members,
     asOfWeek: asOfWeekStart,
-    extraBefore,
-    extraAfter,
     viewMode,
   })
 
@@ -90,7 +89,8 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   // page; both can extend through the summary columns up to 進捗).
   const sheetSettings = grid.detail?.sheet.settings
   const colCount = grid.columns.length
-  const freezeMax = colCount + 4
+  // ID + attribute columns + 5 summary columns (予定計/実績計/差/進捗/予実差).
+  const freezeMax = colCount + 5
   const pinnedFull = Math.min(sheetSettings?.pinned_columns ?? 1, freezeMax)
   const pinnedMin = Math.min(
     sheetSettings?.pinned_columns_narrow ?? Math.min(1, pinnedFull),
@@ -296,6 +296,73 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
       })
   }
 
+  // Detection → notification register (cron-free): when the live schedule renders,
+  // turn each behind / 逆ザヤ / マイルストン超過 into a notification for the task's
+  // assignee. Idempotent server-side (dedupe_key); a per-session ref also avoids
+  // re-POSTing the same alert on every re-render.
+  const sentKeys = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (grid.loading || !live || grid.rows.length === 0) return
+    const todayIso = fmtISO(new Date())
+    const items: NotificationItem[] = []
+    const push = (it: NotificationItem) => {
+      if (sentKeys.current.has(it.dedupe_key)) return
+      items.push(it)
+    }
+    for (const r of grid.rows) {
+      if (!r.assigneeId) continue // unassigned: no one to notify
+      const label = r.keyValue || r.title || '無題タスク'
+      // ref points at the exact task so the bell can scroll+highlight it.
+      const ref = `${sheetId}:${r.row.id}`
+      if (r.behind) {
+        const wk = r.statusDelayWeeks
+        push({
+          target_user_id: r.assigneeId,
+          type: 'behind',
+          title: `遅延: ${label}`,
+          body: `進捗が予定を下回っています${wk ? `（約${wk}週遅れ）` : ''}。`,
+          ref_kind: 'row',
+          ref_id: ref,
+          dedupe_key: `behind:${r.row.id}:${currentWeekIso}`,
+        })
+      }
+      for (const v of r.depViolations) {
+        push({
+          target_user_id: r.assigneeId,
+          type: 'dep',
+          title: `逆ザヤ: ${label}`,
+          body: `先行「${v.predKey}」の完了前に開始予定です（${v.weeks}週）。`,
+          ref_kind: 'row',
+          ref_id: ref,
+          dedupe_key: `dep:${r.row.id}:${v.predKey}:${currentWeekIso}`,
+        })
+      }
+      for (const m of r.milestones) {
+        if (m.done || m.boundary_date >= todayIso) continue
+        push({
+          target_user_id: r.assigneeId,
+          type: 'milestone',
+          title: `マイルストン超過: ${label}`,
+          body: `「${m.name}」の予定日 ${m.boundary_date} を過ぎています。`,
+          ref_kind: 'row',
+          ref_id: ref,
+          dedupe_key: `milestone:${m.id}`,
+        })
+      }
+    }
+    if (items.length === 0) return
+    for (const it of items) sentKeys.current.add(it.dedupe_key)
+    api
+      .registerNotifications(items)
+      .then((res) => {
+        if (res.created > 0) qc.invalidateQueries({ queryKey: ['notifications'] })
+      })
+      .catch(() => {
+        // Detection is best-effort; drop the keys so a later render can retry.
+        for (const it of items) sentKeys.current.delete(it.dedupe_key)
+      })
+  }, [grid.loading, grid.rows, live, sheetId, currentWeekIso, qc])
+
   const lineWeek = weeks[lineIndex]
   const asOfLabel = live ? '基準週: 今日' : `基準週: ${lineWeek ? fmtMD(lineWeek) : ''}`
 
@@ -347,25 +414,6 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
               )}
             </div>
           )}
-
-          {/* range extension */}
-          <div className="flex items-center overflow-hidden rounded-[9px] border border-[var(--line)] bg-[var(--surface)]">
-            <button
-              className="px-2.5 py-1.5 text-[12px] text-[var(--ink2)] hover:bg-[var(--line2)]"
-              title="表示範囲をさらに前へ広げる"
-              onClick={() => setExtraBefore((n) => n + RANGE_STEP)}
-            >
-              ◀ もっと前
-            </button>
-            <span className="border-l border-[var(--line)]" />
-            <button
-              className="px-2.5 py-1.5 text-[12px] text-[var(--ink2)] hover:bg-[var(--line2)]"
-              title="表示範囲をさらに後へ広げる"
-              onClick={() => setExtraAfter((n) => n + RANGE_STEP)}
-            >
-              もっと後 ▶
-            </button>
-          </div>
 
           {/* week / month view */}
           <div className="flex items-center overflow-hidden rounded-[9px] border border-[var(--line)] bg-[var(--surface)]">
@@ -521,6 +569,8 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             pinnedCount={pinnedCount}
             showDepLines={showDepLines}
             viewedWeekIso={viewedWeekIso}
+            focusRowId={focusRowId}
+            focusNonce={focusNonce}
             onSaveWeek={saveWeek}
             onEditRowCell={saveRowCell}
             onEditRowKey={saveRowKey}
@@ -532,7 +582,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           />
         )}
         <div className="mt-2 px-1 text-[11.5px] text-[var(--ink3)]">
-          値のある所だけフェーズ色で塗る（ゼロは無色）。◇は境界＝マイルストン、節目超過は遅延色、変化点（今週の断面から変更）は文字色。右上「週/月」で表示単位を切替（月＝その月の合計、月セルに入力するとその月の各週へ均等に分割）。セルはクリックで直接入力（Enter/離れて保存、Escで取消）。
+          セルはクリックで入力（Enter保存／Esc取消）。右上で週／月を切替（月は各週へ均等分割）。
         </div>
       </div>
 

@@ -10,7 +10,7 @@
 //  in accent color; milestone diamonds at boundaries; today/as-of line.
 //  Clicking a week cell turns it into an inline <input>; Enter/blur saves.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { ScheduleRowModel } from '@/hooks/useScheduleData'
 import { InlineCell } from '@/components/schedule/InlineCell'
@@ -34,6 +34,7 @@ const TOTAL_W = 60 // 予定計 column
 const ACTUAL_W = 60 // 実績計 column
 const DIFF_W = 60 // 差（予定−実績）column
 const PROG_W = 66 // 進捗 column (手入力%、ビハインド色)
+const PACE_W = 70 // 予実差 column (進捗 − 予定上の想定%、前倒し/遅延)
 
 // The trailing summary columns. They follow the attribute columns and can be
 // frozen too: the freeze count covers [attribute cols…, summary cols…], so the
@@ -43,6 +44,7 @@ const SUMMARY_COLS = [
   { key: 'actual', w: ACTUAL_W, label: '実績計' },
   { key: 'diff', w: DIFF_W, label: '差' },
   { key: 'prog', w: PROG_W, label: '進捗' },
+  { key: 'pace', w: PACE_W, label: '予実差' },
 ] as const
 type SummaryDescriptor = (typeof SUMMARY_COLS)[number]
 
@@ -174,6 +176,22 @@ function widthRange(t: Column['type']): [number, number] {
   }
 }
 
+// Manual column-resize bounds + persistence. Overrides are keyed by column id
+// (globally unique DB pk), so one localStorage map covers every sheet.
+const RESIZE_MIN = 48
+const RESIZE_MAX = 640
+const COLW_KEY = 'gantt.colWidths'
+
+function loadColWidths(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(COLW_KEY)
+    const obj = raw ? JSON.parse(raw) : null
+    return obj && typeof obj === 'object' ? (obj as Record<string, number>) : {}
+  } catch {
+    return {}
+  }
+}
+
 /** Rough text width: CJK ~9px, other ~6px per char (for content-fit columns). */
 function textPx(s: string): number {
   let px = 0
@@ -223,6 +241,10 @@ interface Props {
   showDepLines: boolean
   /** Week being viewed (live or as-of) — for weekly-reset column display. */
   viewedWeekIso?: string
+  /** Notification deep-link: scroll to + briefly highlight this task (row id). */
+  focusRowId?: string | null
+  /** Changes on each notification click so re-clicking the same task re-flashes. */
+  focusNonce?: number
   onSaveWeek: (edit: WeekEdit) => void
   onEditRowCell: (row: Row, colId: string, value: CellValue) => void
   onEditRowKey: (row: Row, key: string) => void
@@ -261,6 +283,8 @@ export function GanttGrid({
   pinnedCount,
   showDepLines,
   viewedWeekIso,
+  focusRowId,
+  focusNonce,
   onSaveWeek,
   onEditRowCell,
   onEditRowKey,
@@ -274,6 +298,8 @@ export function GanttGrid({
   const didScrollRef = useRef(false)
   const [tip, setTip] = useState<Tip | null>(null)
   const [editing, setEditing] = useState<EditingCell | null>(null)
+  // Transient highlight for a notification-focused task (cleared after a few s).
+  const [highlightId, setHighlightId] = useState<string | null>(null)
   const [sort, setSort] = useState<SortState | null>(null)
   // Collapsed parents (子タスクを畳む). Empty = all expanded.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
@@ -305,7 +331,52 @@ export function GanttGrid({
     }
     return m
   }, [ordered, rows, members, lookupValue])
-  const cw = (c: Column) => colWidths.get(c.id) ?? defaultColWidth(c)
+
+  // Manual width overrides (drag the column edge). Persisted per column id; a
+  // column without an override falls back to its content-fit width above.
+  const [colW, setColW] = useState<Record<string, number>>(loadColWidths)
+  useEffect(() => {
+    try {
+      localStorage.setItem(COLW_KEY, JSON.stringify(colW))
+    } catch {
+      /* storage full / unavailable — overrides just won't persist */
+    }
+  }, [colW])
+  const cw = (c: Column) => colW[c.id] ?? colWidths.get(c.id) ?? defaultColWidth(c)
+
+  // Begin a drag-resize from a column header's right edge. The move/up handlers
+  // are defined locally so removeEventListener gets the same references.
+  const startResize = useCallback(
+    (e: React.MouseEvent, colId: string, startW: number) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const startX = e.clientX
+      const move = (ev: MouseEvent) => {
+        const next = Math.max(RESIZE_MIN, Math.min(RESIZE_MAX, startW + (ev.clientX - startX)))
+        setColW((prev) => ({ ...prev, [colId]: next }))
+      }
+      const up = () => {
+        window.removeEventListener('mousemove', move)
+        window.removeEventListener('mouseup', up)
+        document.body.style.userSelect = ''
+        document.body.style.cursor = ''
+      }
+      document.body.style.userSelect = 'none'
+      document.body.style.cursor = 'col-resize'
+      window.addEventListener('mousemove', move)
+      window.addEventListener('mouseup', up)
+    },
+    [],
+  )
+  // Double-click the edge to drop the override and return to auto (content) fit.
+  const resetWidth = useCallback((colId: string) => {
+    setColW((prev) => {
+      if (!(colId in prev)) return prev
+      const next = { ...prev }
+      delete next[colId]
+      return next
+    })
+  }, [])
 
   // Tree display order: top-level tasks (client-sortable) each followed by their
   // subtasks (子タスク, key_value asc) when expanded. Subtasks always stay grouped
@@ -363,6 +434,40 @@ export function GanttGrid({
   const dirFor = (key: SortKey): SortDir | null =>
     sort?.key === key ? sort.dir : null
 
+  // Spreadsheet-style cell navigation (Feature 1): from the currently-edited week
+  // cell, move to the next editable cell in `dir` (Tab/Shift+Tab/arrows/Enter).
+  // Skips non-editable cells (past weeks, parent rows in month view); stops at the
+  // grid edge by closing the editor.
+  const moveEditing = useCallback(
+    (from: EditingCell, dir: 'up' | 'down' | 'left' | 'right') => {
+      const curIdx = displayRows.findIndex(
+        (m) => String(m.row.id) === String(from.rowId),
+      )
+      if (curIdx < 0) {
+        setEditing(null)
+        return
+      }
+      const stepRow = dir === 'down' ? 1 : dir === 'up' ? -1 : 0
+      const stepCol = dir === 'right' ? 1 : dir === 'left' ? -1 : 0
+      let r = curIdx
+      let w = from.wi
+      // Guard against runaway loops; the grid is finite anyway.
+      for (let guard = 0; guard < 100000; guard++) {
+        r += stepRow
+        w += stepCol
+        if (r < 0 || r >= displayRows.length || w < 0 || w >= weeks.length) break
+        const m = displayRows[r]
+        const ce = editable && w >= lineIndex && (viewMode === 'week' || !m.hasChildren)
+        if (ce) {
+          setEditing({ rowId: m.row.id, wi: w })
+          return
+        }
+      }
+      setEditing(null)
+    },
+    [displayRows, weeks.length, editable, lineIndex, viewMode],
+  )
+
   // Plain rows (for status option lists) + lookup resolver for lookup columns.
   const plainRows = useMemo(() => displayRows.map((r) => r.row), [displayRows])
   // Freezable sequence = [attribute columns…, summary columns…]. The first
@@ -404,17 +509,22 @@ export function GanttGrid({
   const totalH = displayRows.length * ROW_H
 
   // 週計 (Feature 2): per-week column totals + grand totals, over the rows
-  // currently shown (= filter-aware, since `rows` is the filtered set). Only
-  // leaf tasks are summed (childless tasks + subtasks); roll-up parents are
-  // skipped so their hours aren't double-counted. Uses `rows` (not the collapse-
-  // filtered display list) so collapsed parents still contribute their subtasks.
+  // currently shown (= filter-aware, since `rows` is the filtered set). Parents
+  // now carry a 合算 roll-up (own + children), so we count each parent's roll-up
+  // and SKIP its shown subtasks (already inside that roll-up) to avoid double-
+  // counting. Childless tasks and orphan subtasks (parent filtered out) are
+  // counted directly. Uses `rows` (not the collapse-filtered display list) so
+  // collapsed parents still contribute their subtasks via the roll-up.
   const footTotals = useMemo(() => {
     const planned = new Array(weeks.length).fill(0)
     const actual = new Array(weeks.length).fill(0)
     let plannedSum = 0
     let actualSum = 0
+    const presentParentIds = new Set(
+      rows.filter((m) => m.hasChildren).map((m) => String(m.row.id)),
+    )
     for (const m of rows) {
-      if (m.hasChildren) continue
+      if (m.parentRowId && presentParentIds.has(m.parentRowId)) continue
       m.gantt.cells.forEach((c, wi) => {
         if (!c) return
         planned[wi] += c.planned
@@ -493,6 +603,34 @@ export function GanttGrid({
     }
   }, [displayRows.length, attrW, lineIndex, lineXInGrid])
 
+  // Notification deep-link: scroll the focused task into view and flash it.
+  useEffect(() => {
+    if (!focusRowId) return
+    // If the target is a subtask hidden under a collapsed parent, expand it first
+    // (this effect re-runs once displayRows includes the child).
+    const target = rows.find((r) => String(r.row.id) === String(focusRowId))
+    if (target?.parentRowId && collapsed.has(target.parentRowId)) {
+      setCollapsed((prev) => {
+        const next = new Set(prev)
+        next.delete(target.parentRowId!)
+        return next
+      })
+      return
+    }
+    const idx = displayRows.findIndex((m) => String(m.row.id) === String(focusRowId))
+    if (idx < 0) return
+    rowVirt.scrollToIndex(idx, { align: 'center' })
+    // Bring the task's bars into view horizontally too (its first planned week).
+    const m = displayRows[idx]
+    if (m.startIdx != null && scrollRef.current) {
+      scrollRef.current.scrollLeft = Math.max(0, attrW + m.startIdx * weekColWidth - 200)
+    }
+    setHighlightId(String(focusRowId))
+    const t = window.setTimeout(() => setHighlightId(null), 3500)
+    return () => window.clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRowId, focusNonce, displayRows, collapsed, rows])
+
   const lineColor = live ? 'var(--today)' : 'var(--asof)'
   // Caption shares the line's color so the marker and label read as one unit.
   const capColor = lineColor
@@ -544,28 +682,30 @@ export function GanttGrid({
                 ID
               </HeadCell>
               {pinnedCols.map((c) => (
-                <HeadCell
+                <AttrHead
                   key={c.id}
-                  style={{ width: cw(c) }}
+                  col={c}
+                  width={cw(c)}
                   sortDir={dirFor(c.id)}
-                  onClick={() => onSortClick(c.id)}
-                >
-                  {c.name}
-                </HeadCell>
+                  onSort={() => onSortClick(c.id)}
+                  onResizeStart={(e) => startResize(e, c.id, cw(c))}
+                  onResizeReset={() => resetWidth(c.id)}
+                />
               ))}
               <SummaryHeads cols={pinnedSummary} />
             </div>
             {/* attr headers (scroll, sortable) */}
             <div className="flex flex-shrink-0" style={{ width: attrW, height: HEAD_H }}>
               {scrollCols.map((c) => (
-                <HeadCell
+                <AttrHead
                   key={c.id}
-                  style={{ width: cw(c) }}
+                  col={c}
+                  width={cw(c)}
                   sortDir={dirFor(c.id)}
-                  onClick={() => onSortClick(c.id)}
-                >
-                  {c.name}
-                </HeadCell>
+                  onSort={() => onSortClick(c.id)}
+                  onResizeStart={(e) => startResize(e, c.id, cw(c))}
+                  onResizeReset={() => resetWidth(c.id)}
+                />
               ))}
               <SummaryHeads cols={scrollSummary} />
             </div>
@@ -621,24 +761,34 @@ export function GanttGrid({
           {rowVirt.getVirtualItems().map((vRow) => {
             const model = displayRows[vRow.index]
             const odd = vRow.index % 2 === 1
-            const rowBg = odd ? 'bg-[#FCFBF7]' : 'bg-[var(--surface)]'
+            // Notification-focused task: tint the whole row + a green left accent.
+            const isFocus = highlightId != null && String(model.row.id) === highlightId
+            const rowBg = isFocus
+              ? 'bg-[#FCEFD0]'
+              : odd
+                ? 'bg-[#FCFBF7]'
+                : 'bg-[var(--surface)]'
             const isChild = model.depth === 1
             return (
               <div
                 key={model.row.id}
                 className={cn(
-                  'group/row absolute left-0 flex border-b border-[var(--line2)]',
-                  odd && 'bg-[#FCFBF7]',
+                  'group/row absolute left-0 flex border-b border-[var(--line2)] transition-colors duration-300',
+                  isFocus ? 'bg-[#FCEFD0]' : odd && 'bg-[#FCFBF7]',
                 )}
                 style={{ top: HEAD_H + vRow.start, height: ROW_H, width: totalW }}
               >
                 {/* pinned: ID + title */}
                 <div
                   className={cn(
-                    'sticky left-0 z-20 flex flex-shrink-0 items-center border-r border-[var(--line)]',
+                    'sticky left-0 z-20 flex flex-shrink-0 items-center border-r border-[var(--line)] transition-colors duration-300',
                     rowBg,
                   )}
-                  style={{ width: pinnedW, height: ROW_H }}
+                  style={{
+                    width: pinnedW,
+                    height: ROW_H,
+                    boxShadow: isFocus ? 'inset 3px 0 0 var(--green)' : undefined,
+                  }}
                 >
                   <div
                     className="flex items-center gap-0.5 overflow-hidden px-2 text-[12.5px] font-semibold"
@@ -753,6 +903,9 @@ export function GanttGrid({
                         autoStatusBadge={
                           c.id === autoStatusColId ? model.status : undefined
                         }
+                        autoStatusDelayWeeks={
+                          c.id === autoStatusColId ? model.statusDelayWeeks : undefined
+                        }
                         viewedWeekIso={viewedWeekIso}
                         onSave={(v) => onEditRowCell(model.row, c.id, v)}
                       />
@@ -783,6 +936,9 @@ export function GanttGrid({
                         autoStatusBadge={
                           c.id === autoStatusColId ? model.status : undefined
                         }
+                        autoStatusDelayWeeks={
+                          c.id === autoStatusColId ? model.statusDelayWeeks : undefined
+                        }
                         viewedWeekIso={viewedWeekIso}
                         onSave={(v) => onEditRowCell(model.row, c.id, v)}
                       />
@@ -797,35 +953,56 @@ export function GanttGrid({
                 </div>
 
                 {/* week cells (virtualized) */}
-                <div className="relative flex-shrink-0" style={{ width: gridW, height: ROW_H }}>
+                <div
+                  className={cn(
+                    'relative flex-shrink-0 transition-colors duration-300',
+                    isFocus && 'bg-[#FCEFD0]',
+                  )}
+                  style={{ width: gridW, height: ROW_H }}
+                >
                   {weeks.map((_w, wi) => {
                     const cell = model.gantt.cells[wi]
                     // Past weeks show ACTUAL, which is now derived from 日報
                     // (work logs) — so only planned (current/future) cells are
-                    // hand-editable. Actuals are entered on the 日報 page.
-                    // Parent roll-up cells are read-only (子タスク側で入力).
+                    // hand-editable. Actuals are entered on the 日報 page. Parent
+                    // cells ARE editable (week view only): the input is the
+                    // combined (親＋子) total and editing adjusts the parent's OWN
+                    // part (floored so the total never drops below the children's
+                    // sum). Month view keeps parents read-only (子合計は週単位のため).
                     const cellEditable =
-                      editable && wi >= lineIndex && !model.hasChildren
+                      editable && wi >= lineIndex && (viewMode === 'week' || !model.hasChildren)
                     const isEditing =
                       editing?.rowId === model.row.id && editing.wi === wi
                     if (isEditing) {
                       const past = wi < lineIndex && live
                       const field = past ? 'actual_hours' : 'planned_hours'
                       const current = past ? cell?.actual ?? 0 : cell?.planned ?? 0
+                      const childSum =
+                        model.childPlannedByWeek?.get(fmtISO(weeks[wi])) ?? 0
                       return (
                         <WeekCellInput
                           key={wi}
                           left={wi * weekColWidth}
                           width={weekColWidth}
                           initial={current}
-                          onCommit={(value) => {
+                          onCommitMove={(value, dir) => {
+                            // Parent: the entered number is the combined total, so
+                            // store own = total − 子合計 (≥0). Leaf: store as-is.
+                            const toSave =
+                              model.hasChildren && field === 'planned_hours'
+                                ? value == null
+                                  ? null
+                                  : Math.max(0, round1(value - childSum))
+                                : value
                             onSaveWeek({
                               rowId: model.row.id,
                               weekStart: fmtISO(weeks[wi]),
                               field,
-                              value,
+                              value: toSave,
                             })
-                            setEditing(null)
+                            // Tab/arrow/Enter move to the next cell; blur closes.
+                            if (dir) moveEditing({ rowId: model.row.id, wi }, dir)
+                            else setEditing(null)
                           }}
                           onCancel={() => setEditing(null)}
                         />
@@ -1077,6 +1254,38 @@ function HeadCell({
   )
 }
 
+/** Sortable attribute-column header + a drag handle on its right edge for manual
+ *  width. Drag to resize; double-click the handle to return to auto (content) fit. */
+function AttrHead({
+  col,
+  width,
+  sortDir,
+  onSort,
+  onResizeStart,
+  onResizeReset,
+}: {
+  col: Column
+  width: number
+  sortDir: SortDir | null
+  onSort: () => void
+  onResizeStart: (e: React.MouseEvent) => void
+  onResizeReset: () => void
+}) {
+  return (
+    <div className="relative flex-shrink-0" style={{ width }}>
+      <HeadCell style={{ width }} sortDir={sortDir} onClick={onSort}>
+        {col.name}
+      </HeadCell>
+      <div
+        onMouseDown={onResizeStart}
+        onDoubleClick={onResizeReset}
+        title="ドラッグで列幅を変更（ダブルクリックで自動幅に戻す）"
+        className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-[var(--green-l)]/40"
+      />
+    </div>
+  )
+}
+
 /** Inline-editable row ID (key_value). Click to edit; Enter/blur saves, Esc
  *  cancels. Read-only when the grid is in as-of mode. Duplicate IDs are allowed,
  *  so this is a free rename. */
@@ -1115,7 +1324,9 @@ function EditableKey({
 
   if (!editable) {
     return (
-      <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{value}</span>
+      <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap" title={value}>
+        {value}
+      </span>
     )
   }
   if (editing) {
@@ -1143,7 +1354,7 @@ function EditableKey({
   return (
     <button
       type="button"
-      title="IDを編集（クリック）"
+      title={value ? `${value} — クリックでID編集` : 'IDを編集（クリック）'}
       onClick={() => setEditing(true)}
       className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left hover:text-[var(--green-d)] hover:underline"
     >
@@ -1164,6 +1375,7 @@ function AttrCell({
   lookupValue,
   editable,
   autoStatusBadge,
+  autoStatusDelayWeeks,
   viewedWeekIso,
   onSave,
 }: {
@@ -1174,6 +1386,8 @@ function AttrCell({
   lookupValue: (column: Column, row: Row) => string | null
   editable: boolean
   autoStatusBadge?: StatusBadge | null
+  /** Weeks behind (何週遅延) for the auto-status column; shown next to the badge. */
+  autoStatusDelayWeeks?: number | null
   /** Viewed week — weekly-reset columns blank their value outside this week. */
   viewedWeekIso?: string
   onSave: (v: CellValue) => void
@@ -1187,10 +1401,15 @@ function AttrCell({
   const effRow = stale ? { ...row, data: { ...row.data, [column.id]: null } } : row
   // Auto-derived status (read-only computed badge).
   if (column.type === 'status' && autoStatusBadge !== undefined) {
+    const delay = autoStatusDelayWeeks ?? null
     return (
       <div
-        className="flex h-full items-center px-2.5"
-        title="達成状況から自動判定（読み取り専用）"
+        className="flex h-full items-center gap-1 px-2.5"
+        title={
+          delay
+            ? `現在フェーズ：${autoStatusBadge?.label ?? '—'}（実績が予定に対して約${delay}週遅延）`
+            : '現在フェーズから自動判定（読み取り専用）'
+        }
       >
         {autoStatusBadge ? (
           <Badge color={autoStatusBadge.color} bg={autoStatusBadge.bg}>
@@ -1199,6 +1418,13 @@ function AttrCell({
         ) : (
           <span className="text-[12px] text-[var(--ink3)]">—</span>
         )}
+        {delay ? (
+          <span
+            className="flex-shrink-0 whitespace-nowrap rounded bg-[#FAE6E0] px-1 text-[10px] font-semibold leading-[16px] text-[#A8442B]"
+          >
+            {delay}週遅延
+          </span>
+        ) : null}
       </div>
     )
   }
@@ -1250,7 +1476,10 @@ function ReadonlyCell({
     const id = row.data[column.id]
     const m = members.find((x) => String(x.id) === String(id ?? ''))
     return (
-      <div className="flex h-full items-center gap-1.5 overflow-hidden px-2.5 text-[12px]">
+      <div
+        className="flex h-full items-center gap-1.5 overflow-hidden px-2.5 text-[12px]"
+        title={m?.name}
+      >
         {m ? (
           <>
             <Avatar name={m.name} seed={String(m.id)} />
@@ -1263,9 +1492,13 @@ function ReadonlyCell({
     )
   }
   if (column.type === 'lookup') {
+    const lv = lookupValue(column, row) ?? ''
     return (
-      <div className="flex h-full items-center overflow-hidden text-ellipsis whitespace-nowrap px-2.5 text-[12.5px] text-[var(--ink3)]">
-        {lookupValue(column, row) ?? ''}
+      <div
+        className="flex h-full items-center overflow-hidden text-ellipsis whitespace-nowrap px-2.5 text-[12.5px] text-[var(--ink3)]"
+        title={lv || undefined}
+      >
+        {lv}
       </div>
     )
   }
@@ -1284,9 +1517,13 @@ function ReadonlyCell({
     )
   }
   const v = row.data[column.id]
+  const vs = v == null || v === '' ? '' : String(v)
   return (
-    <div className="flex h-full items-center overflow-hidden text-ellipsis whitespace-nowrap px-2.5 text-[12.5px]">
-      {v == null || v === '' ? '' : String(v)}
+    <div
+      className="flex h-full items-center overflow-hidden text-ellipsis whitespace-nowrap px-2.5 text-[12.5px]"
+      title={vs || undefined}
+    >
+      {vs}
     </div>
   )
 }
@@ -1318,7 +1555,6 @@ function WeekCellView({
   const actual = cell?.actual ?? 0
   // Show the cell (phase fill + numbers) whenever it has any plan or actual.
   const colored = !!(cell && (planned > 0 || actual > 0) && cell.color)
-  const over = actual > planned + 1e-9 // actual exceeded plan this week
   const plannedColor = cell?.changed && live ? 'var(--accent)' : '#8a8778'
   const fmt = (n: number) => String(round1(n))
 
@@ -1360,12 +1596,9 @@ function WeekCellView({
           {planned > 0 && actual > 0 && (
             <span className="my-[1px] h-px w-[62%]" style={{ background: 'rgba(51,50,44,.14)' }} />
           )}
-          {/* bottom = 実績 (actual); red when it overran the plan */}
+          {/* bottom = 実績 (actual) */}
           {actual > 0 && (
-            <span
-              className="text-[9.5px] font-semibold"
-              style={{ color: over ? '#A8442B' : '#33322c' }}
-            >
+            <span className="text-[9.5px] font-semibold" style={{ color: '#33322c' }}>
               {fmt(actual)}
             </span>
           )}
@@ -1375,18 +1608,21 @@ function WeekCellView({
   )
 }
 
-/** In-place numeric editor for a single week cell. Enter/blur saves, Esc cancels. */
+/** In-place numeric editor for a single week cell. Commits the value and, when a
+ *  direction is given (Tab/Shift+Tab/arrows/Enter), asks the grid to move to the
+ *  next cell so values can be entered without reaching for the mouse (Feature 1).
+ *  Blur commits without moving; Esc cancels. */
 function WeekCellInput({
   left,
   width,
   initial,
-  onCommit,
+  onCommitMove,
   onCancel,
 }: {
   left: number
   width: number
   initial: number
-  onCommit: (value: number | null) => void
+  onCommitMove: (value: number | null, dir: 'up' | 'down' | 'left' | 'right' | null) => void
   onCancel: () => void
 }) {
   const ref = useRef<HTMLInputElement>(null)
@@ -1398,16 +1634,26 @@ function WeekCellInput({
     ref.current?.select()
   }, [])
 
-  function commit() {
+  function commit(dir: 'up' | 'down' | 'left' | 'right' | null) {
     if (done.current) return
     done.current = true
     const trimmed = val.trim()
     if (trimmed === '') {
-      onCommit(null)
+      onCommitMove(null, dir)
       return
     }
     const n = Number(trimmed)
-    onCommit(Number.isFinite(n) ? n : null)
+    onCommitMove(Number.isFinite(n) ? n : null, dir)
+  }
+
+  // Caret-aware so ←/→ only jump cells at the value's edges (else move the caret).
+  const atStart = () => {
+    const el = ref.current
+    return !!el && el.selectionStart === 0 && el.selectionEnd === 0
+  }
+  const atEnd = () => {
+    const el = ref.current
+    return !!el && el.selectionStart === val.length && el.selectionEnd === val.length
   }
 
   return (
@@ -1419,16 +1665,42 @@ function WeekCellInput({
       step="0.5"
       value={val}
       onChange={(e) => setVal(e.target.value)}
-      onBlur={commit}
+      onBlur={() => commit(null)}
       onKeyDown={(e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault()
-          commit()
-        }
-        if (e.key === 'Escape') {
-          e.preventDefault()
-          done.current = true
-          onCancel()
+        switch (e.key) {
+          case 'Enter':
+            e.preventDefault()
+            commit('down')
+            break
+          case 'Tab':
+            e.preventDefault()
+            commit(e.shiftKey ? 'left' : 'right')
+            break
+          case 'ArrowDown':
+            e.preventDefault()
+            commit('down')
+            break
+          case 'ArrowUp':
+            e.preventDefault()
+            commit('up')
+            break
+          case 'ArrowRight':
+            if (atEnd()) {
+              e.preventDefault()
+              commit('right')
+            }
+            break
+          case 'ArrowLeft':
+            if (atStart()) {
+              e.preventDefault()
+              commit('left')
+            }
+            break
+          case 'Escape':
+            e.preventDefault()
+            done.current = true
+            onCancel()
+            break
         }
       }}
       className="absolute top-0 z-[5] h-full rounded-[3px] border-[1.5px] border-[var(--green-l)] bg-[var(--surface)] text-center text-[11px] outline-none"
@@ -1479,6 +1751,9 @@ function ProgressCell({
   const color = neutral ? 'var(--ink3)' : model.behind ? '#A8442B' : '#266B53'
   const bg = neutral ? undefined : model.behind ? '#FAE6E0' : '#E6F0DB'
   const canEdit = editable && !model.progressRollup
+  // Week-over-week change (前週からの差). Shown as a small delta next to the %.
+  const prev = model.progressPrev
+  const delta = p != null && prev != null ? p - prev : null
 
   useEffect(() => {
     if (editing) {
@@ -1531,7 +1806,7 @@ function ProgressCell({
   const title = hasPlan
     ? `進捗 ${p ?? '—'}% ／ 予定上は今日 ${expected}% 想定${model.behind ? '（ビハインド）' : ''}${
         model.progressRollup ? '（子タスクの集計）' : ''
-      }`
+      }${prev != null ? ` ／ 前週 ${prev}%` : ''}`
     : '進捗（予定がないため基準なし）'
 
   return (
@@ -1553,6 +1828,15 @@ function ProgressCell({
       >
         {p == null ? '—' : `${p}%`}
       </span>
+      {delta != null && delta !== 0 && (
+        <span
+          className="ml-0.5 text-[9px] font-semibold leading-none"
+          style={{ color: delta > 0 ? '#266B53' : '#A8442B' }}
+        >
+          {delta > 0 ? '+' : ''}
+          {delta}
+        </span>
+      )}
     </button>
   )
 }
@@ -1567,6 +1851,21 @@ function SummaryHeads({ cols }: { cols: ReadonlyArray<SummaryDescriptor> }) {
         </HeadCell>
       ))}
     </>
+  )
+}
+
+/** Small week-over-week delta chip (前週差分) for the 予定計/実績計 totals.
+ *  Hidden when the delta is zero or unknown. */
+function SummaryDelta({ delta }: { delta: number | null }) {
+  if (delta == null || delta === 0) return null
+  return (
+    <span
+      className="text-[9px] font-semibold leading-none"
+      style={{ color: delta > 0 ? '#266B53' : '#A8442B' }}
+    >
+      {delta > 0 ? '+' : ''}
+      {delta}
+    </span>
   )
 }
 
@@ -1585,26 +1884,44 @@ function RowSummaryCells({
   return (
     <>
       {cols.map((col) => {
-        if (col.key === 'plan')
+        if (col.key === 'plan') {
+          const delta =
+            model.plannedPrev != null
+              ? round1(model.gantt.plannedSum - model.plannedPrev)
+              : null
           return (
             <div
               key="plan"
-              className="px-2.5 text-right text-[12.5px] font-medium text-[var(--ink2)]"
+              className="flex items-center justify-end gap-0.5 px-2.5 text-right text-[12.5px] font-medium text-[var(--ink2)]"
               style={{ width: col.w }}
+              title={
+                model.plannedPrev != null ? `前週 ${round1(model.plannedPrev)}h` : undefined
+              }
             >
               {round1(model.gantt.plannedSum)}h
+              <SummaryDelta delta={delta} />
             </div>
           )
-        if (col.key === 'actual')
+        }
+        if (col.key === 'actual') {
+          const delta =
+            model.actualPrev != null
+              ? round1(model.gantt.actualSum - model.actualPrev)
+              : null
           return (
             <div
               key="actual"
-              className="px-2.5 text-right text-[12.5px] font-medium text-[var(--ink2)]"
+              className="flex items-center justify-end gap-0.5 px-2.5 text-right text-[12.5px] font-medium text-[var(--ink2)]"
               style={{ width: col.w }}
+              title={
+                model.actualPrev != null ? `前週 ${round1(model.actualPrev)}h` : undefined
+              }
             >
               {round1(model.gantt.actualSum)}h
+              <SummaryDelta delta={delta} />
             </div>
           )
+        }
         if (col.key === 'diff') {
           const diff = round1(model.gantt.plannedSum - model.gantt.actualSum)
           return (
@@ -1619,13 +1936,39 @@ function RowSummaryCells({
             </div>
           )
         }
+        if (col.key === 'prog')
+          return (
+            <ProgressCell
+              key="prog"
+              model={model}
+              editable={editable}
+              onEdit={(v) => onEditProgress(model.row, v)}
+            />
+          )
+        // 予実差: 進捗 − 予定上の想定（pt）。プラス=前倒し / マイナス=遅延。
+        const hasPlan = model.gantt.plannedSum > 0
+        const pace =
+          model.progress != null && hasPlan
+            ? Math.round(model.progress - model.expectedPct * 100)
+            : null
         return (
-          <ProgressCell
-            key="prog"
-            model={model}
-            editable={editable}
-            onEdit={(v) => onEditProgress(model.row, v)}
-          />
+          <div
+            key="pace"
+            className="px-2.5 text-right text-[12px] font-semibold"
+            style={{
+              width: col.w,
+              color: pace == null ? 'var(--ink3)' : pace < 0 ? '#A8442B' : '#266B53',
+            }}
+            title={
+              pace == null
+                ? '進捗 − 予定上の想定（進捗・予定がないため算出不可）'
+                : `進捗 ${model.progress}% − 予定上の想定 ${Math.round(
+                    model.expectedPct * 100,
+                  )}% ＝ ${pace > 0 ? `${pace}pt 前倒し` : pace < 0 ? `${-pace}pt 遅延` : '予定どおり'}`
+            }
+          >
+            {pace == null ? '—' : `${pace > 0 ? '+' : ''}${pace}%`}
+          </div>
         )
       })}
     </>
@@ -1676,7 +2019,8 @@ function FooterSummaryCells({
             </div>
           )
         }
-        return <div key="prog" style={{ width: col.w }} />
+        // 進捗 / 予実差 have no meaningful column total.
+        return <div key={col.key} style={{ width: col.w }} />
       })}
     </>
   )

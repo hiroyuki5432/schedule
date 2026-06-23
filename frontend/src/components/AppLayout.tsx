@@ -4,6 +4,7 @@ import { useAuth } from '@/hooks/useAuth'
 import { useOrg, useSheets } from '@/hooks/useSheets'
 import { cn, initial } from '@/lib/format'
 import { AddSheetDialog } from '@/components/AddSheetDialog'
+import { NotificationBell } from '@/components/NotificationBell'
 import {
   CalendarIcon,
   ChartIcon,
@@ -70,13 +71,18 @@ export function AppLayout() {
         <div className="flex items-center gap-2.5 px-1.5 pb-4 pt-0.5 text-[16px] font-semibold text-white">
           <span className="h-2.5 w-2.5 rounded-full bg-[#7FC9A6]" />
           工数スケジュール
-          <button
-            onClick={() => setDrawerOpen(false)}
-            className="ml-auto rounded-md p-1 text-[#9CB8AC] hover:bg-[var(--green-line)] hover:text-white md:hidden"
-            aria-label="メニューを閉じる"
-          >
-            <XIcon className="h-[18px] w-[18px]" />
-          </button>
+          <div className="ml-auto flex items-center gap-1">
+            <span className="hidden md:block">
+              <NotificationBell variant="dark" align="left" />
+            </span>
+            <button
+              onClick={() => setDrawerOpen(false)}
+              className="rounded-md p-1 text-[#9CB8AC] hover:bg-[var(--green-line)] hover:text-white md:hidden"
+              aria-label="メニューを閉じる"
+            >
+              <XIcon className="h-[18px] w-[18px]" />
+            </button>
+          </div>
         </div>
 
         <div className="mb-4 flex items-center gap-2.5 rounded-[11px] bg-[var(--green-d)] px-2.5 py-2.5">
@@ -148,6 +154,9 @@ export function AppLayout() {
           <span className="flex items-center gap-2 text-[14px] font-semibold text-[var(--ink)]">
             <span className="h-2 w-2 rounded-full bg-[var(--green)]" />
             工数スケジュール
+          </span>
+          <span className="ml-auto">
+            <NotificationBell variant="light" align="right" />
           </span>
         </div>
         <Outlet />

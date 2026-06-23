@@ -9,6 +9,8 @@ import type {
   Effort,
   Member,
   Milestone,
+  Notification,
+  NotificationItem,
   Org,
   Role,
   Row,
@@ -44,11 +46,12 @@ export const createMember = (body: {
   email: string
   password: string
   role: Role
+  worklog_required?: boolean
 }) => http.post<Member>('/api/members', body)
 
 export const updateMember = (
   id: string,
-  body: { name?: string; role?: Role; password?: string },
+  body: { name?: string; role?: Role; password?: string; worklog_required?: boolean },
 ) => http.patch<Member>(`/api/members/${id}`, body)
 
 export const deleteMember = (id: string) => http.del<void>(`/api/members/${id}`)
@@ -133,6 +136,10 @@ export const putEffort = (
 ) => http.put<Effort>(`/api/rows/${rowId}/effort/${weekStart}`, body)
 
 // ---- Milestones ----
+/** All milestones for every row in a sheet (one request — used by the schedule). */
+export const getSheetMilestones = (sheetId: string) =>
+  http.get<Milestone[]>(`/api/sheets/${sheetId}/milestones`)
+
 export const getMilestones = (rowId: string) =>
   http.get<Milestone[]>(`/api/rows/${rowId}/milestones`)
 
@@ -185,3 +192,14 @@ export const updateWorkLog = (id: string, body: Partial<WorkLogInput>) =>
   http.patch<WorkLog>(`/api/worklog/${id}`, body)
 
 export const deleteWorkLog = (id: string) => http.del<void>(`/api/worklog/${id}`)
+
+// ---- Notifications (アプリ内通知・ベル) ----
+export const getNotifications = () => http.get<Notification[]>('/api/notifications')
+
+// Register schedule-derived alerts; deduped server-side. Returns count created.
+export const registerNotifications = (items: NotificationItem[]) =>
+  http.post<{ created: number }>('/api/notifications/register', { items })
+
+// Mark notifications read (omit ids to mark all).
+export const markNotificationsRead = (ids?: string[]) =>
+  http.post<{ updated: number }>('/api/notifications/mark-read', ids ? { ids } : {})

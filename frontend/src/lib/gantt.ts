@@ -66,6 +66,10 @@ interface BuildArgs {
   currentWeekIdx: number
   /** Week indices that changed vs the previous week (change points). */
   changedWeekIdx?: Set<number>
+  /** Task start/end (開始日/完了日, YYYY-MM-DD). When set, coloring is bounded to
+   *  this range (range外は無色). When omitted, legacy behavior (start=0/end=chart). */
+  startDate?: string | null
+  endDate?: string | null
 }
 
 interface Segment {
@@ -82,33 +86,53 @@ interface MarkerInfo {
   done: boolean
 }
 
-/** Per-week color + label from milestone segments (boundary → next boundary). */
+/** A milestone's kind, defaulting to 'phase' for legacy rows without the field. */
+function kindOf(m: Milestone): 'phase' | 'milestone' {
+  return m.kind === 'milestone' ? 'milestone' : 'phase'
+}
+
+/** Per-week color + label from PHASE segments (boundary → next phase boundary).
+ *  Only phase-kind entries define color. Coloring is bounded to [startDate, endDate]
+ *  when given (範囲外は無色); otherwise legacy behavior (first phase from chart
+ *  start, last phase to chart end). */
 function buildSegments(
   weeks: Date[],
   sorted: Milestone[],
   currentWeekIdx: number,
+  startDate?: string | null,
+  endDate?: string | null,
 ): Segment[] {
   const out: Segment[] = weeks.map(() => ({ color: '', label: '', late: false }))
-  if (sorted.length === 0) return out
+  const phases = sorted.filter((m) => kindOf(m) === 'phase')
 
-  for (let s = 0; s < sorted.length; s++) {
-    const m = sorted[s]
-    const startIdx = Math.max(0, weekIndex(weeks, parseDate(m.boundary_date)))
+  // Task span bounds. Default to whole chart (legacy) when not provided.
+  const spanStart = startDate ? Math.max(0, weekIndex(weeks, parseDate(startDate))) : 0
+  const spanEnd = endDate
+    ? Math.min(weeks.length, weekIndex(weeks, parseDate(endDate)) + 1)
+    : weeks.length
+
+  for (let s = 0; s < phases.length; s++) {
+    const m = phases[s]
+    // First phase begins at the task start (or chart start when unbounded).
+    const startIdx = s === 0 ? spanStart : Math.max(0, weekIndex(weeks, parseDate(m.boundary_date)))
     const nextIdx =
-      s + 1 < sorted.length
-        ? weekIndex(weeks, parseDate(sorted[s + 1].boundary_date))
-        : weeks.length
+      s + 1 < phases.length
+        ? weekIndex(weeks, parseDate(phases[s + 1].boundary_date))
+        : spanEnd
     const color = m.color || NEUTRAL_FILL
-    for (let i = startIdx; i < nextIdx && i < weeks.length; i++) {
+    // Clamp every segment to the task span so 範囲外 stays uncolored.
+    const from = Math.max(spanStart, startIdx)
+    const to = Math.min(spanEnd, nextIdx)
+    for (let i = from; i < to && i < weeks.length; i++) {
       out[i] = { color, label: m.name, late: false }
     }
   }
 
-  // Overdue: if today is past the last boundary and that milestone is not done,
-  // recolor the overshoot weeks with the late color (SPEC 4.1b).
-  const last = sorted[sorted.length - 1]
-  if (!last.done) {
-    const lastIdx = Math.max(0, weekIndex(weeks, parseDate(last.boundary_date)))
+  // Overdue: if today is past the last MILESTONE and it is not achieved, recolor
+  // the overshoot weeks with the late color (SPEC 4.1b). Phases have no date now.
+  const lastMs = [...sorted].reverse().find((m) => kindOf(m) === 'milestone')
+  if (lastMs && !lastMs.done) {
+    const lastIdx = Math.max(0, weekIndex(weeks, parseDate(lastMs.boundary_date)))
     for (let i = lastIdx; i <= currentWeekIdx && i < weeks.length; i++) {
       out[i] = { color: LATE_FILL, label: LATE_LABEL, late: true }
     }
@@ -122,6 +146,9 @@ function buildMarkers(weeks: Date[], sorted: Milestone[]) {
   const actual = new Map<number, MarkerInfo>()
   const inRange = (i: number) => i >= 0 && i < weeks.length
   for (const m of sorted) {
+    // Only milestone-kind entries draw a diamond (◇). Phase boundaries are shown
+    // by the color change of their segment, not a marker.
+    if (kindOf(m) !== 'milestone') continue
     const pIdx = weekIndex(weeks, parseDate(m.boundary_date))
     const actualDate = m.actual_date ?? null
     // Actual diamond: at the actual_date week; fall back to the boundary when
@@ -155,13 +182,15 @@ export function buildRowGantt({
   milestones,
   currentWeekIdx,
   changedWeekIdx,
+  startDate,
+  endDate,
 }: BuildArgs): RowGantt {
   const sorted = [...milestones].sort(
     (a, b) =>
       a.order - b.order ||
       parseDate(a.boundary_date).getTime() - parseDate(b.boundary_date).getTime(),
   )
-  const segs = buildSegments(weeks, sorted, currentWeekIdx)
+  const segs = buildSegments(weeks, sorted, currentWeekIdx, startDate, endDate)
   const { planned: plannedM, actual: actualM } = buildMarkers(weeks, sorted)
   const cells: Array<WeekCell | null> = weeks.map(() => null)
   let plannedSum = 0

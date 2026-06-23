@@ -27,8 +27,9 @@ interface Props {
   onDelete?: () => void
 }
 
-/** Text/number input that commits on blur or Enter (not on every keystroke). */
-function CommitInput({
+/** Text/number input that commits on blur or Enter (not on every keystroke).
+ *  Number fields request the decimal keypad on mobile (inputMode="decimal"). */
+export function CommitInput({
   value,
   type = 'text',
   placeholder,
@@ -46,6 +47,8 @@ function CommitInput({
   return (
     <Input
       type={type}
+      inputMode={type === 'number' ? 'decimal' : undefined}
+      step={type === 'number' ? '0.5' : undefined}
       value={v}
       placeholder={placeholder}
       className={className}

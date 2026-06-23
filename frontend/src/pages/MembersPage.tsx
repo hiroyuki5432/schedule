@@ -20,6 +20,12 @@ export function MembersPage() {
   const membersQ = useMembers()
   const [showForm, setShowForm] = useState(false)
 
+  const toggleWorklog = useMutation({
+    mutationFn: ({ id, value }: { id: string; value: boolean }) =>
+      api.updateMember(id, { worklog_required: value }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['members'] }),
+  })
+
   return (
     <>
       <PageHeader
@@ -55,6 +61,7 @@ export function MembersPage() {
                     <th className="px-5 py-2.5 font-medium">名前</th>
                     <th className="px-5 py-2.5 font-medium">メール</th>
                     <th className="px-5 py-2.5 font-medium">ロール</th>
+                    <th className="px-5 py-2.5 font-medium">日報</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -75,6 +82,28 @@ export function MembersPage() {
                           {m.role === 'admin' ? '管理者' : 'メンバー'}
                         </Badge>
                       </td>
+                      <td className="px-5 py-2.5">
+                        {isAdmin ? (
+                          <label
+                            className="inline-flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--ink2)]"
+                            title="オフにすると日報の未入力リマインドを受け取りません"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={m.worklog_required}
+                              disabled={toggleWorklog.isPending}
+                              onChange={(e) =>
+                                toggleWorklog.mutate({ id: m.id, value: e.target.checked })
+                              }
+                            />
+                            入力対象
+                          </label>
+                        ) : (
+                          <span className="text-[12px] text-[var(--ink3)]">
+                            {m.worklog_required ? '入力対象' : '対象外'}
+                          </span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -92,10 +121,12 @@ function AddMemberForm({ onDone }: { onDone: () => void }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [role, setRole] = useState<Role>('member')
+  const [worklogRequired, setWorklogRequired] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const mutation = useMutation({
-    mutationFn: () => api.createMember({ name, email, password, role }),
+    mutationFn: () =>
+      api.createMember({ name, email, password, role, worklog_required: worklogRequired }),
     onSuccess: onDone,
     onError: (e) => {
       setError(e instanceof ApiError ? e.message : '追加に失敗しました。')
@@ -142,6 +173,14 @@ function AddMemberForm({ onDone }: { onDone: () => void }) {
               追加
             </Button>
           </div>
+          <label className="flex items-center gap-1.5 text-[12px] text-[var(--ink2)] md:col-span-4">
+            <input
+              type="checkbox"
+              checked={worklogRequired}
+              onChange={(e) => setWorklogRequired(e.target.checked)}
+            />
+            日報入力の対象（オフにすると未入力リマインドを送りません。管理者・外注など向け）
+          </label>
           {error && (
             <div className="md:col-span-4 text-[12px] text-[#A8442B]">{error}</div>
           )}

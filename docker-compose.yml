@@ -35,6 +35,28 @@ services:
     volumes:
       - ./backend:/app
 
+  # Optional automatic daily backups (cron-free loop). Enable with:
+  #   docker compose --profile backup up -d
+  # Dumps land in ./backups; the newest BACKUP_KEEP are kept.
+  db-backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    profiles: ["backup"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-app}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-app}
+      PGDATABASE: ${POSTGRES_DB:-schedule}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./backups:/backups
+    entrypoint: ["sh", "/scripts/db-backup-loop.sh"]
+
   frontend:
     build:
       context: ./frontend
