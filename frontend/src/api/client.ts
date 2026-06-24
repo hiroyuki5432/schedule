@@ -1,5 +1,5 @@
 // Typed API client — one function per endpoint in docs/API.md.
-import { http } from '@/lib/http'
+import { http, ApiError } from '@/lib/http'
 import type {
   AggregateRow,
   ChangeEntry,
@@ -34,6 +34,13 @@ export const logout = () => http.post<void>('/api/auth/logout')
 export const me = () => http.get<{ user: User }>('/api/auth/me')
 
 // ---- Org / Members ----
+export const signupOrg = (body: {
+  org_name: string
+  admin_name: string
+  admin_email: string
+  admin_password: string
+}) => http.post<Org>('/api/org/signup', body)
+
 export const getOrg = () => http.get<Org>('/api/org')
 
 export const updateOrg = (body: { name?: string; settings?: Org['settings'] }) =>
@@ -166,8 +173,49 @@ export const getAggregate = (
   return http.get<AggregateRow[]>(`/api/sheets/${sheetId}/aggregate?${q.toString()}`)
 }
 
-// ---- Export ----
+// ---- Export / Import ----
 export const exportCsvUrl = (sheetId: string) => `/api/sheets/${sheetId}/export.csv`
+export const exportXlsxUrl = (sheetId: string) => `/api/sheets/${sheetId}/export.xlsx`
+
+/** Upload an .xlsx to upsert rows (matched by ID). Returns counts. */
+export async function importXlsx(
+  sheetId: string,
+  file: File,
+): Promise<{ created: number; updated: number }> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`/api/sheets/${sheetId}/import.xlsx`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  })
+  const text = await res.text()
+  const payload = text ? JSON.parse(text) : {}
+  if (!res.ok) {
+    throw new ApiError(res.status, payload?.detail ?? `HTTP ${res.status}`)
+  }
+  return payload
+}
+
+export const exportWorklogXlsxUrl = (from: string, to: string) =>
+  `/api/worklog/export.xlsx?from=${from}&to=${to}`
+
+/** Admin-only: bulk-add work logs from .xlsx. Returns counts. */
+export async function importWorklogXlsx(
+  file: File,
+): Promise<{ created: number; skipped: number; duplicates: number }> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch('/api/worklog/import.xlsx', {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  })
+  const text = await res.text()
+  const payload = text ? JSON.parse(text) : {}
+  if (!res.ok) throw new ApiError(res.status, payload?.detail ?? `HTTP ${res.status}`)
+  return payload
+}
 
 // ---- Work logs (日報) ----
 export const getWorkLogs = (params?: { from?: string; to?: string; userId?: string }) => {

@@ -15,8 +15,15 @@ dist-types/
 .vite/
 *.local
 
-# Claude Code local (machine-specific permissions)
+# Claude Code local (machine-specific permissions / dev tooling)
 .claude/settings.local.json
+.claude/launch.json
+
+# Operator/dev-specific docs NOT for the using side (contain personal email /
+# GitHub username / PAT steps / CI deploy method). Kept locally, not pushed.
+/DEPLOY.md
+/OPERATIONS.md
+/.github/
 
 # Env / secrets (real .env is ignored; *.example templates are kept)
 .env

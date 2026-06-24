@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
-import { useMembers } from '@/hooks/useSheets'
+import { useMembers, useOrg } from '@/hooks/useSheets'
 import { useAuth } from '@/hooks/useAuth'
 import { PageHeader } from '@/components/PageHeader'
-import { Card, CardBody } from '@/components/ui/Card'
+import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
@@ -26,11 +26,23 @@ export function MembersPage() {
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['members'] }),
   })
 
+  const changeRole = useMutation({
+    mutationFn: ({ id, role }: { id: string; role: Role }) => api.updateMember(id, { role }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['members'] }),
+    onError: (e) => alert(e instanceof ApiError ? e.message : 'ロールの変更に失敗しました。'),
+  })
+
+  const removeMember = useMutation({
+    mutationFn: (id: string) => api.deleteMember(id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['members'] }),
+    onError: (e) => alert(e instanceof ApiError ? e.message : '削除に失敗しました。'),
+  })
+
   return (
     <>
       <PageHeader
-        title="メンバー管理"
-        subtitle="組織のメンバー一覧"
+        title="グループ管理"
+        subtitle="グループ設定とメンバー一覧"
         actions={
           isAdmin && (
             <Button size="sm" onClick={() => setShowForm((s) => !s)}>
@@ -41,6 +53,8 @@ export function MembersPage() {
       />
 
       <div className="flex flex-col gap-4 overflow-auto px-[22px] pb-6">
+        {isAdmin && <GroupSettingsCard />}
+
         {isAdmin && showForm && (
           <AddMemberForm
             onDone={() => {
@@ -59,9 +73,10 @@ export function MembersPage() {
                 <thead>
                   <tr className="border-b border-[var(--line)] text-left text-[var(--ink3)]">
                     <th className="px-5 py-2.5 font-medium">名前</th>
-                    <th className="px-5 py-2.5 font-medium">メール</th>
+                    <th className="px-5 py-2.5 font-medium">アカウント</th>
                     <th className="px-5 py-2.5 font-medium">ロール</th>
                     <th className="px-5 py-2.5 font-medium">日報</th>
+                    {isAdmin && <th className="px-5 py-2.5 font-medium">操作</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -75,12 +90,26 @@ export function MembersPage() {
                       </td>
                       <td className="px-5 py-2.5 text-[var(--ink2)]">{m.email}</td>
                       <td className="px-5 py-2.5">
-                        <Badge
-                          color={m.role === 'admin' ? '#266B53' : '#6A675C'}
-                          bg={m.role === 'admin' ? '#E3EFEA' : '#EFEDE4'}
-                        >
-                          {m.role === 'admin' ? '管理者' : 'メンバー'}
-                        </Badge>
+                        {isAdmin && m.id !== user?.id ? (
+                          <Select
+                            className="w-[110px]"
+                            value={m.role}
+                            disabled={changeRole.isPending}
+                            onChange={(e) =>
+                              changeRole.mutate({ id: m.id, role: e.target.value as Role })
+                            }
+                          >
+                            <option value="member">メンバー</option>
+                            <option value="admin">管理者</option>
+                          </Select>
+                        ) : (
+                          <Badge
+                            color={m.role === 'admin' ? '#266B53' : '#6A675C'}
+                            bg={m.role === 'admin' ? '#E3EFEA' : '#EFEDE4'}
+                          >
+                            {m.role === 'admin' ? '管理者' : 'メンバー'}
+                          </Badge>
+                        )}
                       </td>
                       <td className="px-5 py-2.5">
                         {isAdmin ? (
@@ -104,6 +133,25 @@ export function MembersPage() {
                           </span>
                         )}
                       </td>
+                      {isAdmin && (
+                        <td className="px-5 py-2.5">
+                          {m.id !== user?.id ? (
+                            <button
+                              type="button"
+                              disabled={removeMember.isPending}
+                              onClick={() => {
+                                if (window.confirm(`「${m.name}」を削除します。よろしいですか？`))
+                                  removeMember.mutate(m.id)
+                              }}
+                              className="text-[12px] text-[#A8442B] hover:underline disabled:opacity-50"
+                            >
+                              削除
+                            </button>
+                          ) : (
+                            <span className="text-[12px] text-[var(--ink3)]">—</span>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -113,6 +161,70 @@ export function MembersPage() {
         </Card>
       </div>
     </>
+  )
+}
+
+/** Admin-only: edit the group's display name and the app title (per-group).
+ *  Both persist to the org (name → organizations.name, app title → settings). */
+function GroupSettingsCard() {
+  const qc = useQueryClient()
+  const orgQ = useOrg()
+  const org = orgQ.data
+  const [name, setName] = useState('')
+  const [appTitle, setAppTitle] = useState('')
+  const [inited, setInited] = useState(false)
+
+  // Initialize fields once the org loads.
+  if (org && !inited) {
+    setName(org.name)
+    setAppTitle(org.settings?.app_title ?? '')
+    setInited(true)
+  }
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.updateOrg({
+        name: name.trim() || undefined,
+        settings: { ...(org?.settings ?? {}), app_title: appTitle.trim() },
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['org'] })
+    },
+  })
+
+  const dirty =
+    !!org && (name.trim() !== org.name || appTitle.trim() !== (org.settings?.app_title ?? ''))
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>グループ設定</CardTitle>
+      </CardHeader>
+      <CardBody>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <label className="flex flex-col gap-1 text-[12px] text-[var(--ink2)]">
+            グループ名（組織名）
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="例：設計3課" />
+          </label>
+          <label className="flex flex-col gap-1 text-[12px] text-[var(--ink2)]">
+            アプリ表示名（サイドバー上部）
+            <Input
+              value={appTitle}
+              onChange={(e) => setAppTitle(e.target.value)}
+              placeholder="工数スケジュール"
+            />
+            <span className="text-[11px] text-[var(--ink3)]">
+              空欄なら「工数スケジュール」を表示します。
+            </span>
+          </label>
+        </div>
+        <div className="mt-3 flex justify-end">
+          <Button size="sm" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+            グループ設定を保存
+          </Button>
+        </div>
+      </CardBody>
+    </Card>
   )
 }
 
@@ -151,8 +263,8 @@ function AddMemberForm({ onDone }: { onDone: () => void }) {
             onChange={(e) => setName(e.target.value)}
           />
           <Input
-            type="email"
-            placeholder="メール"
+            type="text"
+            placeholder="ログインID（メール形式でなくても可）"
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}

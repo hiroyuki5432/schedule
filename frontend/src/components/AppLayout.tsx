@@ -25,7 +25,7 @@ const FIXED_NAV = [
   { to: '/worklog', label: '実績入力', Icon: CalendarIcon },
   { to: '/all-worklog', label: 'みんなの入力一覧', Icon: MembersIcon },
   { to: '/my-tasks', label: 'マイタスク', Icon: TasksIcon },
-  { to: '/members', label: 'メンバー管理', Icon: MembersIcon },
+  { to: '/members', label: 'グループ管理', Icon: MembersIcon },
 ]
 
 const navClass = ({ isActive }: { isActive: boolean }) =>
@@ -45,6 +45,7 @@ export function AppLayout() {
   const location = useLocation()
 
   const sheets = [...(sheetsQ.data ?? [])].sort((a, b) => a.order - b.order)
+  const appTitle = org?.settings?.app_title?.trim() || '工数スケジュール'
 
   // Close the mobile drawer on route change.
   useEffect(() => {
@@ -70,7 +71,7 @@ export function AppLayout() {
       >
         <div className="flex items-center gap-2.5 px-1.5 pb-4 pt-0.5 text-[16px] font-semibold text-white">
           <span className="h-2.5 w-2.5 rounded-full bg-[#7FC9A6]" />
-          工数スケジュール
+          <span className="truncate">{appTitle}</span>
           <div className="ml-auto flex items-center gap-1">
             <span className="hidden md:block">
               <NotificationBell variant="dark" align="left" />
@@ -89,9 +90,8 @@ export function AppLayout() {
           <div className="flex h-[30px] w-[30px] items-center justify-center rounded-lg bg-[var(--green-l)] text-[12px] font-semibold text-white">
             {initial(org?.name ?? 'デ')}
           </div>
-          <div>
-            <div className="text-[13px] text-white">{org?.name ?? 'デモ組織'}</div>
-            <div className="text-[11px] text-[#9CB8AC]">{org?.slug ?? 'demo'}</div>
+          <div className="min-w-0">
+            <div className="truncate text-[13px] text-white">{org?.name ?? 'デモ組織'}</div>
           </div>
         </div>
 
@@ -151,9 +151,9 @@ export function AppLayout() {
           >
             <MenuIcon className="h-[20px] w-[20px]" />
           </button>
-          <span className="flex items-center gap-2 text-[14px] font-semibold text-[var(--ink)]">
-            <span className="h-2 w-2 rounded-full bg-[var(--green)]" />
-            工数スケジュール
+          <span className="flex items-center gap-2 truncate text-[14px] font-semibold text-[var(--ink)]">
+            <span className="h-2 w-2 flex-shrink-0 rounded-full bg-[var(--green)]" />
+            <span className="truncate">{appTitle}</span>
           </span>
           <span className="ml-auto">
             <NotificationBell variant="light" align="right" />

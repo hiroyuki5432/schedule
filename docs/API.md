@@ -21,11 +21,13 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 ## 組織・メンバー
 | メソッド | パス | 概要 |
 |---|---|---|
-| GET | `/api/org` | `{ id, name, slug, settings }`（settings に `week_start_weekday`=1..7, 既定1=月）|
-| GET | `/api/members` | `[{ id, name, email, role }]` |
-| POST | `/api/members` | admin。`{name,email,password,role}` → member |
-| PATCH | `/api/members/{id}` | admin。`{name?,role?,password?}` |
-| DELETE | `/api/members/{id}` | admin |
+| POST | `/api/org/signup` | 公開。`{org_name, admin_name, admin_email, admin_password}` → 新組織＋管理者を作成し自動ログイン（空の週次シート1枚付き）。重複ID 409 |
+| GET | `/api/org` | `{ id, name, slug, settings }`（settings: `week_start_weekday`=1..7 既定1=月, `app_title`=サイドバー表示名）|
+| PATCH | `/api/org` | admin。`{name?, settings?}`（settings は浅いマージ）。グループ名・アプリ表示名の変更に使用 |
+| GET | `/api/members` | `[{ id, name, email, role, worklog_required }]` |
+| POST | `/api/members` | admin。`{name,email,password,role,worklog_required?}` → member。`email` はログインID（メール形式でなくても可）|
+| PATCH | `/api/members/{id}` | admin。`{name?,role?,password?,worklog_required?}` |
+| DELETE | `/api/members/{id}` | admin（自分自身は不可）|
 
 ## シート
 `sheet = { id, name, order, has_week_grid, key_column_id, color_basis_column_id, settings }`
@@ -92,10 +94,14 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 |---|---|---|
 | GET | `/api/sheets/{id}/aggregate?group_by={col_id}&from=&to=` | `[{ group, planned_sum, actual_sum, count }]` |
 
-## エクスポート
+## エクスポート / インポート
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET | `/api/sheets/{id}/export.csv` | CSV（属性列＋週次工数）|
+| GET | `/api/sheets/{id}/export.xlsx` | Excel（属性列＋週次工数。担当はメンバー名で出力）|
+| POST | `/api/sheets/{id}/import.xlsx` | multipart `file`。ID(key_value)で照合し upsert（一致=更新 / 無い=新規）。`{created, updated}` を返す。週次セルは過去=実績・現在以降=予定で取込。**参照(LOOKUP)列は計算列のため取込時に無視**（出力は空欄）|
+| GET | `/api/worklog/export.xlsx?from=&to=` | 全員の日報を範囲で Excel 出力（みんなの入力一覧）。列: 日付/ユーザー/タスクID/大分類/中分類/メモ/時間 |
+| POST | `/api/worklog/import.xlsx` | **admin**。multipart `file`。各行を新規の日報として追加（ユーザーは名前で照合、タスクはIDで照合）。`{created, skipped}` を返す |
 
 ## 実装優先度
 1. auth / org / members / sheets / columns / rows / effort / milestones（スケジュール画面が動く中核）

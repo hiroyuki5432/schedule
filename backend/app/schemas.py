@@ -41,6 +41,14 @@ class OrgOut(BaseModel):
     settings: dict[str, Any]
 
 
+class OrgSignup(BaseModel):
+    """Public self-service org creation: makes a new group + its first admin."""
+    org_name: str
+    admin_name: str
+    admin_email: str
+    admin_password: str
+
+
 class OrgUpdate(BaseModel):
     name: Optional[str] = None
     # Shallow-merged into the existing settings (top-level keys), so updating

@@ -2,10 +2,15 @@
 
 行（管理対象）をユーザー定義の列で管理し、週次で予定/実績工数をガント風に可視化する、単一組織・小規模チーム向け Web アプリ。
 
-- 仕様: [SPEC.md](SPEC.md)
-- API 契約: [docs/API.md](docs/API.md)
-- 画面モック: [mockup/schedule.html](mockup/schedule.html)（ブラウザで開く）
-- 進捗・やり残し: [STATUS.md](STATUS.md)
+## ドキュメント一覧（目的別）
+| 文書 | 目的（いつ読むか） |
+|---|---|
+| [SPEC.md](SPEC.md) | ドメイン仕様の**正本**。何を作るか・設計判断の根拠。 |
+| [HANDOFF.md](HANDOFF.md) | 次の担当者向けの**全体像と運用の落とし穴**。最初に読む。 |
+| [STATUS.md](STATUS.md) | **現状サマリ**（実装済み機能・残課題）。 |
+| [docs/API.md](docs/API.md) | フロント⇔バックの **REST API 契約**。 |
+| [オフライン導入手順.md](オフライン導入手順.md) | **社内サーバー導入**手順（GitHub不要・運用時は完全オフライン）。 |
+| [mockup/schedule.html](mockup/schedule.html) | デザイン基準の単体HTMLモック（ブラウザで開く）。 |
 
 ## スタック
 - Backend: FastAPI + SQLAlchemy 2.0 + PostgreSQL（Alembic）
@@ -18,7 +23,7 @@ cp .env.example .env          # PowerShell: Copy-Item .env.example .env
 docker compose up --build
 ```
 - frontend: http://localhost:5173
-- backend (OpenAPI): http://localhost:8000/docs
+- backend (OpenAPI): http://localhost:8100/docs
 - db: localhost:5432
 
 初回起動で（`SEED_ON_STARTUP=true` の場合）デモ組織・ユーザー・シートを投入。

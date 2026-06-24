@@ -13,8 +13,10 @@ import { ChevronDownIcon, ChevronUpIcon, TrashIcon } from '@/components/ui/icons
 import { DropdownOptionsEditor } from '@/components/settings/DropdownOptionsEditor'
 import { StatusRuleBuilder } from '@/components/settings/StatusRuleBuilder'
 import { LookupConfigEditor } from '@/components/settings/LookupConfigEditor'
+import { ExcelToolbar } from '@/components/ExcelToolbar'
 import { PlusIcon } from '@/components/ui/icons'
 import { cn } from '@/lib/format'
+import { toast } from '@/lib/toast'
 import type { Column, ColumnType, DefaultMilestone, SheetSettings } from '@/types/api'
 
 const TYPE_LABEL: Record<ColumnType, string> = {
@@ -24,7 +26,7 @@ const TYPE_LABEL: Record<ColumnType, string> = {
   dropdown: 'プルダウン',
   status: '条件付きステータス',
   member: 'メンバー',
-  lookup: '参照(XLOOKUP)',
+  lookup: '参照(LOOKUP)',
 }
 
 export function SheetSettingsPage() {
@@ -159,17 +161,21 @@ export function SheetSettingsPage() {
             </CardBody>
           </Card>
 
+          <ExcelIOCard sheetId={sheetId} />
+
           {sheet && (
             <SheetLevelSettings
               sheetId={sheetId}
               columns={columns}
+              hasWeekGrid={sheet.has_week_grid}
               keyColumnId={sheet.key_column_id}
               colorBasisColumnId={sheet.color_basis_column_id}
               settings={sheet.settings ?? {}}
             />
           )}
 
-          {sheet && (
+          {/* Milestones (gantt phases) are schedule-only — hidden for table sheets. */}
+          {sheet && sheet.has_week_grid && (
             <DefaultMilestonesEditor sheetId={sheetId} settings={sheet.settings ?? {}} />
           )}
 
@@ -282,17 +288,29 @@ function ColumnDetailEditor({
 
   const meta = useMutation({
     mutationFn: () => api.updateColumn(column.id, { name: name.trim(), type }),
-    onSuccess: onDone,
+    onSuccess: () => {
+      onDone()
+      toast.show('保存しました', 'success', 2000)
+    },
+    onError: () => toast.show('保存に失敗しました', 'error'),
   })
   const weeklyResetMut = useMutation({
     mutationFn: (v: boolean) =>
       api.updateColumn(column.id, { config: { ...(column.config ?? {}), weekly_reset: v } }),
-    onSuccess: onDone,
+    onSuccess: () => {
+      onDone()
+      toast.show('保存しました', 'success', 2000)
+    },
+    onError: () => toast.show('保存に失敗しました', 'error'),
   })
   const multilineMut = useMutation({
     mutationFn: (v: boolean) =>
       api.updateColumn(column.id, { config: { ...(column.config ?? {}), multiline: v } }),
-    onSuccess: onDone,
+    onSuccess: () => {
+      onDone()
+      toast.show('保存しました', 'success', 2000)
+    },
+    onError: () => toast.show('保存に失敗しました', 'error'),
   })
   const canWeeklyReset = ['text', 'number', 'date', 'dropdown'].includes(type)
 
@@ -389,12 +407,14 @@ function ColumnDetailEditor({
 function SheetLevelSettings({
   sheetId,
   columns,
+  hasWeekGrid,
   keyColumnId,
   colorBasisColumnId,
   settings,
 }: {
   sheetId: string
   columns: Column[]
+  hasWeekGrid: boolean
   keyColumnId: string | null
   colorBasisColumnId: string | null
   settings: SheetSettings
@@ -436,6 +456,9 @@ function SheetLevelSettings({
       </CardHeader>
       <CardBody>
         <div className="flex flex-col gap-3">
+          {/* Frozen columns / filters / progress / color basis are schedule-only. */}
+          {hasWeekGrid && (
+            <>
           <label className="text-[12px] text-[var(--ink2)]">
             左端に固定する列
             <Select
@@ -526,6 +549,8 @@ function SheetLevelSettings({
               </span>
             </span>
           </label>
+            </>
+          )}
           <label className="text-[12px] text-[var(--ink2)]">
             キー列（採番・参照キー）
             <Select
@@ -545,6 +570,7 @@ function SheetLevelSettings({
               ))}
             </Select>
           </label>
+          {hasWeekGrid && (
           <label className="text-[12px] text-[var(--ink2)]">
             色基準列（ガントのフェーズ色）
             <Select
@@ -564,6 +590,7 @@ function SheetLevelSettings({
               ))}
             </Select>
           </label>
+          )}
         </div>
       </CardBody>
     </Card>
@@ -754,6 +781,24 @@ function DefaultMilestonesEditor({
             既定マイルストンを保存
           </Button>
         </div>
+      </CardBody>
+    </Card>
+  )
+}
+
+/** Excel入出力（一覧の主画面から設定へ移設）。属性＋週次工数を .xlsx で
+ *  出力／取込（取込は ID で照合して upsert、参照(LOOKUP)列は無視）。 */
+function ExcelIOCard({ sheetId }: { sheetId: string }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Excel入出力</CardTitle>
+      </CardHeader>
+      <CardBody>
+        <p className="mb-3 text-[12px] text-[var(--ink3)]">
+          このシートを Excel（.xlsx）で出力／取込します。取込は ID で照合し、一致する行は更新・無い行は新規追加します（参照(LOOKUP)列は計算列のため取込対象外）。
+        </p>
+        <ExcelToolbar sheetId={sheetId} />
       </CardBody>
     </Card>
   )

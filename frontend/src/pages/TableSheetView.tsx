@@ -1,7 +1,8 @@
 // Editable table for non-grid sheets: attribute columns × rows, no weekly grid.
 // Each cell is editable per column type via InlineCell (text/number/date inputs,
 // dropdown/member selects, lookup read-only, status badge computed). Add row.
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { useMembers } from '@/hooks/useSheets'
@@ -12,9 +13,10 @@ import { Card } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { InlineCell } from '@/components/schedule/InlineCell'
+import { Modal } from '@/components/ui/Modal'
 import { statusFromPhases } from '@/lib/status'
 import { PlusIcon, TrashIcon } from '@/components/ui/icons'
-import type { CellValue, Column, Milestone, Row } from '@/types/api'
+import type { CellValue, Column, Member, Milestone, Row } from '@/types/api'
 
 interface Props {
   sheetId: string
@@ -110,6 +112,11 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
     })
     return map
   }, [rows, autoStatusColId, milestonesQ.data])
+
+  // Per-record modal (詳細・編集): track the open row by id so it stays fresh
+  // across refetches.
+  const [modalRowId, setModalRowId] = useState<string | null>(null)
+  const modalRow = rows.find((r) => r.id === modalRowId) ?? null
 
   // Client-side sort on the displayed rows (Feature 1).
   const [sort, setSort] = useState<SortState | null>(null)
@@ -210,6 +217,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
           <Card className="overflow-auto">
             <table className="w-full table-fixed border-collapse text-[12.5px]">
               <colgroup>
+                <col style={{ width: 56 }} />
                 <col style={{ width: 120 }} />
                 {columns.map((c) => (
                   <col key={c.id} style={{ width: colWidth(c) }} />
@@ -218,6 +226,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
               </colgroup>
               <thead>
                 <tr className="border-b border-[var(--line)] text-left text-[var(--ink3)]">
+                  <th className="px-2 py-2.5" />
                   <th className="px-3 py-2.5 font-medium">
                     <SortHeader
                       label="ID"
@@ -243,6 +252,15 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                     key={row.id}
                     className="group/row border-b border-[var(--line2)] hover:bg-[#FCFBF7]"
                   >
+                    <td className="px-2 py-1">
+                      <button
+                        title="このレコードを開く（詳細・編集）"
+                        onClick={() => setModalRowId(row.id)}
+                        className="rounded border border-[var(--line)] px-2 py-1 text-[11px] text-[var(--ink2)] hover:bg-[var(--line2)] hover:text-[var(--ink)]"
+                      >
+                        開く
+                      </button>
+                    </td>
                     <td className="px-1 py-1">
                       <IdCell row={row} onSave={(v) => saveKey(row, v)} />
                     </td>
@@ -263,7 +281,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                         )}
                       </td>
                     ))}
-                    <td className="px-3 py-1 text-right">
+                    <td className="px-2 py-1 text-right">
                       <button
                         title="行を削除"
                         onClick={() => deleteRow(row)}
@@ -277,7 +295,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                 {rows.length === 0 && (
                   <tr>
                     <td
-                      colSpan={columns.length + 2}
+                      colSpan={columns.length + 3}
                       className="px-3 py-6 text-center text-[var(--ink3)]"
                     >
                       行がありません。「新規行」で追加します。
@@ -289,7 +307,184 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
           </Card>
         )}
       </div>
+
+      {modalRow && (
+        <RecordModal
+          row={modalRow}
+          columns={columns}
+          members={members}
+          rows={rows}
+          lookupValue={lookupValue}
+          autoStatusColId={autoStatusColId}
+          autoStatusBadge={autoStatusByRow.get(modalRow.id) ?? null}
+          onClose={() => setModalRowId(null)}
+          onSaveCell={(colId, v) => saveCell(modalRow, colId, v)}
+          onSaveKey={(v) => saveKey(modalRow, v)}
+          onDelete={() => {
+            deleteRow(modalRow)
+            setModalRowId(null)
+          }}
+        />
+      )}
     </>
+  )
+}
+
+/** Full-record modal: every field labeled and editable (reuses InlineCell).
+ *  Opens from a table row's 「開く」 button for focused viewing/editing. */
+function RecordModal({
+  row,
+  columns,
+  members,
+  rows,
+  lookupValue,
+  autoStatusColId,
+  autoStatusBadge,
+  onClose,
+  onSaveCell,
+  onSaveKey,
+  onDelete,
+}: {
+  row: Row
+  columns: Column[]
+  members: ReturnType<typeof useMembers>['data']
+  rows: Row[]
+  lookupValue: (column: Column, row: Row) => string | null
+  autoStatusColId: string | null
+  autoStatusBadge: ReturnType<typeof statusFromPhases>
+  onClose: () => void
+  onSaveCell: (colId: string, v: CellValue) => void
+  onSaveKey: (v: string) => void
+  onDelete: () => void
+}) {
+  return (
+    <Modal
+      title={`レコード詳細 — ${row.key_value || '（IDなし）'}`}
+      onClose={onClose}
+      widthClass="w-[460px]"
+    >
+      <div className="flex flex-col gap-3">
+        <Field label="ID">
+          <IdCell row={row} onSave={onSaveKey} />
+        </Field>
+        {columns.map((c) => (
+          <Field key={c.id} label={c.name}>
+            {c.id === autoStatusColId ? (
+              <AutoStatusCell badge={autoStatusBadge} />
+            ) : (
+              <ModalCell
+                row={row}
+                column={c}
+                members={members ?? []}
+                lookupValue={lookupValue}
+                rows={rows}
+                onSave={(v) => onSaveCell(c.id, v)}
+              />
+            )}
+          </Field>
+        ))}
+      </div>
+      <div className="mt-4 flex items-center justify-between border-t border-[var(--line2)] pt-3">
+        <button
+          onClick={onDelete}
+          className="rounded-[8px] px-2 py-1 text-[12px] text-[#A8442B] hover:bg-[#FAE6E0]"
+        >
+          このレコードを削除
+        </button>
+        <Button size="sm" variant="outline" onClick={onClose}>
+          閉じる
+        </Button>
+      </div>
+    </Modal>
+  )
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[11.5px] font-medium text-[var(--ink3)]">{label}</span>
+      {/* min-height ≈ the ID field, so short fields aren't cramped. */}
+      <div className="flex min-h-[34px] items-stretch rounded-[8px] border border-[var(--line2)]">
+        {children}
+      </div>
+    </label>
+  )
+}
+
+/** Field control used inside the record modal. Long free-text grows to fit its
+ *  content (no nested modal); lookup shows full text; everything else reuses
+ *  InlineCell. */
+function ModalCell({
+  row,
+  column,
+  members,
+  lookupValue,
+  rows,
+  onSave,
+}: {
+  row: Row
+  column: Column
+  members: Member[]
+  lookupValue: (column: Column, row: Row) => string | null
+  rows: Row[]
+  onSave: (v: CellValue) => void
+}) {
+  if (column.type === 'lookup') {
+    const text = lookupValue(column, row) ?? ''
+    return (
+      <div className="w-full whitespace-pre-wrap break-words px-2.5 py-1.5 text-[12.5px] text-[var(--ink2)]">
+        {text || <span className="text-[var(--ink3)]">—</span>}
+      </div>
+    )
+  }
+  if (column.type === 'text') {
+    return (
+      <AutoTextarea
+        value={row.data[column.id] == null ? '' : String(row.data[column.id])}
+        onSave={(v) => onSave(v === '' ? null : v)}
+      />
+    )
+  }
+  // member / dropdown / status / number / date: short, reuse InlineCell.
+  return (
+    <div className="flex w-full items-center">
+      <InlineCell
+        row={row}
+        column={column}
+        members={members}
+        lookupValue={lookupValue}
+        rows={rows}
+        onSave={onSave}
+      />
+    </div>
+  )
+}
+
+/** Textarea that auto-grows to fit its content and saves on blur. Shows the full
+ *  text without a nested modal (大規模入力でもインラインで全文表示・編集)。 */
+function AutoTextarea({ value, onSave }: { value: string; onSave: (v: string) => void }) {
+  const [val, setVal] = useState(value)
+  const ref = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => setVal(value), [value])
+  const resize = () => {
+    const el = ref.current
+    if (el) {
+      el.style.height = 'auto'
+      el.style.height = `${el.scrollHeight}px`
+    }
+  }
+  useEffect(resize, [val])
+  return (
+    <textarea
+      ref={ref}
+      value={val}
+      rows={1}
+      onChange={(e) => setVal(e.target.value)}
+      onBlur={() => {
+        if (val.trim() !== value) onSave(val.trim())
+      }}
+      className="w-full resize-none overflow-hidden bg-transparent px-2.5 py-1.5 text-[12.5px] leading-relaxed outline-none"
+    />
   )
 }
 

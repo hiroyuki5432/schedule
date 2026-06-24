@@ -1,6 +1,6 @@
 # 引き継ぎ (HANDOFF) — 工数スケジュール管理アプリ
 
-次の担当（AI/人）向けの現状まとめ。最終更新 2026-06-17。
+次の担当（AI/人）向けの現状まとめ。最終更新 2026-06-24。
 
 ## 0. まず読む順
 1. このファイル（全体像・運用の落とし穴）
@@ -28,8 +28,13 @@
 cp .env.example .env        # PowerShell: Copy-Item .env.example .env
 docker compose up -d --build
 ```
-- フロント http://localhost:5173 / API http://localhost:8000/docs / db :5432
+- フロント http://localhost:5173 / API http://localhost:8100/docs / db :5432
 - デモログイン: `admin@demo.local` / `demo1234`（メンバーは sato/tanaka/suzuki/yamamoto@demo.local も同PW）
+- ログインIDは**メール形式でなくても可**（`@` 不要。backend は単なる文字列として扱う）。
+- ログイン画面の「**新しいグループを作成する**」から、組織＋管理者を自分で作成できる（`POST /api/org/signup`、作成後に自動ログイン＋空の週次シート1枚を用意）。
+- メニュー「**グループ管理**」（旧メンバー管理, ルートは `/members`）で、メンバー管理に加え**グループ名**と**アプリ表示名**（`org.settings.app_title`、サイドバー上部・グループごと）を編集。
+- **Excel入出力**（`backend/app/routers/excel.py`、`openpyxl`）: `GET .../export.xlsx` / `POST .../import.xlsx`。インポートは ID で upsert、属性＋週次工数（過去=実績/未来=予定）。フロントは [ExcelToolbar.tsx](frontend/src/components/ExcelToolbar.tsx)。
+- **完全オフライン**: フロントの Google Fonts CDN を撤去（端末標準フォントにフォールバック）。運用中の外部アクセスは無し。**openpyxl を追加したので backend は要リビルド**（`up -d --build`）。
 - 初回起動で seed 投入（`SEED_ON_STARTUP=true`、orgが空のときだけ）。
 
 ### ⚠ Windows × Docker バインドマウントのホットリロード問題（最重要）
@@ -39,8 +44,8 @@ docker compose up -d --build
 - 「全然変わらない」と言われたら、まずこのリロード問題を疑うこと（過去に実際これだった）。
 
 ### ⚠ DBスキーマ変更
-- 起動時は `Base.metadata.create_all` のみ＝**既存テーブルに列を追加しない**。
-- 列追加は `backend/app/main.py` の lifespan で `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`（冪等・try/except）を追記する方式（例: row_milestones.done）。Alembic は未整備（要整備）。
+- **Alembic 整備済み**。`backend/alembic/versions/`（initial + 0002〜0009）。起動時に `entrypoint.sh` が pre-Alembic の既存DBを baseline に stamp してから `alembic upgrade head` する。
+- 列・テーブル追加は新しい Alembic リビジョンを足す（過去の lifespan ALTER 方式は廃止）。
 - 作り直すなら `docker compose down -v`（pgdata 削除）→ up で再 seed。
 
 ## 4. データモデル（PostgreSQL, `backend/app/models.py`）
@@ -70,9 +75,8 @@ organizations / users / sheets / columns / rows / effort_entries / row_milestone
 1. **大量データ時の性能**: 週列を156週・全DOM描画（列仮想化を外した）。行が増えると重く、クリック直後の再描画が一瞬詰まる（CDPスクショがtimeoutするほど）。→ 週列の仮想化を「先頭オフセット(pinned+attr)を考慮した形」で再導入するか、表示ウィンドウを可変描画に。
 2. **変化点の本実装（行データ側）**: 工数の赤字は「**現在の予定 vs 当週スナップショットの予定**」で実際の編集を検出する形に改善済み（`changedVsBaseline`、live時のみ）。ただし SPEC本来の「日付変更/行追加/列追加 等の行データ週次差分」(`sheet_snapshots`/`/changes`/`compute_changes`) は簡易のまま・UI未接続。`getChanges`/`ChangeEntry` は未使用で残置。工数の変化点は「当週スナップショット起点＝今週変えた分」を表す点に注意（前々週以前との比較ではない）。
 3. **ステータスのルールビルダー**: 手書きルールの op に `overdue`/`done` 等があるが frontend 評価未対応。`auto_from_milestones` で代替中。整理する。
-4. **Alembic 本番マイグレーション**整備（現状 create_all + lifespan ALTER）。
-5. ダッシュボード/マイタスクは先頭シート固定（シート選択未対応）。Excel出力未（CSVのみ）。
-6. 失敗時トースト未実装（`// TODO: toast` 多数）。lookup の循環参照ガード無し。
+4. ダッシュボード/マイタスクは先頭シート固定（シート選択未対応）。Excel出力未（CSVのみ）。
+5. lookup の循環参照ガード無し。（失敗時トーストは実装済み: `lib/toast.ts` + `Toaster.tsx`。Alembic も整備済み。）
 7. as-of（基準週スナップショット）は簡易。snapshot_service の差分検出を精緻化。
 
 ## 7. ディレクトリ早見
@@ -80,7 +84,7 @@ organizations / users / sheets / columns / rows / effort_entries / row_milestone
 backend/app/
   main.py           FastAPI起動・SessionMiddleware・lifespan(create_all + ALTER + seed)
   models.py schemas.py security.py db.py seed.py deps.py snapshot_service.py weeks.py
-  routers/ auth org members sheets columns rows effort milestones snapshots aggregate export
+  routers/ auth org(+/signup) members sheets columns rows effort milestones snapshots aggregate export excel(xlsx入出力) worklog notifications
 frontend/src/
   api/client.ts            全エンドポイント呼び出し
   lib/ gantt.ts(週セルモデル・色) status.ts(バッジ/ルール/auto) lookup.ts(参照解決) dates.ts

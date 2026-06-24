@@ -13,6 +13,7 @@ from app.routers import (
     auth,
     columns,
     effort,
+    excel,
     export,
     members,
     milestones,
@@ -61,6 +62,7 @@ app.include_router(milestones.router)
 app.include_router(snapshots.router)
 app.include_router(aggregate.router)
 app.include_router(export.router)
+app.include_router(excel.router)
 app.include_router(worklog.router)
 app.include_router(notifications.router)
 

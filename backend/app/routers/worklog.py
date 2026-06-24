@@ -2,9 +2,11 @@
 EffortEntry.actual_hours via app.worklog_service.recompute_actual."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+import io
+from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,9 +20,13 @@ from app.schemas import (
     WorkLogOut,
     WorkLogUpdate,
 )
-from app.security import current_user
+from app.security import current_user, require_admin
 from app.weeks import current_week_start
 from app.worklog_service import org_week_start_weekday, recompute_actual, week_start_for
+
+_XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+# Column order for the みんなの入力一覧 Excel export/import.
+_WL_HEADERS = ["日付", "ユーザー", "タスクID", "大分類", "中分類", "メモ", "時間"]
 
 router = APIRouter(prefix="/api/worklog", tags=["worklog"])
 
@@ -127,6 +133,202 @@ def all_users_day(
             )
         )
     return out
+
+
+@router.get("/export.xlsx")
+def export_worklog_xlsx(
+    from_: date | None = Query(default=None, alias="from"),
+    to: date | None = Query(default=None, alias="to"),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """Export every member's work logs over [from, to] (みんなの入力一覧) as .xlsx.
+    Defaults to today when no range given."""
+    from openpyxl import Workbook
+
+    if from_ is None and to is None:
+        from_ = to = date.today()
+    from_ = from_ or to
+    to = to or from_
+
+    members = {
+        u.id: u.name
+        for u in db.execute(select(User).where(User.org_id == user.org_id)).scalars()
+    }
+    logs = list(
+        db.execute(
+            select(WorkLog)
+            .where(
+                WorkLog.org_id == user.org_id,
+                WorkLog.work_date >= from_,
+                WorkLog.work_date <= to,
+            )
+            .order_by(WorkLog.work_date, WorkLog.user_id, WorkLog.id)
+        ).scalars()
+    )
+    row_ids = {wl.row_id for wl in logs if wl.row_id is not None}
+    keys: dict[int, str] = {}
+    if row_ids:
+        for r in db.execute(select(Row).where(Row.id.in_(row_ids))).scalars():
+            keys[r.id] = r.key_value or ""
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "日報"
+    ws.append(_WL_HEADERS)
+    for wl in logs:
+        ws.append([
+            wl.work_date.isoformat(),
+            members.get(wl.user_id, ""),
+            keys.get(wl.row_id, "") if wl.row_id else "",
+            wl.cat1 or "",
+            wl.cat2 or "",
+            wl.memo or "",
+            float(wl.hours),
+        ])
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    filename = f"worklog_{from_.isoformat()}_{to.isoformat()}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type=_XLSX_MEDIA,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/import.xlsx")
+def import_worklog_xlsx(
+    file: UploadFile,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Admin-only. Bulk-add work logs from .xlsx (みんなの入力一覧 取込). Columns are
+    matched by header name (日付/ユーザー/タスクID/大分類/中分類/メモ/時間). Each row
+    becomes a NEW log (no upsert — worklogs have no natural key); user is matched by
+    name, task by ID (first match). Linked tasks' weekly 実績 are recomputed."""
+    from openpyxl import load_workbook
+
+    try:
+        wb = load_workbook(io.BytesIO(file.file.read()), data_only=True, read_only=True)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Excelファイルを読み込めませんでした（.xlsx 形式をご確認ください）",
+        )
+    ws = wb.active
+    it = ws.iter_rows(values_only=True)
+    try:
+        header = next(it)
+    except StopIteration:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="空のファイルです")
+
+    pos = {str(h).strip(): i for i, h in enumerate(header) if h is not None}
+    if "ユーザー" not in pos or "時間" not in pos:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ヘッダーに『ユーザー』と『時間』の列が必要です",
+        )
+
+    users_by_name: dict[str, int] = {}
+    for u in db.execute(select(User).where(User.org_id == admin.org_id)).scalars():
+        users_by_name.setdefault(u.name, u.id)
+    # Task key_value -> row_id (first match) within this org.
+    rows_by_key: dict[str, int] = {}
+    for r in db.execute(
+        select(Row).join(Sheet, Row.sheet_id == Sheet.id).where(Sheet.org_id == admin.org_id)
+    ).scalars():
+        if r.key_value:
+            rows_by_key.setdefault(r.key_value, r.id)
+
+    # Duplicate guard: signature of an existing log. Re-importing the same file (or
+    # a row identical to one already stored) is skipped rather than duplicated.
+    def _sig(user_id, work_date, row_id, cat1, cat2, memo, hours) -> tuple:
+        return (
+            user_id,
+            work_date,
+            row_id,
+            cat1 or "",
+            cat2 or "",
+            memo or "",
+            round(float(hours), 2),
+        )
+
+    seen: set[tuple] = set()
+    for wl in db.execute(select(WorkLog).where(WorkLog.org_id == admin.org_id)).scalars():
+        seen.add(_sig(wl.user_id, wl.work_date, wl.row_id, wl.cat1, wl.cat2, wl.memo, wl.hours))
+
+    def cell(row, name):
+        i = pos.get(name)
+        return row[i] if i is not None and i < len(row) else None
+
+    created = skipped = duplicates = 0
+    affected: set[tuple[int, date]] = set()
+
+    for raw in it:
+        if raw is None or not any(v not in (None, "") for v in raw):
+            continue
+        uname = cell(raw, "ユーザー")
+        hours_raw = cell(raw, "時間")
+        uid = users_by_name.get(str(uname).strip()) if uname is not None else None
+        if uid is None or hours_raw in (None, ""):
+            skipped += 1
+            continue
+        try:
+            hours = float(hours_raw)
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+
+        d_raw = cell(raw, "日付")
+        if isinstance(d_raw, datetime):
+            work_date = d_raw.date()
+        elif isinstance(d_raw, date):
+            work_date = d_raw
+        elif isinstance(d_raw, str) and d_raw.strip():
+            try:
+                work_date = date.fromisoformat(d_raw.strip())
+            except ValueError:
+                work_date = date.today()
+        else:
+            work_date = date.today()
+
+        key = cell(raw, "タスクID")
+        row_id = rows_by_key.get(str(key).strip()) if key not in (None, "") else None
+
+        def _s(name):
+            v = cell(raw, name)
+            return None if v in (None, "") else str(v)
+
+        cat1, cat2, memo = _s("大分類"), _s("中分類"), _s("メモ")
+        sig = _sig(uid, work_date, row_id, cat1, cat2, memo, hours)
+        if sig in seen:
+            duplicates += 1
+            continue
+        seen.add(sig)
+
+        db.add(
+            WorkLog(
+                org_id=admin.org_id,
+                user_id=uid,
+                work_date=work_date,
+                row_id=row_id,
+                cat1=cat1,
+                cat2=cat2,
+                memo=memo,
+                hours=hours,
+            )
+        )
+        created += 1
+        if row_id is not None:
+            affected.add((row_id, week_start_for(db, admin.org_id, work_date)))
+
+    db.flush()
+    for rid, week in affected:
+        recompute_actual(db, rid, week)
+    db.commit()
+    return {"created": created, "skipped": skipped, "duplicates": duplicates}
 
 
 def _owned(db: Session, worklog_id: int, user: User) -> WorkLog:

@@ -27,6 +27,8 @@ export interface OrgSettings {
   week_start_weekday?: number // 1..7, default 1 (Mon)
   /** Daily work-log masters (categories + properties). */
   worklog?: WorkLogMaster
+  /** Per-group app title shown in the sidebar/login (defaults to 工数スケジュール). */
+  app_title?: string
   [k: string]: unknown
 }
 

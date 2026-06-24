@@ -166,6 +166,55 @@ def _build_milestones(row_def: dict) -> list[dict]:
     return out
 
 
+def create_starter_sheet(db: Session, org_id: int, created_by: int | None = None) -> Sheet:
+    """Create one usable weekly-grid sheet (件名 / 担当 / ステータス) for a fresh org.
+
+    Mirrors the demo sheet's columns and status rules but with no sample rows, so a
+    newly created group can start entering its own tasks immediately."""
+    sheet = Sheet(
+        org_id=org_id,
+        name="スケジュール",
+        order=0,
+        has_week_grid=True,
+        numbering_rule={"prefix": "", "digits": 3, "next_seq": 1},
+        settings={
+            "pinned_columns": 1,
+            "default_milestones": [
+                {"name": PHASE_JP["design"], "color": PHASE_COLOR["design"]},
+                {"name": PHASE_JP["impl"], "color": PHASE_COLOR["impl"]},
+                {"name": PHASE_JP["test"], "color": PHASE_COLOR["test"]},
+                {"name": PHASE_JP["review"], "color": PHASE_COLOR["review"]},
+            ],
+        },
+    )
+    db.add(sheet)
+    db.flush()
+
+    col_title = Column(sheet_id=sheet.id, name="件名", order=0, type="text", config={})
+    col_assignee = Column(sheet_id=sheet.id, name="担当", order=1, type="member", config={})
+    col_status = Column(
+        sheet_id=sheet.id,
+        name="ステータス",
+        order=2,
+        type="status",
+        config={
+            "rules": [
+                {"conditions": [{"col_id": None, "op": "overdue", "value": True}], "label": "遅延", "color": STATUS_STYLE["遅延"][0]},
+                {"conditions": [{"col_id": None, "op": "done", "value": True}], "label": "完了", "color": STATUS_STYLE["完了"][0]},
+                {"conditions": [{"col_id": None, "op": "in_progress", "value": True}], "label": "進行中", "color": STATUS_STYLE["進行中"][0]},
+                {"conditions": [], "label": "未着手", "color": STATUS_STYLE["未着手"][0]},
+            ],
+            "options": [
+                {"value": label, "color": style[0]} for label, style in STATUS_STYLE.items()
+            ],
+        },
+    )
+    db.add_all([col_title, col_assignee, col_status])
+    db.flush()
+    sheet.color_basis_column_id = col_status.id
+    return sheet
+
+
 def run_seed(db: Session) -> None:
     """Create the demo org/users/sheet/rows/effort/milestones if absent."""
     existing = db.execute(select(Organization).limit(1)).scalar_one_or_none()

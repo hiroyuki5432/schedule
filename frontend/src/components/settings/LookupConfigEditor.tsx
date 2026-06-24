@@ -81,7 +81,7 @@ export function LookupConfigEditor({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{column.name} — 参照設定（XLOOKUP）</CardTitle>
+        <CardTitle>{column.name} — 参照設定（LOOKUP）</CardTitle>
       </CardHeader>
       <CardBody>
         <div className="flex flex-col gap-3">

@@ -1,12 +1,15 @@
 // みんなの入力一覧 — 全員の実績入力（日報）を1日分まとめて表示する読み取り専用ビュー。
 // ユーザー別にグループ化し、各人合計＋全員合計を出す。前日/翌日/今日で日付を移動。
 
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useRef, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
+import { useAuth } from '@/hooks/useAuth'
+import { toast } from '@/lib/toast'
+import { ApiError } from '@/lib/http'
 import { fmtISO, parseDate } from '@/lib/dates'
 import type { UserDayWorkLog } from '@/types/api'
 
@@ -38,7 +41,11 @@ export function AllUsersWorklogPage() {
 
   return (
     <>
-      <PageHeader title="みんなの入力一覧" subtitle="全員の実績入力（日報）を日別に集約" />
+      <PageHeader
+        title="みんなの入力一覧"
+        subtitle="全員の実績入力（日報）を日別に集約"
+        actions={<WorklogExcelToolbar date={date} />}
+      />
 
       <div className="flex flex-col gap-3 overflow-auto px-[22px] pb-6">
         {/* date nav */}
@@ -100,6 +107,65 @@ export function AllUsersWorklogPage() {
         </Card>
       </div>
     </>
+  )
+}
+
+/** Export the viewed day to Excel; admins can also import (bulk-add) logs.
+ *  Import matches user by name and task by ID; each Excel row becomes a new log. */
+function WorklogExcelToolbar({ date }: { date: string }) {
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'admin'
+  const qc = useQueryClient()
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function onFile(file: File) {
+    setBusy(true)
+    try {
+      const r = await api.importWorklogXlsx(file)
+      await qc.invalidateQueries({ queryKey: ['all-worklog'] })
+      const parts = [`追加 ${r.created} 件`]
+      if (r.duplicates) parts.push(`重複スキップ ${r.duplicates} 件`)
+      if (r.skipped) parts.push(`無効スキップ ${r.skipped} 件`)
+      toast.show(`取り込み完了：${parts.join(' / ')}`, 'success')
+    } catch (e) {
+      toast.show(e instanceof ApiError ? e.message : '取り込みに失敗しました。', 'error')
+    } finally {
+      setBusy(false)
+      if (inputRef.current) inputRef.current.value = ''
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <a href={api.exportWorklogXlsxUrl(date, date)} download>
+        <Button size="sm" variant="outline">
+          Excel出力
+        </Button>
+      </a>
+      {isAdmin && (
+        <>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => inputRef.current?.click()}
+          >
+            {busy ? '取込中…' : 'Excel取込'}
+          </Button>
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".xlsx"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) void onFile(f)
+            }}
+          />
+        </>
+      )}
+    </div>
   )
 }
 
