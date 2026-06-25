@@ -83,6 +83,15 @@ export const updateSheet = (
 
 export const deleteSheet = (id: string) => http.del<void>(`/api/sheets/${id}`)
 
+/** Admin-only: empty a sheet's rows / 工数 / マイルストン / スナップショット, keeping
+ *  columns and settings (採番 resets to 1). For repeated import testing. */
+export const clearSheetRows = (id: string) =>
+  http.del<{ deleted: number }>(`/api/sheets/${id}/rows`)
+
+/** Admin-only: empty EVERY sheet's data in the group (settings kept). */
+export const clearOrgData = () =>
+  http.post<{ sheets: number; deleted: number }>('/api/org/clear-data')
+
 // ---- Columns ----
 export const getColumns = (sheetId: string) =>
   http.get<Column[]>(`/api/sheets/${sheetId}/columns`)

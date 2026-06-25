@@ -120,6 +120,9 @@ export interface ColumnConfig {
   weekly_reset?: boolean
   /** text only: edit in a large multi-line textarea (modal) instead of a single line. */
   multiline?: boolean
+  /** Reserved date columns for the task span: 'start' = 開始日, 'end' = 完了日.
+   *  Editing one re-distributes the row's milestone (◇) dates by phase weight. */
+  sched_role?: 'start' | 'end'
   // lookup. Each of local_key/match/return may be the literal "__id__"
   // (meaning the row's key_value) or a column id.
   target_sheet_id?: string

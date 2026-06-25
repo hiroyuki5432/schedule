@@ -53,18 +53,24 @@ function isoOf(d: Date): string {
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
 }
-const todayISO = () => isoOf(new Date())
 
 interface Props {
   row: Row
   /** Sheet-level default phases — color source, weights, name options, prefill. */
   defaults?: DefaultMilestone[]
+  /** 開始日/完了日 date-column ids (config.sched_role). The span is stored there;
+   *  legacy reserved keys are used as a fallback when absent. */
+  startColId?: string
+  endColId?: string
   onClose: () => void
 }
 
-export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
+export function MilestoneEditor({ row, defaults = [], startColId, endColId, onClose }: Props) {
   const qc = useQueryClient()
   const rowId = row.id
+  // Where the span is stored: the real date columns, or the legacy reserved keys.
+  const startKey = startColId ?? '__sched_start'
+  const endKey = endColId ?? '__sched_end'
 
   // Presets: sheet defaults win; fall back to the built-in set when none configured.
   const presets = defaults.length > 0 ? defaults : FALLBACK_PALETTE
@@ -86,9 +92,13 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
     queryFn: () => api.getMilestones(rowId),
   })
 
-  // 開始日 / 完了日 (task span) from reserved row.data keys.
-  const [start, setStart] = useState<string>((row.data.__sched_start as string | null) ?? '')
-  const [end, setEnd] = useState<string>((row.data.__sched_end as string | null) ?? '')
+  // 開始日 / 完了日 (task span) from the role date columns (legacy keys as fallback).
+  const [start, setStart] = useState<string>(
+    ((row.data[startKey] as string | null) ?? (row.data.__sched_start as string | null)) ?? '',
+  )
+  const [end, setEnd] = useState<string>(
+    ((row.data[endKey] as string | null) ?? (row.data.__sched_end as string | null)) ?? '',
+  )
 
   const [drafts, setDrafts] = useState<Draft[] | null>(null)
   const items: Draft[] = useMemo(() => {
@@ -168,17 +178,18 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
           color: isMs ? NEUTRAL : colorFor(d.name),
           boundary_date: boundary,
           order: i,
-          done: isMs ? d.done : false,
-          actual_date: isMs && d.done ? d.actual_date : null,
+          // 達成は「実績日が入っているか」で判定（達成ボタンは廃止）。
+          done: isMs ? !!d.actual_date : false,
+          actual_date: isMs ? d.actual_date : null,
         })
       })
       await api.putMilestones(rowId, payload)
       // Persist the task span so the gantt bounds coloring (範囲外は無色).
-      const curStart = (row.data.__sched_start as string | null) ?? ''
-      const curEnd = (row.data.__sched_end as string | null) ?? ''
+      const curStart = (row.data[startKey] as string | null) ?? ''
+      const curEnd = (row.data[endKey] as string | null) ?? ''
       if (start !== curStart || end !== curEnd) {
         await api.updateRow(rowId, {
-          data: { ...row.data, __sched_start: start || null, __sched_end: end || null },
+          data: { ...row.data, [startKey]: start || null, [endKey]: end || null },
           version: row.version,
         })
       }
@@ -236,7 +247,7 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
   }, [phasePresets, items])
 
   return (
-    <Modal title={`フェーズ／マイルストン — ${row.key_value}`} onClose={onClose} widthClass="w-[680px]">
+    <Modal title={`フェーズ／マイルストン — ${row.key_value}`} onClose={onClose} widthClass="w-[760px]">
       {msQ.isLoading ? (
         <div className="py-4 text-[var(--ink3)]">読み込み中…</div>
       ) : (
@@ -289,7 +300,7 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
             {items.map((d, i) => (
               <div
                 key={d.id}
-                className="flex flex-wrap items-center gap-2 rounded-[10px] border border-[var(--line)] bg-[var(--surface)] px-2.5 py-2"
+                className="flex min-w-0 items-center gap-2 rounded-[10px] border border-[var(--line)] bg-[var(--surface)] px-2.5 py-2"
               >
                 <div className="flex flex-col">
                   <button
@@ -337,7 +348,7 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
                 {/* Name (no stacked label → stable row height / no がたつき) */}
                 {d.kind === 'phase' && hasDefaults ? (
                   <Select
-                    className="min-w-[160px] flex-1"
+                    className="min-w-0 flex-1"
                     value={d.name}
                     onChange={(e) =>
                       update(items.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
@@ -351,7 +362,7 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
                   </Select>
                 ) : (
                   <Input
-                    className="min-w-[160px] flex-1"
+                    className="min-w-0 flex-1"
                     placeholder={d.kind === 'phase' ? 'フェーズ名（例: 設計）' : 'マイルストン名（例: レビュー）'}
                     value={d.name}
                     onChange={(e) =>
@@ -360,65 +371,45 @@ export function MilestoneEditor({ row, defaults = [], onClose }: Props) {
                   />
                 )}
 
-                {/* Milestone-only: date / achievement / actual date */}
+                {/* Milestone-only: 予定日 + 実績日（実績を入れると達成扱い）。 */}
                 {d.kind === 'milestone' && (
                   <>
-                    <Input
-                      type="date"
-                      className="w-[150px] flex-shrink-0"
-                      title="日付（開始〜完了から自動。手で上書き可）"
-                      value={d.boundary_date}
-                      onChange={(e) =>
-                        update(items.map((x, j) => (j === i ? { ...x, boundary_date: e.target.value } : x)))
-                      }
-                    />
-                    <label
-                      className="flex flex-shrink-0 cursor-pointer select-none items-center gap-1 whitespace-nowrap text-[11px] text-[var(--ink3)]"
-                      title="この節目を達成（完了）済みにする"
-                    >
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4 accent-[var(--green)]"
-                        checked={d.done}
+                    <label className="flex flex-shrink-0 items-center gap-1 whitespace-nowrap text-[11px] text-[var(--ink3)]">
+                      予定
+                      <Input
+                        type="date"
+                        className="w-[124px]"
+                        title="予定日（開始〜完了から自動。手で上書き可）"
+                        value={d.boundary_date}
+                        onChange={(e) =>
+                          update(items.map((x, j) => (j === i ? { ...x, boundary_date: e.target.value } : x)))
+                        }
+                      />
+                    </label>
+                    <label className="flex flex-shrink-0 items-center gap-1 whitespace-nowrap text-[11px] text-[var(--ink3)]">
+                      実績
+                      <Input
+                        type="date"
+                        className="w-[124px]"
+                        title="実績完了日（入力すると達成）"
+                        value={d.actual_date ?? ''}
                         onChange={(e) =>
                           update(
                             items.map((x, j) =>
                               j === i
-                                ? {
-                                    ...x,
-                                    done: e.target.checked,
-                                    actual_date: e.target.checked ? x.actual_date ?? todayISO() : null,
-                                  }
+                                ? { ...x, actual_date: e.target.value || null, done: !!e.target.value }
                                 : x,
                             ),
                           )
                         }
                       />
-                      達成
                     </label>
-                    {d.done && (
-                      <div className="flex flex-shrink-0 items-center gap-1.5">
-                        <Input
-                          type="date"
-                          className="w-[150px]"
-                          title="実績完了日"
-                          value={d.actual_date ?? ''}
-                          onChange={(e) =>
-                            update(
-                              items.map((x, j) =>
-                                j === i ? { ...x, actual_date: e.target.value || null } : x,
-                              ),
-                            )
-                          }
-                        />
-                        <DelayBadge boundary={d.boundary_date} actual={d.actual_date} />
-                      </div>
-                    )}
+                    <DelayBadge boundary={d.boundary_date} actual={d.actual_date} />
                   </>
                 )}
 
                 <button
-                  className="ml-auto flex-shrink-0 rounded p-1 text-[var(--ink3)] hover:bg-[#FAE6E0] hover:text-[#A8442B]"
+                  className="flex-shrink-0 rounded p-1 text-[var(--ink3)] hover:bg-[#FAE6E0] hover:text-[#A8442B]"
                   onClick={() => update(items.filter((_, j) => j !== i))}
                   title="削除"
                 >

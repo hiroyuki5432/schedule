@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import Organization, User
+from app.models import Organization, Sheet, User
 from app.schemas import OrgOut, OrgSignup, OrgUpdate
 from app.security import current_user, get_user_by_email, hash_password, require_admin
 
@@ -67,6 +67,23 @@ def signup_org(payload: OrgSignup, request: Request, db: Session = Depends(get_d
     # Log the new admin in immediately.
     request.session["user_id"] = admin.id
     return org
+
+
+@router.post("/clear-data")
+def clear_org_data(
+    user: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> dict:
+    """Admin-only. Empty EVERY sheet's data (rows / 工数 / マイルストン /
+    スナップショット) in the group while keeping sheets, columns and all settings.
+    For wiping import-test data in one shot. Resets each sheet's 採番 to 1."""
+    from app.routers.sheets import clear_sheet_rows  # local import avoids a cycle
+
+    sheets = list(
+        db.execute(select(Sheet).where(Sheet.org_id == user.org_id)).scalars()
+    )
+    deleted = sum(clear_sheet_rows(db, s) for s in sheets)
+    db.commit()
+    return {"sheets": len(sheets), "deleted": deleted}
 
 
 @router.get("", response_model=OrgOut)

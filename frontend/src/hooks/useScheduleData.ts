@@ -423,6 +423,10 @@ export function useScheduleData({
     const memberCol = pickColumn(columns, 'member')
     const statusCol = pickColumn(columns, 'status')
     const ttlCol = titleColumn(columns)
+    // 開始日/完了日 are real date columns (config.sched_role); legacy rows fall back
+    // to the reserved __sched_start/__sched_end keys until edited.
+    const startCol = columns.find((c) => c.config?.sched_role === 'start')
+    const endCol = columns.find((c) => c.config?.sched_role === 'end')
     const memberById = new Map(members.map((m) => [m.id, m]))
 
     // effort source: snapshot (as-of) overrides live effort when present.
@@ -523,10 +527,16 @@ export function useScheduleData({
           ? new Set<number>()
           : changedVsBaseline(weeks, effortByWeek, baselineByRow.get(row.id))
 
-      // Task span (開始日/完了日) stored in reserved row.data keys — bounds the
-      // gantt coloring (範囲外は無色). Absent on legacy rows → unbounded (legacy).
-      const schedStart = (row.data.__sched_start as string | null) ?? null
-      const schedEnd = (row.data.__sched_end as string | null) ?? null
+      // Task span (開始日/完了日) from the role date columns — bounds the gantt
+      // coloring (範囲外は無色). Falls back to legacy reserved keys, then unbounded.
+      const schedStart =
+        (startCol ? (row.data[startCol.id] as string | null) : null) ??
+        (row.data.__sched_start as string | null) ??
+        null
+      const schedEnd =
+        (endCol ? (row.data[endCol.id] as string | null) : null) ??
+        (row.data.__sched_end as string | null) ??
+        null
 
       const gantt = buildRowGantt({
         weeks,

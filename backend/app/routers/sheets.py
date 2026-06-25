@@ -2,17 +2,59 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps import get_sheet_for_user
-from app.models import Column, Row, Sheet, User
+from app.models import (
+    Column,
+    EffortEntry,
+    Row,
+    RowMilestone,
+    Sheet,
+    SheetSnapshot,
+    User,
+    WorkLog,
+)
+from app.schedule_service import ensure_schedule_columns
 from app.schemas import SheetCreate, SheetDetailOut, SheetOut, SheetUpdate
 from app.security import current_user, require_admin
 from app.snapshot_service import ensure_current_snapshot
 
 router = APIRouter(prefix="/api/sheets", tags=["sheets"])
+
+
+def clear_sheet_rows(db: Session, sheet: Sheet) -> int:
+    """Delete every row of a sheet (and its weekly effort, milestones and weekly
+    snapshots) while KEEPING the sheet, its columns and all settings. Resets the
+    auto-numbering counter to 1 so re-imports start fresh.
+
+    Children are removed explicitly (not via DB cascade) so the behaviour is the
+    same regardless of FK-cascade enforcement. Work-log rows are kept but their
+    task link is nulled (実績の履歴は残す). Returns the number of rows deleted.
+
+    Does NOT commit — the caller commits (so the org-wide clear is one transaction).
+    """
+    row_ids_subq = select(Row.id).where(Row.sheet_id == sheet.id).scalar_subquery()
+    deleted = db.execute(
+        select(func.count()).select_from(Row).where(Row.sheet_id == sheet.id)
+    ).scalar_one()
+
+    db.execute(delete(EffortEntry).where(EffortEntry.row_id.in_(row_ids_subq)))
+    db.execute(delete(RowMilestone).where(RowMilestone.row_id.in_(row_ids_subq)))
+    db.execute(
+        update(WorkLog)
+        .where(WorkLog.row_id.in_(row_ids_subq))
+        .values(row_id=None)
+    )
+    db.execute(delete(SheetSnapshot).where(SheetSnapshot.sheet_id == sheet.id))
+    db.execute(delete(Row).where(Row.sheet_id == sheet.id))
+
+    rule = dict(sheet.numbering_rule or {})
+    rule["next_seq"] = 1
+    sheet.numbering_rule = rule
+    return deleted
 
 
 @router.get("", response_model=list[SheetOut])
@@ -49,6 +91,8 @@ def get_sheet(
     sheet_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> SheetDetailOut:
     sheet = get_sheet_for_user(db, sheet_id, user)
+    # Ensure the 開始日/完了日 date columns exist (created + migrated on first access).
+    ensure_schedule_columns(db, sheet)
     # Lazily snapshot the current week on access (change-point support).
     ensure_current_snapshot(db, sheet)
 
@@ -93,3 +137,16 @@ def delete_sheet(
     db.delete(sheet)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/{sheet_id}/rows")
+def clear_sheet_data(
+    sheet_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> dict:
+    """Admin-only. Empty this sheet's data (rows / 工数 / マイルストン / スナップショット)
+    while keeping the sheet, its columns and all settings. For repeated import
+    testing — the 採番 counter resets to 1."""
+    sheet = get_sheet_for_user(db, sheet_id, admin)
+    deleted = clear_sheet_rows(db, sheet)
+    db.commit()
+    return {"deleted": deleted}

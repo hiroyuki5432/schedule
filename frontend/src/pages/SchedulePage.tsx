@@ -19,6 +19,7 @@ import { Select } from '@/components/ui/Select'
 import { FilterIcon, PlusIcon, SearchIcon, XIcon } from '@/components/ui/icons'
 import { useAuth } from '@/hooks/useAuth'
 import { addWeeks, fmtISO, fmtMD, startOfWeek } from '@/lib/dates'
+import { phaseWeightByName, redistributeMilestones } from '@/lib/milestones'
 import { cn } from '@/lib/format'
 import type { CellValue, Column, NotificationItem, Row } from '@/types/api'
 
@@ -234,6 +235,11 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
 
   function saveRowCell(row: Row, colId: string, value: CellValue) {
     const col = grid.columns.find((c) => String(c.id) === String(colId))
+    // 開始日/完了日 (sched_role) columns also re-distribute the row's ◇ dates.
+    if (col?.config?.sched_role) {
+      void saveSpanCell(row, col, value)
+      return
+    }
     const patch: Record<string, CellValue> = { [colId]: value }
     // Weekly-reset columns: stamp the current week so the value shows this week
     // and clears next week (visible again when stepping back to this week).
@@ -247,6 +253,45 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
 
   function saveProgress(row: Row, value: number | null) {
     rowMut.mutate({ row, patch: {}, progress: value })
+  }
+
+  // 開始日/完了日 (sched_role 列) を編集 (Feature 2): その列を保存し、両日付が
+  // 揃っていて◇があれば割合に応じてマイルストン日付を自動再配分する。
+  const schedStartCol = useMemo(
+    () => grid.columns.find((c) => c.config?.sched_role === 'start'),
+    [grid.columns],
+  )
+  const schedEndCol = useMemo(
+    () => grid.columns.find((c) => c.config?.sched_role === 'end'),
+    [grid.columns],
+  )
+  async function saveSpanCell(row: Row, col: Column, value: CellValue) {
+    const model = grid.rows.find((r) => String(r.row.id) === String(row.id))
+    const curOf = (c: Column | undefined) =>
+      c ? ((row.data[c.id] as string | null) ?? '') : ''
+    const start = col.config?.sched_role === 'start' ? (value as string | null) ?? '' : curOf(schedStartCol)
+    const end = col.config?.sched_role === 'end' ? (value as string | null) ?? '' : curOf(schedEndCol)
+    try {
+      await api.updateRow(row.id, {
+        data: { ...row.data, [col.id]: value },
+        version: row.version,
+      })
+      if (model && model.milestones.length > 0 && start && end) {
+        const next = redistributeMilestones(
+          model.milestones,
+          start,
+          end,
+          phaseWeightByName(defaultMilestones),
+        )
+        await api.putMilestones(row.id, next)
+      }
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['sheet', sheetId] }),
+        qc.invalidateQueries({ queryKey: ['sheet-milestones', sheetId] }),
+      ])
+    } catch {
+      void qc.invalidateQueries({ queryKey: ['sheet', sheetId] })
+    }
   }
 
   // Candidate predecessor tasks for the dependency picker.
@@ -590,6 +635,8 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
         <MilestoneEditor
           row={milestoneRow}
           defaults={defaultMilestones}
+          startColId={schedStartCol?.id}
+          endColId={schedEndCol?.id}
           onClose={() => setMilestoneRow(null)}
         />
       )}

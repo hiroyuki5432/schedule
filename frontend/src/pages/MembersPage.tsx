@@ -11,6 +11,7 @@ import { Select } from '@/components/ui/Select'
 import { Badge } from '@/components/ui/Badge'
 import { Avatar } from '@/components/ui/Avatar'
 import { ApiError } from '@/lib/http'
+import { toast } from '@/lib/toast'
 import type { Role } from '@/types/api'
 
 export function MembersPage() {
@@ -54,6 +55,8 @@ export function MembersPage() {
 
       <div className="flex flex-col gap-4 overflow-auto px-[22px] pb-6">
         {isAdmin && <GroupSettingsCard />}
+
+        {isAdmin && <OrgDataDangerCard />}
 
         {isAdmin && showForm && (
           <AddMemberForm
@@ -221,6 +224,59 @@ function GroupSettingsCard() {
         <div className="mt-3 flex justify-end">
           <Button size="sm" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
             グループ設定を保存
+          </Button>
+        </div>
+      </CardBody>
+    </Card>
+  )
+}
+
+/** Admin-only: wipe every sheet's data (rows / 工数 / マイルストン) in the group at
+ *  once, keeping all sheets, columns and settings. For clearing import-test data.
+ *  Two-step confirm guards against accidental loss. */
+function OrgDataDangerCard() {
+  const qc = useQueryClient()
+  const clear = useMutation({
+    mutationFn: () => api.clearOrgData(),
+    onSuccess: async (res) => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['sheet'] }),
+        qc.invalidateQueries({ queryKey: ['effort'] }),
+        qc.invalidateQueries({ queryKey: ['sheet-milestones'] }),
+        qc.invalidateQueries({ queryKey: ['snapshot'] }),
+      ])
+      toast.show(
+        `全シートのデータを削除しました（${res.sheets} シート / ${res.deleted} 行）`,
+        'success',
+      )
+    },
+    onError: () => toast.show('データの削除に失敗しました', 'error'),
+  })
+
+  return (
+    <Card className="border-[#E7C7BC]">
+      <CardHeader>
+        <CardTitle>全データ削除（要注意）</CardTitle>
+      </CardHeader>
+      <CardBody>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-[12px] text-[var(--ink2)]">
+            グループ内<b>すべてのシート</b>のデータ（行・工数・マイルストン）を一括削除し、
+            シート・列・設定は残します。インポートのやり直し用（採番は各シート1から）。元に戻せません。
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={clear.isPending}
+            className="flex-shrink-0 border-[#E1A18C] text-[#A8442B] hover:bg-[#FAE6E0]"
+            onClick={() => {
+              if (!window.confirm('全シートのデータを削除します。よろしいですか？（列・設定は残ります）'))
+                return
+              if (!window.confirm('本当に削除しますか？この操作は取り消せません。')) return
+              clear.mutate()
+            }}
+          >
+            全シートのデータを空にする
           </Button>
         </div>
       </CardBody>

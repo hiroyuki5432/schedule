@@ -65,6 +65,10 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 | POST | `/api/sheets/{id}/rows` | `{key_value?, data}`（key_value 未指定なら採番ルールで自動）|
 | PATCH | `/api/rows/{id}` | `{data, version}` → 更新後 row（409 で衝突）|
 | DELETE | `/api/rows/{id}` | |
+| DELETE | `/api/sheets/{id}/rows` | **admin**。シートの行・工数・マイルストン・スナップショットを全削除（列/設定は保持、採番は1にリセット）。`{deleted}` を返す |
+| POST | `/api/org/clear-data` | **admin**。グループ内全シートに対し上記の全削除を実行。`{sheets, deleted}` を返す |
+
+※ 週次グリッドのシートは初回アクセス時に **開始日 / 完了日** 列（`date`型・`config.sched_role='start'|'end'`）を自動生成し、旧 `__sched_start/__sched_end` 値を移行（追加のみ）。列一覧で並べ替え・固定・ソート可能。
 
 ## 週次工数 (effort)
 `effort = { row_id, week_start, planned_hours, actual_hours, version }`
@@ -76,7 +80,7 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 | PUT | `/api/rows/{rowId}/effort/{week_start}` | `{planned_hours?, actual_hours?, version?}` → upsert |
 
 ## マイルストン（フェーズ境界・連続バーの色分け）
-`milestone = { id, row_id, name, boundary_date, color, order }`
+`milestone = { id, row_id, name, kind('phase'|'milestone'), boundary_date, color, order, done, actual_date }`
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET | `/api/rows/{rowId}/milestones` | `[milestone]` |
@@ -98,8 +102,8 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET | `/api/sheets/{id}/export.csv` | CSV（属性列＋週次工数）|
-| GET | `/api/sheets/{id}/export.xlsx` | Excel（属性列＋週次工数。担当はメンバー名で出力）|
-| POST | `/api/sheets/{id}/import.xlsx` | multipart `file`。ID(key_value)で照合し upsert（一致=更新 / 無い=新規）。`{created, updated}` を返す。週次セルは過去=実績・現在以降=予定で取込。**参照(LOOKUP)列は計算列のため取込時に無視**（出力は空欄）|
+| GET | `/api/sheets/{id}/export.xlsx` | Excel（属性列＋**進捗(%)/先行タスク(ID)**＋**テンプレ◇ごとの「予定/実績」列**＋週次工数）。開始日/完了日は実列なので通常列として出力。担当はメンバー名、先行タスクはID(key_value)で出力 |
+| POST | `/api/sheets/{id}/import.xlsx` | multipart `file`。ID(key_value)で照合し upsert（一致=更新 / 無い=新規）。`{created, updated}` を返す。週次セルは過去=実績・現在以降=予定。**進捗(%)** は行の進捗、**先行タスク(ID)** はID(key_value)で全行取込後に解決。**◇予定/実績**列が非空なら、テンプレ（既定マイルストン）に沿って行のマイルストンを再構築（フェーズ境界は開始日＋◇から復元、実績日があれば達成）。**参照(LOOKUP)列は無視**（出力は空欄）|
 | GET | `/api/worklog/export.xlsx?from=&to=` | 全員の日報を範囲で Excel 出力（みんなの入力一覧）。列: 日付/ユーザー/タスクID/大分類/中分類/メモ/時間 |
 | POST | `/api/worklog/import.xlsx` | **admin**。multipart `file`。各行を新規の日報として追加（ユーザーは名前で照合、タスクはIDで照合）。`{created, skipped}` を返す |
 

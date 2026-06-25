@@ -796,7 +796,10 @@ function ExcelIOCard({ sheetId }: { sheetId: string }) {
       </CardHeader>
       <CardBody>
         <p className="mb-3 text-[12px] text-[var(--ink3)]">
-          このシートを Excel（.xlsx）で出力／取込します。取込は ID で照合し、一致する行は更新・無い行は新規追加します（参照(LOOKUP)列は計算列のため取込対象外）。
+          このシートを Excel（.xlsx）で出力／取込します。取込は ID で照合し、一致する行は更新・無い行は新規追加します。
+          属性列・週次工数に加え<b>進捗・先行タスク</b>、<b>既定マイルストン（テンプレ）の◇ごとの「予定／実績」列</b>も往復できます
+          （開始日・完了日は通常の列として出力。フェーズの境界は開始日と◇から自動復元。先行タスクはID(key_value)で復元）。
+          参照(LOOKUP)列は計算列のため取込対象外です。
         </p>
         <ExcelToolbar sheetId={sheetId} />
       </CardBody>
@@ -807,6 +810,20 @@ function ExcelIOCard({ sheetId }: { sheetId: string }) {
 function DangerZone({ sheetId, sheetName }: { sheetId: string; sheetName: string }) {
   const qc = useQueryClient()
   const navigate = useNavigate()
+
+  const clear = useMutation({
+    mutationFn: () => api.clearSheetRows(sheetId),
+    onSuccess: async (res) => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['sheet', sheetId] }),
+        qc.invalidateQueries({ queryKey: ['effort', sheetId] }),
+        qc.invalidateQueries({ queryKey: ['sheet-milestones', sheetId] }),
+        qc.invalidateQueries({ queryKey: ['snapshot', sheetId] }),
+      ])
+      toast.show(`データを削除しました（${res.deleted} 行）`, 'success')
+    },
+    onError: () => toast.show('データの削除に失敗しました', 'error'),
+  })
 
   const del = useMutation({
     mutationFn: () => api.deleteSheet(sheetId),
@@ -819,30 +836,60 @@ function DangerZone({ sheetId, sheetName }: { sheetId: string; sheetName: string
   return (
     <Card className="border-[#E7C7BC]">
       <CardHeader>
-        <CardTitle>シートを削除</CardTitle>
+        <CardTitle>データ管理（要注意）</CardTitle>
       </CardHeader>
       <CardBody>
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-[12px] text-[var(--ink2)]">
-            このシートと行・工数・マイルストンをすべて削除します。元に戻せません。
-          </p>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={del.isPending}
-            className="flex-shrink-0 border-[#E1A18C] text-[#A8442B] hover:bg-[#FAE6E0]"
-            onClick={() => {
-              if (
-                confirm(
-                  `シート「${sheetName}」を削除しますか？この操作は取り消せません。`,
+        <div className="flex flex-col gap-3">
+          {/* Clear rows only — keeps columns / settings. For repeated import tests. */}
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-[12px] text-[var(--ink2)]">
+              このシートのデータ（行・工数・マイルストン）をすべて削除し、
+              <b>列定義とシート設定は残します</b>。インポートのやり直し用（採番は1から）。
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={clear.isPending}
+              className="flex-shrink-0 border-[#E1A18C] text-[#A8442B] hover:bg-[#FAE6E0]"
+              onClick={() => {
+                if (
+                  confirm(
+                    `シート「${sheetName}」のデータをすべて削除しますか？（列・設定は残ります）この操作は取り消せません。`,
+                  )
                 )
-              )
-                del.mutate()
-            }}
-          >
-            <TrashIcon className="h-[15px] w-[15px]" />
-            削除
-          </Button>
+                  clear.mutate()
+              }}
+            >
+              <TrashIcon className="h-[15px] w-[15px]" />
+              データを空にする
+            </Button>
+          </div>
+
+          <div className="border-t border-[var(--line2)]" />
+
+          {/* Delete the whole sheet. */}
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-[12px] text-[var(--ink2)]">
+              このシートと行・工数・マイルストンをすべて削除します。元に戻せません。
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={del.isPending}
+              className="flex-shrink-0 border-[#E1A18C] text-[#A8442B] hover:bg-[#FAE6E0]"
+              onClick={() => {
+                if (
+                  confirm(
+                    `シート「${sheetName}」を削除しますか？この操作は取り消せません。`,
+                  )
+                )
+                  del.mutate()
+              }}
+            >
+              <TrashIcon className="h-[15px] w-[15px]" />
+              シート削除
+            </Button>
+          </div>
         </div>
       </CardBody>
     </Card>
