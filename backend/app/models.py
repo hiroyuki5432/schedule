@@ -51,6 +51,9 @@ class User(Base):
     # Whether this user is expected to file a daily work-log (日報). When false
     # (e.g. admins, 外注), they never receive 未入力 reminders. Default true.
     worklog_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Whether the account is active. Frozen accounts (凍結) keep all their data and
+    # history but cannot log in and are excluded from new assignments/notifications.
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

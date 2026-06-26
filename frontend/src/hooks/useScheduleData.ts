@@ -7,12 +7,16 @@ import * as api from '@/api/client'
 import {
   addWeeks,
   buildWeeks,
+  fmtISO,
   monthStarts,
   startOfWeek,
   weekIndex,
 } from '@/lib/dates'
 import { buildRowGantt } from '@/lib/gantt'
 import type { RowGantt } from '@/lib/gantt'
+import { periodForDate } from '@/lib/period'
+import type { ClosingSettings } from '@/lib/period'
+import { useOrg } from '@/hooks/useSheets'
 import {
   deriveStatus,
   literalStatusBadge,
@@ -115,21 +119,28 @@ interface MonthCol {
   weekIdxs: number[]
 }
 
-/** Group Monday-anchored weeks into calendar-month columns (by each week's
- *  start month). */
-function buildMonthCols(weeks: Date[]): MonthCol[] {
+/** Group Monday-anchored weeks into month columns. By default a week belongs to
+ *  its start month; with a close-period (締め日) configured, it belongs to the
+ *  period containing its week_start (要望: 月の集計をいつからいつまで). */
+function buildMonthCols(weeks: Date[], closing?: ClosingSettings): MonthCol[] {
   const cols: MonthCol[] = []
   let i = 0
+  const labelOf = (d: Date): { key: string; y: number; m0: number } => {
+    if (closing && (closing.offset_business_days ?? 0) > 0) {
+      const p = periodForDate(fmtISO(d), closing)
+      return { key: p.label, y: p.year, m0: p.month - 1 }
+    }
+    return { key: `${d.getFullYear()}-${d.getMonth()}`, y: d.getFullYear(), m0: d.getMonth() }
+  }
   while (i < weeks.length) {
-    const y = weeks[i].getFullYear()
-    const m = weeks[i].getMonth()
+    const head = labelOf(weeks[i])
     const weekIdxs: number[] = []
     let j = i
-    while (j < weeks.length && weeks[j].getFullYear() === y && weeks[j].getMonth() === m) {
+    while (j < weeks.length && labelOf(weeks[j]).key === head.key) {
       weekIdxs.push(j)
       j++
     }
-    cols.push({ date: new Date(y, m, 1), weekIdxs })
+    cols.push({ date: new Date(head.y, head.m0, 1), weekIdxs })
     i = j
   }
   return cols
@@ -339,6 +350,9 @@ export function useScheduleData({
   extraAfter = 0,
   viewMode = 'week',
 }: Args): ScheduleData {
+  const orgQ = useOrg()
+  const closing = orgQ.data?.settings?.closing
+
   const detailQ = useQuery({
     queryKey: ['sheet', sheetId],
     queryFn: () => api.getSheet(sheetId!),
@@ -684,7 +698,7 @@ export function useScheduleData({
     if (viewMode === 'month') {
       // Aggregate the weekly model into calendar-month columns. The grid renders
       // these like weekly columns (one per month); edits distribute back to weeks.
-      const cols = buildMonthCols(weeks)
+      const cols = buildMonthCols(weeks, closing)
       const monthWeeks = new Map<string, string[]>()
       for (const c of cols) {
         monthWeeks.set(
@@ -732,6 +746,7 @@ export function useScheduleData({
     currentWeekStart,
     milestonesAllLoaded,
     milestonesByRow,
+    closing,
   ])
 
   return model

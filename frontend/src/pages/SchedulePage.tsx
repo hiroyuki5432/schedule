@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { usePersistentState } from '@/hooks/usePersistentState'
 import { useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useMembers, useWeekStartWeekday } from '@/hooks/useSheets'
@@ -46,21 +47,28 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const membersQ = useMembers()
   const members = useMemo(() => membersQ.data ?? [], [membersQ.data])
 
-  const [viewMode, setViewMode] = useState<ViewMode>('week')
+  // View settings persist per sheet so reloading / navigating away resumes the
+  // last view (要望: 前回の表示から開始).
+  const k = (name: string) => `view:sched:${sheetId}:${name}`
+  const [viewMode, setViewMode] = usePersistentState<ViewMode>(k('viewMode'), 'week')
   const colW = viewMode === 'month' ? MONTH_W : WEEK_W
   // as-of stepping: 0 = today (live); negative offset = weeks back. Lets the
   // user view a past week's recorded plan (週次スナップショット). Week view only.
+  // Not persisted — always resume at today.
   const [asOfOffset, setAsOfOffset] = useState(0)
   const [milestoneRow, setMilestoneRow] = useState<Row | null>(null)
   const [depRow, setDepRow] = useState<Row | null>(null)
-  const [showDepLines, setShowDepLines] = useState(false)
+  const [showDepLines, setShowDepLines] = usePersistentState(k('showDepLines'), false)
   // Filters: per-column value filters (configured in settings) + full-text
   // search + quick toggles (hide-done / this-week-only).
-  const [colFilters, setColFilters] = useState<Record<string, string>>({})
-  const [search, setSearch] = useState('')
-  const [hideDone, setHideDone] = useState(false)
-  const [thisWeekOnly, setThisWeekOnly] = useState(false)
-  const [pinsCollapsed, setPinsCollapsed] = useState(false)
+  const [colFilters, setColFilters] = usePersistentState<Record<string, string>>(
+    k('colFilters'),
+    {},
+  )
+  const [search, setSearch] = usePersistentState(k('search'), '')
+  const [hideDone, setHideDone] = usePersistentState(k('hideDone'), false)
+  const [thisWeekOnly, setThisWeekOnly] = usePersistentState(k('thisWeekOnly'), false)
+  const [pinsCollapsed, setPinsCollapsed] = usePersistentState(k('pinsCollapsed'), false)
   const [showFilter, setShowFilter] = useState(false)
 
   // As-of stepping is meaningful in week view (column = week); disable in month.
@@ -127,10 +135,24 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     [memberName],
   )
 
-  // Status columns — for the 完了を隠す toggle.
+  // Status columns — fallback for the 完了を隠す toggle.
   const statusCols = useMemo(
     () => grid.columns.filter((c) => c.type === 'status'),
     [grid.columns],
+  )
+
+  // 完了とみなす条件（任意化）。シート設定の done_filter があればその列値が指定値の
+  // いずれかに一致する行を完了扱い。未設定なら従来どおり status列 === '完了'。
+  const doneFilter = sheetSettings?.done_filter
+  const isRowDone = useCallback(
+    (r: (typeof grid.rows)[number]): boolean => {
+      if (doneFilter?.column_id && doneFilter.values?.length) {
+        const col = grid.columns.find((c) => String(c.id) === String(doneFilter.column_id))
+        return col ? doneFilter.values.includes(resolveColValue(r, col)) : false
+      }
+      return statusCols.some((c) => resolveColValue(r, c) === '完了')
+    },
+    [doneFilter, grid.columns, statusCols, resolveColValue],
   )
 
   // Columns offered in the 絞り込み panel (configured in sheet settings; default
@@ -159,7 +181,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
         const col = colById.get(String(colId))
         if (col && resolveColValue(r, col) !== val) return false
       }
-      if (hideDone && statusCols.some((c) => resolveColValue(r, c) === '完了')) return false
+      if (hideDone && isRowDone(r)) return false
       if (thisWeekOnly) {
         if (r.startIdx == null || r.finishIdx == null) return false
         if (currentWeekIdx < r.startIdx || currentWeekIdx > r.finishIdx) return false
@@ -192,7 +214,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     filtersActive,
     currentWeekIdx,
     resolveColValue,
-    statusCols,
+    isRowDone,
   ])
 
   function stepBack() {
@@ -510,7 +532,11 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           {/* hide completed */}
           <button
             onClick={() => setHideDone((v) => !v)}
-            title="ステータスが「完了」の行を隠す"
+            title={
+              doneFilter?.column_id && doneFilter.values?.length
+                ? `「完了とみなす条件」に一致する行を隠す（${doneFilter.values.join('・')}）`
+                : 'ステータスが「完了」の行を隠す（シート設定で条件を変更できます）'
+            }
             className={cn(
               'rounded-[9px] border px-3 py-1.5 text-[12px]',
               hideDone
@@ -614,6 +640,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             pinnedCount={pinnedCount}
             showDepLines={showDepLines}
             viewedWeekIso={viewedWeekIso}
+            scrollStorageKey={live ? k(`scroll:${viewMode}`) : undefined}
             focusRowId={focusRowId}
             focusNonce={focusNonce}
             onSaveWeek={saveWeek}

@@ -29,6 +29,9 @@ export interface OrgSettings {
   worklog?: WorkLogMaster
   /** Per-group app title shown in the sidebar/login (defaults to 工数スケジュール). */
   app_title?: string
+  /** Monthly close (締め日): aggregate months by 「月末の N 稼働日前締め」. When unset,
+   *  totals use plain calendar months. `holidays` are extra org-specific 休日. */
+  closing?: { offset_business_days?: number; holidays?: string[] }
   [k: string]: unknown
 }
 
@@ -46,6 +49,8 @@ export interface Member {
   role: Role
   /** Whether this user files a daily 日報 (drives 未入力 reminders). */
   worklog_required: boolean
+  /** Whether the account is active. Frozen (凍結) accounts cannot log in. */
+  is_active: boolean
 }
 
 /** A default phase/milestone preset configured per sheet. */
@@ -70,6 +75,9 @@ export interface SheetSettings {
   filter_columns?: string[]
   /** When true, the manual progress column resets weekly. */
   progress_weekly_reset?: boolean
+  /** Rows are "completed" (for the 完了を隠す toggle) when this column's value is
+   *  one of `values`. When unset, falls back to status column === '完了'. */
+  done_filter?: { column_id: string; values: string[] }
   [k: string]: unknown
 }
 
@@ -93,8 +101,13 @@ export type ColumnType =
   | 'lookup'
 
 export interface DropdownOption {
+  /** Stable id so renaming the value can follow through to stored row data. */
+  id?: string
   value: string
   color?: string
+  /** Frozen options are kept (existing data still displays) but hidden from the
+   *  picker so they can't be chosen for new rows (要望: リストの凍結). */
+  frozen?: boolean
 }
 
 export interface StatusRuleCondition {

@@ -549,6 +549,12 @@ function SheetLevelSettings({
               </span>
             </span>
           </label>
+
+          <DoneFilterEditor
+            columns={columns}
+            settings={settings}
+            onChange={(done_filter) => mutation.mutate({ settings: { ...settings, done_filter } })}
+          />
             </>
           )}
           <label className="text-[12px] text-[var(--ink2)]">
@@ -594,6 +600,94 @@ function SheetLevelSettings({
         </div>
       </CardBody>
     </Card>
+  )
+}
+
+/** Lets the admin define what counts as "完了" for the 完了を隠す toggle: a column
+ *  and one or more values. Candidate values come from a dropdown's options or a
+ *  status column's rule labels. Empty selection = fall back to status === '完了'. */
+function DoneFilterEditor({
+  columns,
+  settings,
+  onChange,
+}: {
+  columns: Column[]
+  settings: SheetSettings
+  onChange: (done_filter: { column_id: string; values: string[] } | undefined) => void
+}) {
+  // Only dropdown / status columns make sense as a completion basis.
+  const candidates = columns.filter((c) => c.type === 'dropdown' || c.type === 'status')
+  const current = settings.done_filter
+  const colId = current?.column_id ?? ''
+  const col = columns.find((c) => String(c.id) === String(colId))
+  const values = current?.values ?? []
+
+  const valueOptions: string[] =
+    col?.type === 'dropdown'
+      ? (col.config?.options ?? []).map((o) => o.value)
+      : col?.type === 'status'
+        ? (col.config?.rules ?? []).map((r) => r.label)
+        : []
+
+  function setColumn(id: string) {
+    if (!id) return onChange(undefined)
+    onChange({ column_id: id, values: [] })
+  }
+  function toggleValue(v: string) {
+    const next = values.includes(v) ? values.filter((x) => x !== v) : [...values, v]
+    onChange({ column_id: colId, values: next })
+  }
+
+  return (
+    <div className="text-[12px] text-[var(--ink2)]">
+      完了とみなす条件（「完了を隠す」の基準）
+      <Select
+        className="mt-1 w-full"
+        value={colId}
+        onChange={(e) => setColumn(e.target.value)}
+      >
+        <option value="">（既定：ステータス＝「完了」）</option>
+        {candidates.map((c) => (
+          <option key={c.id} value={c.id}>
+            {c.name}
+          </option>
+        ))}
+      </Select>
+      {col && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {valueOptions.length === 0 && (
+            <span className="text-[11px] text-[var(--ink3)]">
+              この列に選択肢/ルールがありません。
+            </span>
+          )}
+          {valueOptions.map((v) => {
+            const on = values.includes(v)
+            return (
+              <label
+                key={v}
+                className={cn(
+                  'flex cursor-pointer items-center gap-1.5 rounded-[8px] border px-2 py-1 text-[12px]',
+                  on
+                    ? 'border-[var(--green)] bg-[var(--green-l)]/10'
+                    : 'border-[var(--line)] hover:bg-[var(--line2)]',
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={on}
+                  className="h-3.5 w-3.5 accent-[var(--green)]"
+                  onChange={() => toggleValue(v)}
+                />
+                {v}
+              </label>
+            )
+          })}
+        </div>
+      )}
+      <span className="mt-1 block text-[11px] text-[var(--ink3)]">
+        指定した値の行を「完了」として隠せます（複数選択可）。未設定ならステータス＝「完了」。
+      </span>
+    </div>
   )
 }
 

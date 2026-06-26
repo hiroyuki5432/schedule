@@ -38,8 +38,8 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User:
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     user = db.get(User, user_id)
-    if user is None:
-        # Stale session referencing a deleted user.
+    if user is None or not user.is_active:
+        # Stale session referencing a deleted user, or an account frozen mid-session.
         request.session.clear()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     return user

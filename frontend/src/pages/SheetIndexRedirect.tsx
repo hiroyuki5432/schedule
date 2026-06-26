@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { Navigate } from 'react-router-dom'
 import { useSheets } from '@/hooks/useSheets'
+import { getLastSheet } from '@/hooks/usePersistentState'
 import { Button } from '@/components/ui/Button'
 import { PlusIcon } from '@/components/ui/icons'
 import { AddSheetDialog } from '@/components/AddSheetDialog'
@@ -21,7 +22,11 @@ export function SheetIndexRedirect() {
 
   const sheets = [...(sheetsQ.data ?? [])].sort((a, b) => a.order - b.order)
   if (sheets.length > 0) {
-    return <Navigate to={`/sheets/${sheets[0].id}`} replace />
+    // Resume the last opened sheet when it still exists, else the first sheet.
+    const last = getLastSheet()
+    const target =
+      (last && sheets.find((s) => String(s.id) === String(last))?.id) ?? sheets[0].id
+    return <Navigate to={`/sheets/${target}`} replace />
   }
 
   return (

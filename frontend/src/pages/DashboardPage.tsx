@@ -1,13 +1,15 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as api from '@/api/client'
-import { useSheets, useWeekStartWeekday } from '@/hooks/useSheets'
+import { useOrg, useSheets, useWeekStartWeekday } from '@/hooks/useSheets'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Select } from '@/components/ui/Select'
 import { Button } from '@/components/ui/Button'
 import { DownloadIcon } from '@/components/ui/icons'
 import { fmtISO, fmtMD, MS_WEEK, parseDate, startOfWeek } from '@/lib/dates'
+import { monthPeriods, periodForDate } from '@/lib/period'
+import type { MonthPeriod } from '@/lib/period'
 import type { AggregateRow, Effort } from '@/types/api'
 
 function num(v: number | string | null | undefined): number {
@@ -21,6 +23,8 @@ export function DashboardPage() {
   const sheetsQ = useSheets()
   const sheetId = sheetsQ.data?.[0]?.id
   const wsd = useWeekStartWeekday()
+  const orgQ = useOrg()
+  const closing = orgQ.data?.settings?.closing ?? {}
 
   const columnsQ = useQuery({
     queryKey: ['columns', sheetId],
@@ -54,9 +58,43 @@ export function DashboardPage() {
 
   const todayWeek = useMemo(() => fmtISO(startOfWeek(new Date(), wsd)), [wsd])
 
-  // Overall plan-vs-actual summary, derived from all effort entries.
+  // Monthly close-periods spanning the effort data (要望: 月の集計をいつからいつまで).
+  // Each week is assigned to the period containing its week_start.
+  const allEffort: Effort[] = useMemo(() => effortQ.data ?? [], [effortQ.data])
+  const periods = useMemo(() => {
+    if (allEffort.length === 0) return []
+    const weeks = allEffort.map((e) => e.week_start).sort()
+    return monthPeriods(weeks[0], weeks[weeks.length - 1], closing)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEffort, JSON.stringify(closing)])
+
+  // Selected period ('' = 全期間). Default to the latest period once loaded.
+  const [period, setPeriod] = useState<string>('')
+
+  // Per-period planned/actual totals (for the monthly breakdown table).
+  const periodTotals = useMemo(() => {
+    const m = new Map<string, { p: number; a: number }>()
+    for (const e of allEffort) {
+      const lbl = periodForDate(e.week_start, closing).label
+      const cur = m.get(lbl) ?? { p: 0, a: 0 }
+      cur.p += num(e.planned_hours)
+      cur.a += num(e.actual_hours)
+      m.set(lbl, cur)
+    }
+    return m
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEffort, JSON.stringify(closing)])
+
+  // Effort limited to the selected period (drives the summary + burn-up).
+  const effort = useMemo(() => {
+    if (!period) return allEffort
+    return allEffort.filter((e) => periodForDate(e.week_start, closing).label === period)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEffort, period, JSON.stringify(closing)])
+
+  // Overall plan-vs-actual summary, derived from the (period-filtered) effort.
   const summary = useMemo(() => {
-    const eff: Effort[] = effortQ.data ?? []
+    const eff: Effort[] = effort
     let pAll = 0
     let aAll = 0
     let pToDate = 0
@@ -77,7 +115,7 @@ export function DashboardPage() {
       behind: pToDate - aToDate, // +: behind schedule, −: ahead
       progress: pAll > 0 ? aAll / pAll : 0,
     }
-  }, [effortQ.data, todayWeek])
+  }, [effort, todayWeek])
 
   return (
     <>
@@ -103,6 +141,28 @@ export function DashboardPage() {
           </Card>
         ) : (
           <>
+            {periods.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 text-[12px] text-[var(--ink2)]">
+                集計期間（締め）:
+                <Select value={period} onChange={(e) => setPeriod(e.target.value)}>
+                  <option value="">全期間</option>
+                  {[...periods].reverse().map((p) => (
+                    <option key={p.label} value={p.label}>
+                      {periodLabel(p)}
+                    </option>
+                  ))}
+                </Select>
+                {period && (
+                  <span className="text-[11px] text-[var(--ink3)]">
+                    {(() => {
+                      const p = periods.find((x) => x.label === period)
+                      return p ? `${p.start} 〜 ${p.end}` : ''
+                    })()}
+                  </span>
+                )}
+              </div>
+            )}
+
             <SummaryCards s={summary} />
 
             <Card>
@@ -110,9 +170,20 @@ export function DashboardPage() {
                 <CardTitle>バーンアップ（累積 予定 vs 実績）</CardTitle>
               </CardHeader>
               <CardBody>
-                <BurnUp effort={effortQ.data ?? []} todayWeek={todayWeek} />
+                <BurnUp effort={effort} todayWeek={todayWeek} />
               </CardBody>
             </Card>
+
+            {periods.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>月別集計（締め期間ごと）</CardTitle>
+                </CardHeader>
+                <CardBody className="px-0 py-0">
+                  <MonthlyTable periods={periods} totals={periodTotals} />
+                </CardBody>
+              </Card>
+            )}
 
             <div className="flex items-center gap-2 text-[12px] text-[var(--ink2)]">
               グループ化:
@@ -146,6 +217,59 @@ export function DashboardPage() {
         )}
       </div>
     </>
+  )
+}
+
+function periodLabel(p: MonthPeriod): string {
+  return `${p.year}年${p.month}月度`
+}
+
+/** Per-period planned/actual breakdown (締め期間ごとの月別集計). */
+function MonthlyTable({
+  periods,
+  totals,
+}: {
+  periods: MonthPeriod[]
+  totals: Map<string, { p: number; a: number }>
+}) {
+  return (
+    <table className="w-full border-collapse text-[12.5px]">
+      <thead>
+        <tr className="border-b border-[var(--line)] text-left text-[var(--ink3)]">
+          <th className="px-5 py-2.5 font-medium">月度</th>
+          <th className="px-5 py-2.5 font-medium">期間</th>
+          <th className="px-5 py-2.5 text-right font-medium">予定計</th>
+          <th className="px-5 py-2.5 text-right font-medium">実績計</th>
+          <th className="px-5 py-2.5 text-right font-medium">差（予定−実績）</th>
+          <th className="px-5 py-2.5 text-right font-medium">消化率</th>
+        </tr>
+      </thead>
+      <tbody>
+        {[...periods].reverse().map((p) => {
+          const t = totals.get(p.label) ?? { p: 0, a: 0 }
+          const diff = round1(t.p - t.a)
+          const rate = t.p > 0 ? t.a / t.p : 0
+          return (
+            <tr key={p.label} className="border-b border-[var(--line2)]">
+              <td className="px-5 py-2.5">{periodLabel(p)}</td>
+              <td className="px-5 py-2.5 text-[var(--ink3)]">
+                {p.start} 〜 {p.end}
+              </td>
+              <td className="px-5 py-2.5 text-right">{round1(t.p)}h</td>
+              <td className="px-5 py-2.5 text-right">{round1(t.a)}h</td>
+              <td
+                className="px-5 py-2.5 text-right"
+                style={{ color: diff < 0 ? '#A8442B' : 'var(--ink2)' }}
+              >
+                {diff > 0 ? '+' : ''}
+                {diff}h
+              </td>
+              <td className="px-5 py-2.5 text-right">{Math.round(rate * 100)}%</td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
   )
 }
 

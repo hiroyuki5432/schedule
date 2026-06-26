@@ -20,3 +20,16 @@ export function avatarBg(seed: string | undefined | null): string {
 export function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(' ')
 }
+
+// A date cell may hold a literal placeholder dash (「-」全角/半角・ダッシュ各種) to
+// mean "no date". For sorting we want those treated as empty so they always sort
+// to the bottom (要望: 日付ソートは「-」を常に下に), regardless of asc/desc.
+const DATE_PLACEHOLDER = /^[-‐-―－−ー\s]+$/
+
+/** Normalize a date column value for sorting: placeholder dashes → '' (=empty). */
+export function normalizeDateForSort(v: unknown): string {
+  if (v == null) return ''
+  const s = String(v).trim()
+  if (s === '' || DATE_PLACEHOLDER.test(s)) return ''
+  return s
+}

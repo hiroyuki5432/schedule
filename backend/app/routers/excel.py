@@ -18,7 +18,7 @@ Layout (one worksheet), schedule sheets:
 from __future__ import annotations
 
 import io
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -153,6 +153,40 @@ def _fmt_num(value) -> float | str:
     return int(f) if f == int(f) else f
 
 
+def _span_weeks(
+    rows: list[Row], columns: list[Column], week_weekday: int
+) -> list[date]:
+    """Week columns to OUTPUT so 工数 can be entered even before any effort exists.
+
+    Spans the rows' 開始日〜完了日 (sched_role columns). With no dated rows, falls back
+    to a window around today so a fresh sheet still exports fillable week columns.
+    Without this, export derives weeks only from existing EffortEntry rows, so an
+    empty sheet has no week columns and 工数 can never be imported (要望: 工数Excel取込)."""
+    start_col = next((c for c in columns if (c.config or {}).get("sched_role") == "start"), None)
+    end_col = next((c for c in columns if (c.config or {}).get("sched_role") == "end"), None)
+    dates: list[date] = []
+    for r in rows:
+        data = r.data or {}
+        for col in (start_col, end_col):
+            if col is None:
+                continue
+            d = _coerce_date_obj(data.get(str(col.id)))
+            if d is not None:
+                dates.append(d)
+    today = date.today()
+    if dates:
+        lo, hi = min(dates), max(dates)
+    else:
+        lo, hi = today - timedelta(weeks=4), today + timedelta(weeks=12)
+    w = week_start_of(lo, week_weekday)
+    end = week_start_of(hi, week_weekday)
+    out: list[date] = []
+    while w <= end:
+        out.append(w)
+        w += timedelta(days=7)
+    return out
+
+
 def _sheet_weeks(db: Session, row_ids: list[int]) -> tuple[list[date], dict[tuple[int, date], EffortEntry]]:
     weeks: list[date] = []
     effort_map: dict[tuple[int, date], EffortEntry] = {}
@@ -213,6 +247,11 @@ def export_xlsx(
         weeks, effort_map = _sheet_weeks(db, row_ids)
         milestones_map = _milestones_by_row(db, row_ids)
         ms_cols = _template_milestone_cols(sheet)
+        # Always export a fillable week range (spanning rows' 開始日〜完了日), unioned
+        # with the weeks that already hold effort — so 工数 can be entered & imported
+        # even on a sheet with no effort yet.
+        week_weekday = org_week_start_weekday(db, user.org_id)
+        weeks = sorted(set(weeks) | set(_span_weeks(rows, columns, week_weekday)))
 
     member_names = _members_by_id(db, user.org_id)
 

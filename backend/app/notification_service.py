@@ -52,7 +52,10 @@ def register_items(db: Session, org_id: int, items: list) -> int:
     if not items:
         return 0
     member_ids = {
-        u for (u,) in db.execute(select(User.id).where(User.org_id == org_id))
+        u
+        for (u,) in db.execute(
+            select(User.id).where(User.org_id == org_id, User.is_active.is_(True))
+        )
     }
     rows: list[dict] = []
     for it in items:

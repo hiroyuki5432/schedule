@@ -103,31 +103,37 @@ export function InlineCell({
 
   // --- Editable: member / dropdown ---
   if (column.type === 'member') {
+    const cur = value == null ? '' : String(value)
+    // Hide frozen (凍結) members from the picker, but keep the current assignee
+    // selectable & displayable even if frozen (existing data is preserved).
+    const options = members
+      .filter((m) => m.is_active !== false || String(m.id) === cur)
+      .map((m) => ({ value: String(m.id), label: m.name }))
     return (
       <SelectCell
         className={className}
         pad={pad}
         editing={editing}
         setEditing={setEditing}
-        value={value == null ? '' : String(value)}
-        options={members.map((m) => ({ value: String(m.id), label: m.name }))}
+        value={cur}
+        options={options}
         onSave={(v) => onSave(v === '' ? null : Number(v))}
-        display={
-          value == null ? null : (
-            <MemberChip members={members} id={String(value)} />
-          )
-        }
+        display={value == null ? null : <MemberChip members={members} id={String(value)} />}
       />
     )
   }
 
   if (column.type === 'dropdown') {
-    const options = (column.config?.options ?? []).map((o) => ({
-      value: o.value,
-      label: o.value,
-      color: o.color,
-    }))
-    const opt = options.find((o) => o.value === String(value ?? ''))
+    const allOptions = column.config?.options ?? []
+    const cur = String(value ?? '')
+    // Hide frozen options from the picker, but keep the current value selectable
+    // even if it's frozen (so existing data isn't lost on edit).
+    const options = allOptions
+      .filter((o) => !o.frozen || o.value === cur)
+      .map((o) => ({ value: o.value, label: o.value, color: o.color }))
+    // Resolve the display badge from ALL options so a frozen current value still
+    // renders with its label/color.
+    const opt = allOptions.find((o) => o.value === cur)
     return (
       <SelectCell
         className={className}
@@ -140,7 +146,7 @@ export function InlineCell({
         display={
           opt ? (
             <Badge bg={opt.color ?? '#EFEDE4'} color="#3a382f">
-              {opt.label}
+              {opt.value}
             </Badge>
           ) : null
         }

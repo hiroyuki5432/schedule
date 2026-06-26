@@ -196,6 +196,40 @@ def test_export_clear_import_round_trip(auth_client):
     ]
 
 
+def test_export_has_week_columns_without_effort(auth_client):
+    """A sheet with rows but no effort yet must still export fillable week columns
+    spanning 開始日〜完了日, so 工数 can be entered and re-imported (要望: 工数Excel取込)."""
+    sid = make_sheet(auth_client, "WK")
+    _add_text_column(auth_client, sid, "件名")
+    start_id, end_id = _sched_col_ids(auth_client, sid)
+    auth_client.post(
+        f"/api/sheets/{sid}/rows",
+        json={"key_value": "E-1", "data": {start_id: "2026-02-02", end_id: "2026-02-20"}},
+    )
+
+    ws = load_workbook(io.BytesIO(auth_client.get(f"/api/sheets/{sid}/export.xlsx").content)).active
+    header = [c.value for c in ws[1]]
+    # Week columns are ISO date headers (Mondays). At least the row's span weeks.
+    week_headers = [h for h in header if isinstance(h, str) and h.startswith("2026-02")]
+    assert week_headers, header
+
+    # Fill the first week column with hours, then import → effort is created.
+    wb = Workbook()
+    out = wb.active
+    out.append(["ID", "件名", week_headers[0]])
+    out.append(["E-1", "作業", 8])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    r = auth_client.post(
+        f"/api/sheets/{sid}/import.xlsx", files={"file": ("wk.xlsx", buf, _MEDIA)}
+    )
+    assert r.status_code == 200, r.text
+    effort = auth_client.get(f"/api/sheets/{sid}/effort").json()
+    assert len(effort) == 1
+    assert float(effort[0]["actual_hours"] or 0) + float(effort[0]["planned_hours"] or 0) == 8.0
+
+
 def test_import_weekly_effort_future_planned(auth_client):
     sid = make_sheet(auth_client, "Z")  # week-grid sheet
     _add_text_column(auth_client, sid, "件名")

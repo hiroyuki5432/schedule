@@ -15,6 +15,8 @@ import { Badge } from '@/components/ui/Badge'
 import { InlineCell } from '@/components/schedule/InlineCell'
 import { Modal } from '@/components/ui/Modal'
 import { statusFromPhases } from '@/lib/status'
+import { normalizeDateForSort } from '@/lib/format'
+import { usePersistentState } from '@/hooks/usePersistentState'
 import { PlusIcon, TrashIcon } from '@/components/ui/icons'
 import type { CellValue, Column, Member, Milestone, Row } from '@/types/api'
 
@@ -118,8 +120,12 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
   const [modalRowId, setModalRowId] = useState<string | null>(null)
   const modalRow = rows.find((r) => r.id === modalRowId) ?? null
 
-  // Client-side sort on the displayed rows (Feature 1).
-  const [sort, setSort] = useState<SortState | null>(null)
+  // Client-side sort on the displayed rows (Feature 1). Persisted per sheet so the
+  // last sort resumes on reload (要望: 前回の表示から開始).
+  const [sort, setSort] = usePersistentState<SortState | null>(
+    `view:table:${sheetId}:sort`,
+    null,
+  )
   function sortValueFor(row: Row, key: string): string | number {
     if (key === SORT_ID) return row.key_value ?? ''
     const c = columns.find((x) => x.id === key)
@@ -139,6 +145,8 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
       const n = Number(v)
       return Number.isFinite(n) ? n : 0
     }
+    // Date columns: literal placeholder dash 「-」 sorts as empty (always last).
+    if (c.type === 'date') return normalizeDateForSort(v)
     return String(v)
   }
   const sortedRows = useMemo(() => {

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps import get_column_for_user, get_sheet_for_user
-from app.models import Column, Sheet, User
+from app.models import Column, Row, Sheet, User
 from app.schemas import ColumnCreate, ColumnOut, ColumnUpdate
 from app.security import current_user
 
@@ -62,8 +62,39 @@ def update_column(
 ) -> Column:
     column = get_column_for_user(db, column_id, user)
     fields = payload.model_dump(exclude_unset=True)
+
+    # When a dropdown's option values are renamed, follow the change through to the
+    # stored data so existing rows keep their (renamed) value (要望: リスト名を変えても
+    # データが追従). Options are matched by their stable `id`; only changed values
+    # are remapped.
+    rename_map: dict[str, str] = {}
+    if "config" in fields and column.type == "dropdown":
+        old_by_id = {
+            o.get("id"): o.get("value")
+            for o in (column.config or {}).get("options", [])
+            if o.get("id")
+        }
+        for o in fields["config"].get("options", []) or []:
+            oid, new_val = o.get("id"), o.get("value")
+            old_val = old_by_id.get(oid)
+            if oid and old_val is not None and new_val and old_val != new_val:
+                rename_map[old_val] = new_val
+
     for key, value in fields.items():
         setattr(column, key, value)
+
+    if rename_map:
+        col_key = str(column.id)
+        rows = db.execute(
+            select(Row).where(Row.sheet_id == column.sheet_id)
+        ).scalars()
+        for r in rows:
+            cur = (r.data or {}).get(col_key)
+            if cur in rename_map:
+                data = dict(r.data or {})
+                data[col_key] = rename_map[cur]
+                r.data = data
+
     db.commit()
     db.refresh(column)
     return column

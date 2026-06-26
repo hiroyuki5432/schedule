@@ -65,6 +65,13 @@ def update_member(
         member.role = payload.role
     if payload.worklog_required is not None:
         member.worklog_required = payload.worklog_required
+    if payload.is_active is not None:
+        # Guard against an admin freezing themselves out (same rule as self-delete).
+        if member.id == admin.id and not payload.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot freeze yourself"
+            )
+        member.is_active = payload.is_active
     if payload.password is not None:
         member.password_hash = hash_password(payload.password)
     db.commit()

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { useMembers, useOrg } from '@/hooks/useSheets'
@@ -11,6 +11,7 @@ import { Select } from '@/components/ui/Select'
 import { Badge } from '@/components/ui/Badge'
 import { Avatar } from '@/components/ui/Avatar'
 import { ApiError } from '@/lib/http'
+import { cn } from '@/lib/format'
 import { toast } from '@/lib/toast'
 import type { Role } from '@/types/api'
 
@@ -33,10 +34,23 @@ export function MembersPage() {
     onError: (e) => alert(e instanceof ApiError ? e.message : 'ロールの変更に失敗しました。'),
   })
 
+  const renameMember = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => api.updateMember(id, { name }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['members'] }),
+    onError: (e) => alert(e instanceof ApiError ? e.message : '名前の変更に失敗しました。'),
+  })
+
   const removeMember = useMutation({
     mutationFn: (id: string) => api.deleteMember(id),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['members'] }),
     onError: (e) => alert(e instanceof ApiError ? e.message : '削除に失敗しました。'),
+  })
+
+  const setActive = useMutation({
+    mutationFn: ({ id, value }: { id: string; value: boolean }) =>
+      api.updateMember(id, { is_active: value }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['members'] }),
+    onError: (e) => alert(e instanceof ApiError ? e.message : '凍結状態の変更に失敗しました。'),
   })
 
   return (
@@ -84,11 +98,30 @@ export function MembersPage() {
                 </thead>
                 <tbody>
                   {(membersQ.data ?? []).map((m) => (
-                    <tr key={m.id} className="border-b border-[var(--line2)]">
+                    <tr
+                      key={m.id}
+                      className={cn(
+                        'border-b border-[var(--line2)]',
+                        !m.is_active && 'opacity-50',
+                      )}
+                    >
                       <td className="px-5 py-2.5">
                         <div className="flex items-center gap-2">
                           <Avatar name={m.name} seed={m.id} />
-                          {m.name}
+                          {isAdmin ? (
+                            <InlineName
+                              name={m.name}
+                              busy={renameMember.isPending}
+                              onSave={(name) => renameMember.mutate({ id: m.id, name })}
+                            />
+                          ) : (
+                            m.name
+                          )}
+                          {!m.is_active && (
+                            <Badge color="#A8442B" bg="#FAE6E0">
+                              凍結
+                            </Badge>
+                          )}
                         </div>
                       </td>
                       <td className="px-5 py-2.5 text-[var(--ink2)]">{m.email}</td>
@@ -139,17 +172,34 @@ export function MembersPage() {
                       {isAdmin && (
                         <td className="px-5 py-2.5">
                           {m.id !== user?.id ? (
-                            <button
-                              type="button"
-                              disabled={removeMember.isPending}
-                              onClick={() => {
-                                if (window.confirm(`「${m.name}」を削除します。よろしいですか？`))
-                                  removeMember.mutate(m.id)
-                              }}
-                              className="text-[12px] text-[#A8442B] hover:underline disabled:opacity-50"
-                            >
-                              削除
-                            </button>
+                            <div className="flex items-center gap-3">
+                              <button
+                                type="button"
+                                disabled={setActive.isPending}
+                                onClick={() =>
+                                  setActive.mutate({ id: m.id, value: !m.is_active })
+                                }
+                                title={
+                                  m.is_active
+                                    ? '凍結するとログインできなくなります（データは残ります）'
+                                    : '凍結を解除してログインを許可します'
+                                }
+                                className="text-[12px] text-[var(--ink2)] hover:underline disabled:opacity-50"
+                              >
+                                {m.is_active ? '凍結' : '解除'}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={removeMember.isPending}
+                                onClick={() => {
+                                  if (window.confirm(`「${m.name}」を削除します。よろしいですか？`))
+                                    removeMember.mutate(m.id)
+                                }}
+                                className="text-[12px] text-[#A8442B] hover:underline disabled:opacity-50"
+                              >
+                                削除
+                              </button>
+                            </div>
                           ) : (
                             <span className="text-[12px] text-[var(--ink3)]">—</span>
                           )}
@@ -175,28 +225,49 @@ function GroupSettingsCard() {
   const org = orgQ.data
   const [name, setName] = useState('')
   const [appTitle, setAppTitle] = useState('')
+  const [closeOffset, setCloseOffset] = useState('0')
+  const [holidays, setHolidays] = useState('')
   const [inited, setInited] = useState(false)
 
   // Initialize fields once the org loads.
   if (org && !inited) {
     setName(org.name)
     setAppTitle(org.settings?.app_title ?? '')
+    setCloseOffset(String(org.settings?.closing?.offset_business_days ?? 0))
+    setHolidays((org.settings?.closing?.holidays ?? []).join('\n'))
     setInited(true)
   }
+
+  const parsedHolidays = holidays
+    .split(/[\n,\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => /^\d{4}-\d{2}-\d{2}$/.test(s))
 
   const save = useMutation({
     mutationFn: () =>
       api.updateOrg({
         name: name.trim() || undefined,
-        settings: { ...(org?.settings ?? {}), app_title: appTitle.trim() },
+        settings: {
+          ...(org?.settings ?? {}),
+          app_title: appTitle.trim(),
+          closing: {
+            offset_business_days: Math.max(0, Number(closeOffset) || 0),
+            holidays: parsedHolidays,
+          },
+        },
       }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['org'] })
     },
   })
 
+  const curClosing = org?.settings?.closing
   const dirty =
-    !!org && (name.trim() !== org.name || appTitle.trim() !== (org.settings?.app_title ?? ''))
+    !!org &&
+    (name.trim() !== org.name ||
+      appTitle.trim() !== (org.settings?.app_title ?? '') ||
+      Math.max(0, Number(closeOffset) || 0) !== (curClosing?.offset_business_days ?? 0) ||
+      JSON.stringify(parsedHolidays) !== JSON.stringify(curClosing?.holidays ?? []))
 
   return (
     <Card>
@@ -218,6 +289,31 @@ function GroupSettingsCard() {
             />
             <span className="text-[11px] text-[var(--ink3)]">
               空欄なら「工数スケジュール」を表示します。
+            </span>
+          </label>
+          <label className="flex flex-col gap-1 text-[12px] text-[var(--ink2)]">
+            月次の締め（月末の何稼働日前で締めるか）
+            <Input
+              type="number"
+              min={0}
+              value={closeOffset}
+              onChange={(e) => setCloseOffset(e.target.value)}
+            />
+            <span className="text-[11px] text-[var(--ink3)]">
+              0＝暦月どおり。例：4 なら「月末の4稼働日前」を締め日に（稼働日＝土日・祝日を除く）。
+            </span>
+          </label>
+          <label className="flex flex-col gap-1 text-[12px] text-[var(--ink2)] md:col-span-2">
+            会社の休日（祝日に追加。1行に1つ、YYYY-MM-DD）
+            <textarea
+              value={holidays}
+              onChange={(e) => setHolidays(e.target.value)}
+              rows={3}
+              placeholder={'例：\n2026-08-13\n2026-12-29'}
+              className="w-full rounded-[9px] border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-[12.5px] text-[var(--ink)] placeholder:text-[var(--ink3)] focus:outline-none focus:ring-2 focus:ring-[var(--green-l)]"
+            />
+            <span className="text-[11px] text-[var(--ink3)]">
+              日本の祝日は自動で考慮します。年末年始など会社独自の休日のみ追加してください。
             </span>
           </label>
         </div>
@@ -281,6 +377,65 @@ function OrgDataDangerCard() {
         </div>
       </CardBody>
     </Card>
+  )
+}
+
+/** Admin-only inline editor for a member's display name. Click to edit; Enter/blur
+ *  saves, Esc cancels. Mirrors the sheet-title inline editor pattern. */
+function InlineName({
+  name,
+  busy,
+  onSave,
+}: {
+  name: string
+  busy: boolean
+  onSave: (name: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [val, setVal] = useState(name)
+  const done = useRef(false)
+
+  function start() {
+    setVal(name)
+    setEditing(true)
+    done.current = false
+  }
+  function commit() {
+    if (done.current) return
+    done.current = true
+    const next = val.trim()
+    setEditing(false)
+    if (next && next !== name) onSave(next)
+  }
+
+  if (editing) {
+    return (
+      <Input
+        autoFocus
+        value={val}
+        disabled={busy}
+        onChange={(e) => setVal(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit()
+          if (e.key === 'Escape') {
+            done.current = true
+            setEditing(false)
+          }
+        }}
+        className="w-[160px] py-0.5 text-[12.5px]"
+      />
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={start}
+      title="クリックで名前を編集"
+      className="rounded px-1 py-0.5 text-left hover:bg-[var(--line2)]"
+    >
+      {name}
+    </button>
   )
 }
 

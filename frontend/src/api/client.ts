@@ -58,7 +58,13 @@ export const createMember = (body: {
 
 export const updateMember = (
   id: string,
-  body: { name?: string; role?: Role; password?: string; worklog_required?: boolean },
+  body: {
+    name?: string
+    role?: Role
+    password?: string
+    worklog_required?: boolean
+    is_active?: boolean
+  },
 ) => http.patch<Member>(`/api/members/${id}`, body)
 
 export const deleteMember = (id: string) => http.del<void>(`/api/members/${id}`)

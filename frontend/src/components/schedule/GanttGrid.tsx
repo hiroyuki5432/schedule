@@ -18,7 +18,7 @@ import { useLookupTargets } from '@/hooks/useLookupTargets'
 import { Avatar } from '@/components/ui/Avatar'
 import { Badge } from '@/components/ui/Badge'
 import { DiamondIcon, PlusIcon, TrashIcon } from '@/components/ui/icons'
-import { cn } from '@/lib/format'
+import { cn, normalizeDateForSort } from '@/lib/format'
 import { fmtISO, fmtMD, parseDate } from '@/lib/dates'
 import type { WeekCell } from '@/lib/gantt'
 import type { StatusBadge } from '@/lib/status'
@@ -110,6 +110,8 @@ function sortValueFor(
     const n = Number(v)
     return Number.isFinite(n) ? n : 0
   }
+  // Date columns: treat a literal placeholder dash as empty so 「-」 sorts last.
+  if (column.type === 'date') return normalizeDateForSort(v)
   return String(v)
 }
 
@@ -241,6 +243,9 @@ interface Props {
   showDepLines: boolean
   /** Week being viewed (live or as-of) — for weekly-reset column display. */
   viewedWeekIso?: string
+  /** localStorage key to persist/restore the horizontal scroll position. When set
+   *  (live view), reopening the sheet resumes the last scroll instead of today. */
+  scrollStorageKey?: string
   /** Notification deep-link: scroll to + briefly highlight this task (row id). */
   focusRowId?: string | null
   /** Changes on each notification click so re-clicking the same task re-flashes. */
@@ -283,6 +288,7 @@ export function GanttGrid({
   pinnedCount,
   showDepLines,
   viewedWeekIso,
+  scrollStorageKey,
   focusRowId,
   focusNonce,
   onSaveWeek,
@@ -592,16 +598,46 @@ export function GanttGrid({
 
   const lineXInGrid = lineIndex * weekColWidth
 
-  // On first load, scroll the week area so "today" is visible (attribute columns
-  // scroll off behind the pinned ID/件名; the gantt is the focus).
+  // On first load, restore the last horizontal scroll position (要望: 前回の表示位置
+  // から開始) when one is saved; otherwise scroll so "today" is visible.
   useEffect(() => {
     if (didScrollRef.current) return
     const el = scrollRef.current
     if (el && displayRows.length > 0 && lineIndex >= 0) {
-      el.scrollLeft = Math.max(0, attrW + lineXInGrid - 200)
+      let restored = false
+      if (scrollStorageKey) {
+        const saved = Number(localStorage.getItem(scrollStorageKey))
+        if (Number.isFinite(saved) && saved > 0) {
+          el.scrollLeft = saved
+          restored = true
+        }
+      }
+      if (!restored) el.scrollLeft = Math.max(0, attrW + lineXInGrid - 200)
       didScrollRef.current = true
     }
-  }, [displayRows.length, attrW, lineIndex, lineXInGrid])
+  }, [displayRows.length, attrW, lineIndex, lineXInGrid, scrollStorageKey])
+
+  // Persist the horizontal scroll position (debounced) so it can be restored.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el || !scrollStorageKey) return
+    let t: number | undefined
+    const onScroll = () => {
+      window.clearTimeout(t)
+      t = window.setTimeout(() => {
+        try {
+          localStorage.setItem(scrollStorageKey, String(el.scrollLeft))
+        } catch {
+          /* storage unavailable — ignore */
+        }
+      }, 200)
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      window.clearTimeout(t)
+    }
+  }, [scrollStorageKey])
 
   // Notification deep-link: scroll the focused task into view and flash it.
   useEffect(() => {

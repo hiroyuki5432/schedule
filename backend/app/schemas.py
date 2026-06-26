@@ -68,6 +68,8 @@ class MemberOut(BaseModel):
     role: Role
     # Whether this user files a daily 日報 (drives 未入力 reminders).
     worklog_required: bool = True
+    # Whether the account is active. Frozen (凍結) accounts cannot log in.
+    is_active: bool = True
 
 
 class MemberCreate(BaseModel):
@@ -83,6 +85,7 @@ class MemberUpdate(BaseModel):
     role: Optional[Role] = None
     password: Optional[str] = None
     worklog_required: Optional[bool] = None
+    is_active: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,11 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     user = get_user_by_email(db, payload.email)
     if user is None or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="このアカウントは凍結されています。管理者にお問い合わせください。",
+        )
     request.session["user_id"] = user.id
     return {"user": user}
 
