@@ -78,6 +78,9 @@ export interface SheetSettings {
   /** Rows are "completed" (for the 完了を隠す toggle) when this column's value is
    *  one of `values`. When unset, falls back to status column === '完了'. */
   done_filter?: { column_id: string; values: string[] }
+  /** Milestone diamond (◇) visibility for the whole sheet: all (default) / none /
+   *  last-only. Set on the sheet settings page. */
+  milestone_display?: 'all' | 'none' | 'last'
   [k: string]: unknown
 }
 
@@ -207,6 +210,11 @@ export interface Milestone {
 export interface SnapshotResult {
   rows: Row[]
   effort: Effort[]
+  /** Week the data actually represents (nearest record ≤ requested; oldest when
+   *  the request predates all snapshots). null when no snapshot exists. */
+  as_of_week?: string | null
+  /** True when as_of_week equals the requested week (exact record for it). */
+  exact?: boolean
 }
 
 export interface ChangeEntry {

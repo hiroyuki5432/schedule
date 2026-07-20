@@ -95,7 +95,17 @@ def ensure_current_snapshot(db: Session, sheet: Sheet, today: date | None = None
 
 
 def snapshot_as_of(db: Session, sheet: Sheet, week: date) -> dict[str, Any]:
-    """Return {rows, effort} from the nearest snapshot <= week, else current state."""
+    """Return the recorded plan as of ``week``.
+
+    Picks the newest snapshot <= ``week``. When the requested week predates every
+    stored snapshot, fall back to the OLDEST snapshot we have (the closest real
+    historical record) — NOT the live current state, which would silently
+    masquerade as the past (要望: 過去に戻れない/今日に戻る不具合).
+
+    The result carries ``as_of_week`` (the week the returned data actually
+    represents) and ``exact`` (whether that equals the requested week) so the UI
+    can tell the user "この週の記録はありません（最古 X を表示）".
+    """
     snap = db.execute(
         select(SheetSnapshot)
         .where(SheetSnapshot.sheet_id == sheet.id, SheetSnapshot.for_week <= week)
@@ -103,7 +113,18 @@ def snapshot_as_of(db: Session, sheet: Sheet, week: date) -> dict[str, Any]:
         .limit(1)
     ).scalar_one_or_none()
 
+    exact = snap is not None and snap.for_week == week
+    if snap is None:
+        # Requested week is older than anything recorded: show the earliest record.
+        snap = db.execute(
+            select(SheetSnapshot)
+            .where(SheetSnapshot.sheet_id == sheet.id)
+            .order_by(SheetSnapshot.for_week.asc())
+            .limit(1)
+        ).scalar_one_or_none()
+
     state = snap.state if snap is not None else _serialize_state(db, sheet)
+    as_of_week = snap.for_week.isoformat() if snap is not None else None
     rows_state: dict[str, Any] = state.get("rows", {})
 
     rows_out: list[dict[str, Any]] = []
@@ -122,7 +143,12 @@ def snapshot_as_of(db: Session, sheet: Sheet, week: date) -> dict[str, Any]:
         for e in rstate.get("effort", []):
             effort_out.append({"row_id": rstate.get("id"), **e})
 
-    return {"rows": rows_out, "effort": effort_out}
+    return {
+        "rows": rows_out,
+        "effort": effort_out,
+        "as_of_week": as_of_week,
+        "exact": exact,
+    }
 
 
 # Columns whose value changes are tracked as change-points. Date-type columns are

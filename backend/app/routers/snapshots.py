@@ -27,7 +27,12 @@ def get_snapshot(
     sheet = get_sheet_for_user(db, sheet_id, user)
     target_week = week or current_week_start()
     result = snapshot_as_of(db, sheet, target_week)
-    return SnapshotOut(rows=result["rows"], effort=result["effort"])
+    return SnapshotOut(
+        rows=result["rows"],
+        effort=result["effort"],
+        as_of_week=result.get("as_of_week"),
+        exact=result.get("exact", False),
+    )
 
 
 @router.get("/{sheet_id}/changes", response_model=list[ChangeOut])

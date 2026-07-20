@@ -4,7 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useMembers, useWeekStartWeekday } from '@/hooks/useSheets'
 import { useScheduleData } from '@/hooks/useScheduleData'
-import type { ScheduleRowModel, ViewMode } from '@/hooks/useScheduleData'
+import type { ViewMode } from '@/hooks/useScheduleData'
 import { useEffortMutation } from '@/hooks/useEffortMutation'
 import { useRowMutation } from '@/hooks/useRowMutation'
 import * as api from '@/api/client'
@@ -16,10 +16,11 @@ import { DependencyEditor } from '@/components/schedule/DependencyEditor'
 import { Button } from '@/components/ui/Button'
 import { Avatar } from '@/components/ui/Avatar'
 import { Input } from '@/components/ui/Input'
-import { Select } from '@/components/ui/Select'
-import { FilterIcon, PlusIcon, SearchIcon, XIcon } from '@/components/ui/icons'
+import { PlusIcon, SearchIcon, XIcon } from '@/components/ui/icons'
 import { useAuth } from '@/hooks/useAuth'
-import { addWeeks, fmtISO, fmtMD, startOfWeek } from '@/lib/dates'
+import { buildColFilterOptions, matchColFilter } from '@/lib/colFilter'
+import type { ColFilter } from '@/lib/colFilter'
+import { addWeeks, fmtISO, fmtMD, parseDate, startOfWeek } from '@/lib/dates'
 import { phaseWeightByName, redistributeMilestones } from '@/lib/milestones'
 import { cn } from '@/lib/format'
 import type { CellValue, Column, NotificationItem, Row } from '@/types/api'
@@ -59,17 +60,18 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const [milestoneRow, setMilestoneRow] = useState<Row | null>(null)
   const [depRow, setDepRow] = useState<Row | null>(null)
   const [showDepLines, setShowDepLines] = usePersistentState(k('showDepLines'), false)
-  // Filters: per-column value filters (configured in settings) + full-text
-  // search + quick toggles (hide-done / this-week-only).
-  const [colFilters, setColFilters] = usePersistentState<Record<string, string>>(
-    k('colFilters'),
+  // Excel-style per-column header filters + full-text search + quick toggles
+  // (hide-done / this-week-only). Each column keeps a ColFilter: a checked value
+  // set (text), a checked month set (date), or a min/max range (number). Key
+  // absent = no filter. V3 key: value model changed from string[] → ColFilter.
+  const [colFilters, setColFilters] = usePersistentState<Record<string, ColFilter>>(
+    k('colFiltersV4'),
     {},
   )
   const [search, setSearch] = usePersistentState(k('search'), '')
   const [hideDone, setHideDone] = usePersistentState(k('hideDone'), false)
   const [thisWeekOnly, setThisWeekOnly] = usePersistentState(k('thisWeekOnly'), false)
   const [pinsCollapsed, setPinsCollapsed] = usePersistentState(k('pinsCollapsed'), false)
-  const [showFilter, setShowFilter] = useState(false)
 
   // As-of stepping is meaningful in week view (column = week); disable in month.
   const live = asOfOffset === 0 || viewMode === 'month'
@@ -155,31 +157,30 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     [doneFilter, grid.columns, statusCols, resolveColValue],
   )
 
-  // Columns offered in the 絞り込み panel (configured in sheet settings; default
-  // = member + status columns).
-  const filterCols = useMemo(() => {
-    const byId = new Map(grid.columns.map((c) => [String(c.id), c]))
-    const ids = sheetSettings?.filter_columns
-    if (ids && ids.length)
-      return ids.map((id) => byId.get(String(id))).filter(Boolean) as Column[]
-    return grid.columns.filter((c) => c.type === 'member' || c.type === 'status')
-  }, [grid.columns, sheetSettings])
+  // Per-column filter option metadata (distinct values / month keys / numeric
+  // range), computed from the UNFILTERED rows so header menus always show every
+  // choice. Every attribute column is filterable (要望: 全属性見出し).
+  const filterOptions = useMemo(
+    () => buildColFilterOptions(grid.columns, grid.rows, resolveColValue),
+    [grid.columns, grid.rows, resolveColValue],
+  )
 
+  // A column filter is active whenever its key is present (we delete the key when
+  // a filter no longer narrows anything, so any surviving key means real narrowing).
+  const anyColFilter = Object.keys(colFilters).length > 0
   const filtersActive =
-    search.trim() !== '' ||
-    hideDone ||
-    thisWeekOnly ||
-    Object.values(colFilters).some((v) => v)
+    search.trim() !== '' || hideDone || thisWeekOnly || anyColFilter
 
   const visibleRows = useMemo(() => {
     if (!filtersActive) return grid.rows
     const q = search.trim().toLowerCase()
     const colById = new Map(grid.columns.map((c) => [String(c.id), c]))
-    const colEntries = Object.entries(colFilters).filter(([, v]) => v)
+    const colEntries = Object.entries(colFilters)
     const match = (r: (typeof grid.rows)[number]) => {
-      for (const [colId, val] of colEntries) {
+      for (const [colId, f] of colEntries) {
         const col = colById.get(String(colId))
-        if (col && resolveColValue(r, col) !== val) return false
+        // Row passes only if its resolved value satisfies the column filter.
+        if (col && !matchColFilter(f, resolveColValue(r, col))) return false
       }
       if (hideDone && isRowDone(r)) return false
       if (thisWeekOnly) {
@@ -193,17 +194,12 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
       }
       return true
     }
-    // Keep parent/child integrity: include a matched row, plus its parent and —
-    // when a parent matches — its subtasks (so the roll-up stays meaningful).
-    const matched = new Set<string>()
-    for (const r of grid.rows) if (match(r)) matched.add(String(r.row.id))
-    const show = new Set<string>(matched)
-    for (const r of grid.rows) {
-      const id = String(r.row.id)
-      if (matched.has(id) && r.parentRowId) show.add(r.parentRowId)
-      if (r.parentRowId && matched.has(r.parentRowId)) show.add(id)
-    }
-    return grid.rows.filter((r) => show.has(String(r.row.id)))
+    // Strict filtering (Excel-like): show exactly the rows that match. We do NOT
+    // re-add a filtered-out parent just because a child matched — that made hidden
+    // values (e.g. status「遅延」) reappear. A matched subtask whose parent is
+    // filtered out still renders standalone (GanttGrid shows orphans); a matched
+    // parent keeps its roll-up even with children hidden.
+    return grid.rows.filter(match)
   }, [
     grid.rows,
     grid.columns,
@@ -217,7 +213,13 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     isRowDone,
   ])
 
+  // True when the viewed past week has no recorded snapshot and we're showing the
+  // oldest available record instead (週次スナップショットが残っていない週).
+  const asOfMissing = !live && grid.asOfExact === false
   function stepBack() {
+    // Don't step past the oldest record: once a week with no snapshot is shown,
+    // going further back would keep showing the same oldest record.
+    if (asOfMissing) return
     if (currentWeekIdx + asOfOffset > 1) setAsOfOffset((o) => o - 1)
   }
   function stepFwd() {
@@ -581,34 +583,17 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             )}
           </div>
 
-          <div className="relative">
-            <Button
-              variant={Object.values(colFilters).some((v) => v) ? 'primary' : 'outline'}
-              size="sm"
-              onClick={() => setShowFilter((s) => !s)}
+          {/* Active-filter indicator + clear-all (絞り込みは各列の見出しから) */}
+          {anyColFilter && (
+            <button
+              onClick={() => setColFilters({})}
+              title="すべての列の絞り込みを解除"
+              className="flex items-center gap-1 rounded-[9px] border border-[var(--green)] bg-[var(--green-l)]/15 px-2.5 py-1.5 text-[12px] text-[var(--green-d)] hover:bg-[var(--green-l)]/30"
             >
-              <FilterIcon className="h-[15px] w-[15px]" />
-              絞り込み
-              {filtersActive && (
-                <span className="ml-0.5 rounded-full bg-white/25 px-1.5 text-[10px]">
-                  {visibleRows.length}/{grid.rows.length}
-                </span>
-              )}
-            </Button>
-            {showFilter && (
-              <FilterPopover
-                filterCols={filterCols}
-                rows={grid.rows}
-                colFilters={colFilters}
-                resolveValue={resolveColValue}
-                onChange={(colId, value) =>
-                  setColFilters((f) => ({ ...f, [colId]: value }))
-                }
-                onClear={() => setColFilters({})}
-                onClose={() => setShowFilter(false)}
-              />
-            )}
-          </div>
+              絞り込み {visibleRows.length}/{grid.rows.length}
+              <XIcon className="h-[13px] w-[13px]" />
+            </button>
+          )}
           <Button size="sm" onClick={newRow}>
             <PlusIcon className="h-[15px] w-[15px]" />
             新規行
@@ -616,6 +601,15 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           <Avatar name={user?.name} seed={user?.id} size="sm" />
         </div>
       </div>
+
+      {asOfMissing && (
+        <div className="mx-[22px] mb-1 rounded-[8px] border border-[#E4C9A8] bg-[#FBF3E6] px-3 py-1.5 text-[11.5px] text-[#8A5A1E]">
+          {fmtMD(lineWeek ?? new Date())} 週の記録は残っていません（週次スナップショットの保存開始より前）。
+          {grid.asOfActualWeek
+            ? `残っている最古の記録（${fmtMD(parseDate(grid.asOfActualWeek))} 週）を表示しています。`
+            : '現在の状態を表示しています。'}
+        </div>
+      )}
 
       <Legend rows={grid.rows} defaultMilestones={defaultMilestones} />
 
@@ -643,6 +637,16 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             scrollStorageKey={live ? k(`scroll:${viewMode}`) : undefined}
             focusRowId={focusRowId}
             focusNonce={focusNonce}
+            colFilters={colFilters}
+            filterOptions={filterOptions}
+            onColFilterChange={(colId, next) =>
+              setColFilters((f) => {
+                const c = { ...f }
+                if (next === undefined) delete c[colId]
+                else c[colId] = next
+                return c
+              })
+            }
             onSaveWeek={saveWeek}
             onEditRowCell={saveRowCell}
             onEditRowKey={saveRowKey}
@@ -741,94 +745,5 @@ function SheetTitleInline({ sheetId, name }: { sheetId: string; name: string }) 
     >
       {name}
     </button>
-  )
-}
-
-function FilterPopover({
-  filterCols,
-  rows,
-  colFilters,
-  resolveValue,
-  onChange,
-  onClear,
-  onClose,
-}: {
-  filterCols: Column[]
-  rows: ScheduleRowModel[]
-  colFilters: Record<string, string>
-  resolveValue: (r: ScheduleRowModel, col: Column) => string
-  onChange: (colId: string, value: string) => void
-  onClear: () => void
-  onClose: () => void
-}) {
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    function onDoc(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose()
-    }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
-  }, [onClose])
-
-  // Distinct values present for each configured filter column.
-  const optionsByCol = useMemo(() => {
-    const m = new Map<string, string[]>()
-    for (const col of filterCols) {
-      const set = new Set<string>()
-      for (const r of rows) {
-        const v = resolveValue(r, col)
-        if (v) set.add(v)
-      }
-      m.set(String(col.id), [...set].sort((a, b) => a.localeCompare(b, 'ja')))
-    }
-    return m
-  }, [filterCols, rows, resolveValue])
-
-  return (
-    <div
-      ref={ref}
-      className="absolute right-0 z-40 mt-1.5 w-[260px] rounded-[12px] border border-[var(--line)] bg-[var(--surface)] p-3 shadow-lg"
-    >
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-[12.5px] font-semibold">絞り込み</span>
-        <button
-          onClick={onClose}
-          className="rounded p-0.5 text-[var(--ink3)] hover:bg-[var(--line2)]"
-        >
-          <XIcon className="h-4 w-4" />
-        </button>
-      </div>
-      {filterCols.length === 0 ? (
-        <p className="mb-2 text-[11.5px] text-[var(--ink3)]">
-          絞り込みに使う列が未設定です。シート設定で指定してください。
-        </p>
-      ) : (
-        filterCols.map((col) => (
-          <label key={col.id} className="mb-2 block text-[11.5px] text-[var(--ink2)]">
-            {col.name}
-            <Select
-              className="mt-1 w-full"
-              value={colFilters[String(col.id)] ?? ''}
-              onChange={(e) => onChange(String(col.id), e.target.value)}
-            >
-              <option value="">（すべて）</option>
-              {(optionsByCol.get(String(col.id)) ?? []).map((v) => (
-                <option key={v} value={v}>
-                  {v}
-                </option>
-              ))}
-            </Select>
-          </label>
-        ))
-      )}
-      <div className="mt-1 flex justify-between">
-        <Button variant="ghost" size="sm" onClick={onClear}>
-          クリア
-        </Button>
-        <Button size="sm" onClick={onClose}>
-          閉じる
-        </Button>
-      </div>
-    </div>
   )
 }

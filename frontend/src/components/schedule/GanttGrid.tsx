@@ -14,6 +14,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { ScheduleRowModel } from '@/hooks/useScheduleData'
 import { InlineCell } from '@/components/schedule/InlineCell'
+import { ColumnHeaderMenu } from '@/components/schedule/ColumnHeaderMenu'
+import { filterKindOf } from '@/lib/colFilter'
+import type { ColFilter, ColFilterOptions } from '@/lib/colFilter'
 import { useLookupTargets } from '@/hooks/useLookupTargets'
 import { Avatar } from '@/components/ui/Avatar'
 import { Badge } from '@/components/ui/Badge'
@@ -91,6 +94,24 @@ function sortValueFor(
   lookupValue: (column: Column, row: Row) => string | null,
 ): string | number {
   if (key === SORT_ID) return model.keyValue ?? ''
+  // Summary columns (予定計/実績計/差/進捗/予実差) are computed, not real columns —
+  // sort by their derived numbers. '' sorts empty rows last.
+  switch (key) {
+    case 'plan':
+      return model.gantt.plannedSum
+    case 'actual':
+      return model.gantt.actualSum
+    case 'diff':
+      return model.gantt.plannedSum - model.gantt.actualSum
+    case 'prog':
+      return model.progress ?? ''
+    case 'pace': {
+      const hasPlan = model.gantt.plannedSum > 0
+      return model.progress != null && hasPlan
+        ? model.progress - model.expectedPct * 100
+        : ''
+    }
+  }
   if (!column) return ''
   if (column.type === 'status') {
     // Sort by the resolved/display badge label.
@@ -124,13 +145,6 @@ function compareValues(a: string | number, b: string | number): number {
   if (bEmpty) return -1
   if (typeof a === 'number' && typeof b === 'number') return a - b
   return String(a).localeCompare(String(b), 'ja')
-}
-
-/** Next sort state when a header is clicked: asc → desc → none (null). */
-function cycleSort(prev: SortState | null, key: SortKey): SortState | null {
-  if (!prev || prev.key !== key) return { key, dir: 'asc' }
-  if (prev.dir === 'asc') return { key, dir: 'desc' }
-  return null
 }
 
 function SortArrow({ dir }: { dir: SortDir | null }) {
@@ -250,6 +264,11 @@ interface Props {
   focusRowId?: string | null
   /** Changes on each notification click so re-clicking the same task re-flashes. */
   focusNonce?: number
+  /** Excel-style header filters: current per-column selections + option metadata
+   *  (built from the UNFILTERED rows) + a change handler. Keyed by column id. */
+  colFilters: Record<string, ColFilter>
+  filterOptions: Map<string, ColFilterOptions>
+  onColFilterChange: (colId: string, next: ColFilter | undefined) => void
   onSaveWeek: (edit: WeekEdit) => void
   onEditRowCell: (row: Row, colId: string, value: CellValue) => void
   onEditRowKey: (row: Row, key: string) => void
@@ -291,6 +310,9 @@ export function GanttGrid({
   scrollStorageKey,
   focusRowId,
   focusNonce,
+  colFilters,
+  filterOptions,
+  onColFilterChange,
   onSaveWeek,
   onEditRowCell,
   onEditRowKey,
@@ -307,6 +329,8 @@ export function GanttGrid({
   // Transient highlight for a notification-focused task (cleared after a few s).
   const [highlightId, setHighlightId] = useState<string | null>(null)
   const [sort, setSort] = useState<SortState | null>(null)
+  // Which column header menu is open (column id, or SORT_ID for the ID column).
+  const [openMenu, setOpenMenu] = useState<SortKey | null>(null)
   // Collapsed parents (子タスクを畳む). Empty = all expanded.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const toggleCollapse = (rowId: string) =>
@@ -434,11 +458,14 @@ export function GanttGrid({
     return out
   }, [rows, sort, columns, members, lookupValue, collapsed])
 
-  function onSortClick(key: SortKey) {
-    setSort((prev) => cycleSort(prev, key))
+  // Explicit sort from a header menu (昇順/降順/解除). null clears.
+  function setSortDir(key: SortKey, dir: SortDir | null) {
+    setSort(dir ? { key, dir } : null)
   }
   const dirFor = (key: SortKey): SortDir | null =>
     sort?.key === key ? sort.dir : null
+  const toggleMenu = (key: SortKey) =>
+    setOpenMenu((cur) => (cur === key ? null : key))
 
   // Spreadsheet-style cell navigation (Feature 1): from the currently-edited week
   // cell, move to the next editable cell in `dir` (Tab/Shift+Tab/arrows/Enter).
@@ -705,32 +732,42 @@ export function GanttGrid({
             className="sticky top-0 z-30 flex bg-[#F4F1E8]"
             style={{ height: HEAD_H, width: totalW }}
           >
-            {/* pinned header (sortable: ID + frozen attribute columns) */}
+            {/* pinned header (menu: ID sort-only + frozen attribute columns) */}
             <div
               className="sticky left-0 z-40 flex flex-shrink-0 items-center border-r border-[var(--line)] bg-[#F4F1E8]"
               style={{ width: pinnedW, height: HEAD_H }}
             >
-              <HeadCell
-                style={{ width: ID_W }}
+              <IdHead
+                open={openMenu === SORT_ID}
                 sortDir={dirFor(SORT_ID)}
-                onClick={() => onSortClick(SORT_ID)}
-              >
-                ID
-              </HeadCell>
+                onToggleMenu={() => toggleMenu(SORT_ID)}
+                onSort={(dir) => setSortDir(SORT_ID, dir)}
+              />
               {pinnedCols.map((c) => (
                 <AttrHead
                   key={c.id}
                   col={c}
                   width={cw(c)}
                   sortDir={dirFor(c.id)}
-                  onSort={() => onSortClick(c.id)}
+                  filter={colFilters[String(c.id)]}
+                  options={filterOptions.get(String(c.id))}
+                  open={openMenu === c.id}
+                  onToggleMenu={() => toggleMenu(c.id)}
+                  onSort={(dir) => setSortDir(c.id, dir)}
+                  onFilter={(next) => onColFilterChange(String(c.id), next)}
                   onResizeStart={(e) => startResize(e, c.id, cw(c))}
                   onResizeReset={() => resetWidth(c.id)}
                 />
               ))}
-              <SummaryHeads cols={pinnedSummary} />
+              <SummaryHeads
+                cols={pinnedSummary}
+                openMenu={openMenu}
+                dirFor={dirFor}
+                onToggleMenu={toggleMenu}
+                onSort={setSortDir}
+              />
             </div>
-            {/* attr headers (scroll, sortable) */}
+            {/* attr headers (scroll; menu = sort + filter) */}
             <div className="flex flex-shrink-0" style={{ width: attrW, height: HEAD_H }}>
               {scrollCols.map((c) => (
                 <AttrHead
@@ -738,12 +775,23 @@ export function GanttGrid({
                   col={c}
                   width={cw(c)}
                   sortDir={dirFor(c.id)}
-                  onSort={() => onSortClick(c.id)}
+                  filter={colFilters[String(c.id)]}
+                  options={filterOptions.get(String(c.id))}
+                  open={openMenu === c.id}
+                  onToggleMenu={() => toggleMenu(c.id)}
+                  onSort={(dir) => setSortDir(c.id, dir)}
+                  onFilter={(next) => onColFilterChange(String(c.id), next)}
                   onResizeStart={(e) => startResize(e, c.id, cw(c))}
                   onResizeReset={() => resetWidth(c.id)}
                 />
               ))}
-              <SummaryHeads cols={scrollSummary} />
+              <SummaryHeads
+                cols={scrollSummary}
+                openMenu={openMenu}
+                dirFor={dirFor}
+                onToggleMenu={toggleMenu}
+                onSort={setSortDir}
+              />
             </div>
             {/* year band (top) + month spans (below) + today caption */}
             <div className="relative" style={{ width: gridW, height: HEAD_H }}>
@@ -1253,14 +1301,20 @@ function HeadCell({
   style,
   sortDir,
   onClick,
+  hasMenu,
+  filterActive,
 }: {
   children: React.ReactNode
   className?: string
   style?: React.CSSProperties
   /** Current sort direction for this column, or null when inactive. */
   sortDir?: SortDir | null
-  /** When provided, the header becomes a sort toggle button. */
+  /** When provided, the header becomes a clickable trigger (menu or sort). */
   onClick?: () => void
+  /** Show a ▾ caret hinting a click opens the sort/filter menu. */
+  hasMenu?: boolean
+  /** Show a filled funnel when this column has an active filter. */
+  filterActive?: boolean
 }) {
   const base =
     'flex h-full flex-shrink-0 items-center overflow-hidden text-ellipsis whitespace-nowrap px-2.5 text-[11px] font-medium text-[var(--ink3)]'
@@ -1269,17 +1323,25 @@ function HeadCell({
       <button
         type="button"
         onClick={onClick}
-        title="クリックで並べ替え（昇順→降順→解除）"
+        title={hasMenu ? 'クリックで並べ替え・絞り込み' : 'クリックで並べ替え'}
         className={cn(
           base,
           'cursor-pointer select-none hover:text-[var(--ink2)]',
-          sortDir && 'text-[var(--ink)]',
+          (sortDir || filterActive) && 'text-[var(--ink)]',
           className,
         )}
         style={style}
       >
         <span className="overflow-hidden text-ellipsis whitespace-nowrap">{children}</span>
         <SortArrow dir={sortDir ?? null} />
+        {filterActive && (
+          <span className="ml-0.5 text-[9px] leading-none text-[var(--green-d)]" title="絞り込み中">
+            ⏷
+          </span>
+        )}
+        {hasMenu && !filterActive && (
+          <span className="ml-0.5 text-[8px] leading-none text-[var(--ink3)]">▾</span>
+        )}
       </button>
     )
   }
@@ -1290,26 +1352,86 @@ function HeadCell({
   )
 }
 
-/** Sortable attribute-column header + a drag handle on its right edge for manual
- *  width. Drag to resize; double-click the handle to return to auto (content) fit. */
+/** ID column header — sort-only menu (no filter; key_value is the row key). */
+function IdHead({
+  open,
+  sortDir,
+  onToggleMenu,
+  onSort,
+}: {
+  open: boolean
+  sortDir: SortDir | null
+  onToggleMenu: () => void
+  onSort: (dir: SortDir | null) => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  return (
+    <div ref={ref} className="relative flex-shrink-0" style={{ width: ID_W }}>
+      <HeadCell style={{ width: ID_W }} sortDir={sortDir} hasMenu onClick={onToggleMenu}>
+        ID
+      </HeadCell>
+      {open && (
+        <ColumnHeaderMenu
+          colName="ID"
+          kind="values"
+          options={{ kind: 'values', values: [], hasBlank: false, numMin: null, numMax: null }}
+          filter={undefined}
+          sortDir={sortDir}
+          filterable={false}
+          anchorRef={ref}
+          onSort={onSort}
+          onFilter={() => {}}
+          onClose={onToggleMenu}
+        />
+      )}
+    </div>
+  )
+}
+
+/** Attribute-column header: click opens the sort + filter menu; a drag handle on
+ *  the right edge resizes (double-click restores auto/content width). */
 function AttrHead({
   col,
   width,
   sortDir,
+  filter,
+  options,
+  open,
+  onToggleMenu,
   onSort,
+  onFilter,
   onResizeStart,
   onResizeReset,
 }: {
   col: Column
   width: number
   sortDir: SortDir | null
-  onSort: () => void
+  filter: ColFilter | undefined
+  options: ColFilterOptions | undefined
+  open: boolean
+  onToggleMenu: () => void
+  onSort: (dir: SortDir | null) => void
+  onFilter: (next: ColFilter | undefined) => void
   onResizeStart: (e: React.MouseEvent) => void
   onResizeReset: () => void
 }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const opts: ColFilterOptions = options ?? {
+    kind: filterKindOf(col),
+    values: [],
+    hasBlank: false,
+    numMin: null,
+    numMax: null,
+  }
   return (
-    <div className="relative flex-shrink-0" style={{ width }}>
-      <HeadCell style={{ width }} sortDir={sortDir} onClick={onSort}>
+    <div ref={ref} className="relative flex-shrink-0" style={{ width }}>
+      <HeadCell
+        style={{ width }}
+        sortDir={sortDir}
+        hasMenu
+        filterActive={!!filter}
+        onClick={onToggleMenu}
+      >
         {col.name}
       </HeadCell>
       <div
@@ -1318,6 +1440,20 @@ function AttrHead({
         title="ドラッグで列幅を変更（ダブルクリックで自動幅に戻す）"
         className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-[var(--green-l)]/40"
       />
+      {open && (
+        <ColumnHeaderMenu
+          colName={col.name}
+          kind={filterKindOf(col)}
+          options={opts}
+          filter={filter}
+          sortDir={sortDir}
+          filterable
+          anchorRef={ref}
+          onSort={onSort}
+          onFilter={onFilter}
+          onClose={onToggleMenu}
+        />
+      )}
     </div>
   )
 }
@@ -1877,16 +2013,78 @@ function ProgressCell({
   )
 }
 
-/** Header cells for a subset of the summary columns (予定計/実績計/差/進捗). */
-function SummaryHeads({ cols }: { cols: ReadonlyArray<SummaryDescriptor> }) {
+/** Header cells for a subset of the summary columns (予定計/実績計/差/進捗/予実差).
+ *  Each is sortable via a sort-only menu (要望: 設定外の集計列も並べ替え可能に). */
+function SummaryHeads({
+  cols,
+  openMenu,
+  dirFor,
+  onToggleMenu,
+  onSort,
+}: {
+  cols: ReadonlyArray<SummaryDescriptor>
+  openMenu: SortKey | null
+  dirFor: (key: SortKey) => SortDir | null
+  onToggleMenu: (key: SortKey) => void
+  onSort: (key: SortKey, dir: SortDir | null) => void
+}) {
   return (
     <>
       {cols.map((col) => (
-        <HeadCell key={col.key} style={{ width: col.w }} className="justify-end text-right">
-          {col.label}
-        </HeadCell>
+        <SummaryHead
+          key={col.key}
+          col={col}
+          open={openMenu === col.key}
+          sortDir={dirFor(col.key)}
+          onToggleMenu={() => onToggleMenu(col.key)}
+          onSort={(dir) => onSort(col.key, dir)}
+        />
       ))}
     </>
+  )
+}
+
+/** One summary-column header — sort-only menu (no filter; the values are derived). */
+function SummaryHead({
+  col,
+  open,
+  sortDir,
+  onToggleMenu,
+  onSort,
+}: {
+  col: SummaryDescriptor
+  open: boolean
+  sortDir: SortDir | null
+  onToggleMenu: () => void
+  onSort: (dir: SortDir | null) => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  return (
+    <div ref={ref} className="relative flex-shrink-0" style={{ width: col.w }}>
+      <HeadCell
+        style={{ width: col.w }}
+        className="justify-end text-right"
+        sortDir={sortDir}
+        hasMenu
+        onClick={onToggleMenu}
+      >
+        {col.label}
+      </HeadCell>
+      {open && (
+        <ColumnHeaderMenu
+          colName={col.label}
+          kind="values"
+          options={{ kind: 'values', values: [], hasBlank: false, numMin: null, numMax: null }}
+          filter={undefined}
+          sortDir={sortDir}
+          filterable={false}
+          anchorRef={ref}
+          onSort={onSort}
+          onFilter={() => {}}
+          onClose={onToggleMenu}
+        />
+      )}
+    </div>
   )
 }
 

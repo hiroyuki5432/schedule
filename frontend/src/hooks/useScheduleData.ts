@@ -13,7 +13,7 @@ import {
   weekIndex,
 } from '@/lib/dates'
 import { buildRowGantt } from '@/lib/gantt'
-import type { RowGantt } from '@/lib/gantt'
+import type { MilestoneDisplay, RowGantt } from '@/lib/gantt'
 import { periodForDate } from '@/lib/period'
 import type { ClosingSettings } from '@/lib/period'
 import { useOrg } from '@/hooks/useSheets'
@@ -93,6 +93,13 @@ export interface ScheduleData {
   /** Month view only: column-start ISO → the ISO week_starts that month covers
    *  (used to distribute a month-cell edit back across its weeks). */
   monthWeeks?: Map<string, string[]>
+  /** As-of view: true when the requested past week has an exact recorded
+   *  snapshot. False when the data shown is the oldest available record because
+   *  the requested week predates all snapshots. Undefined in live view. */
+  asOfExact?: boolean
+  /** As-of view: ISO week the displayed data actually represents (may be newer
+   *  than the requested week when records don't go back that far). */
+  asOfActualWeek?: string | null
 }
 
 export type ViewMode = 'week' | 'month'
@@ -516,6 +523,9 @@ export function useScheduleData({
     // Weekly-reset of the manual progress: show it only for the viewed week
     // (live current week, or the as-of week when stepping back).
     const progressWeeklyReset = detailQ.data?.sheet?.settings?.progress_weekly_reset === true
+    // Milestone diamond visibility is a sheet-wide setting (シート設定で表示制御).
+    const milestoneDisplay: MilestoneDisplay =
+      detailQ.data?.sheet?.settings?.milestone_display ?? 'all'
     const viewedWeekIso = asOfWeek ?? currentWeekIso
 
     const built: ScheduleRowModel[] = sheetRows.map((row) => {
@@ -560,6 +570,7 @@ export function useScheduleData({
         changedWeekIdx,
         startDate: schedStart,
         endDate: schedEnd,
+        milestoneDisplay,
       })
 
       const assigneeId = memberCol
@@ -700,6 +711,14 @@ export function useScheduleData({
       // these like weekly columns (one per month); edits distribute back to weeks.
       const cols = buildMonthCols(weeks, closing)
       const monthWeeks = new Map<string, string[]>()
+      // Week index → its month-column index. startIdx/finishIdx were computed in
+      // WEEK units (against the weekly grid); the month grid has far fewer, wider
+      // columns, so the span/progress bar and dependency lines must be re-expressed
+      // in month-column units or they render shifted right (バグ: 線がずれる).
+      const weekToMonth = new Array(weeks.length).fill(0)
+      cols.forEach((c, ci) => {
+        for (const k of c.weekIdxs) weekToMonth[k] = ci
+      })
       for (const c of cols) {
         monthWeeks.set(
           isoKey(c.date),
@@ -707,6 +726,7 @@ export function useScheduleData({
         )
       }
       const monthIdx = cols.findIndex((c) => c.weekIdxs.includes(currentWeekIdx))
+      const toMonth = (i: number | null) => (i == null ? null : weekToMonth[i] ?? null)
       return {
         loading,
         detail: detailQ.data,
@@ -714,7 +734,12 @@ export function useScheduleData({
         weeks: cols.map((c) => c.date),
         monthStart: cols.map(() => true),
         currentWeekIdx: monthIdx < 0 ? 0 : monthIdx,
-        rows: built.map((r) => ({ ...r, gantt: aggregateRowToMonths(r.gantt, cols) })),
+        rows: built.map((r) => ({
+          ...r,
+          gantt: aggregateRowToMonths(r.gantt, cols),
+          startIdx: toMonth(r.startIdx),
+          finishIdx: toMonth(r.finishIdx),
+        })),
         monthWeeks,
       }
     }
@@ -749,5 +774,9 @@ export function useScheduleData({
     closing,
   ])
 
-  return model
+  // Surface how faithful the as-of view is, so the page can warn when a requested
+  // past week has no record and the oldest available snapshot is shown instead.
+  const asOfExact = asOfWeek ? snapshotQ.data?.exact ?? false : undefined
+  const asOfActualWeek = asOfWeek ? snapshotQ.data?.as_of_week ?? null : undefined
+  return { ...model, asOfExact, asOfActualWeek }
 }

@@ -494,42 +494,28 @@ function SheetLevelSettings({
             </span>
           </label>
 
-          <div className="text-[12px] text-[var(--ink2)]">
-            絞り込みに使う列
-            <div className="mt-1 flex flex-wrap gap-2">
-              {columns.map((c) => {
-                const ids = (settings.filter_columns ?? []).map(String)
-                const on = ids.includes(String(c.id))
-                return (
-                  <label
-                    key={c.id}
-                    className={cn(
-                      'flex cursor-pointer items-center gap-1.5 rounded-[8px] border px-2 py-1 text-[12px]',
-                      on
-                        ? 'border-[var(--green)] bg-[var(--green-l)]/10'
-                        : 'border-[var(--line)] hover:bg-[var(--line2)]',
-                    )}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      className="h-3.5 w-3.5 accent-[var(--green)]"
-                      onChange={() => {
-                        const next = on
-                          ? ids.filter((x) => x !== String(c.id))
-                          : [...ids, String(c.id)]
-                        mutation.mutate({ settings: { ...settings, filter_columns: next } })
-                      }}
-                    />
-                    {c.name}
-                  </label>
-                )
-              })}
-            </div>
+          <label className="text-[12px] text-[var(--ink2)]">
+            マイルストン◇の表示
+            <Select
+              className="mt-1 w-full"
+              value={settings.milestone_display ?? 'all'}
+              onChange={(e) =>
+                mutation.mutate({
+                  settings: {
+                    ...settings,
+                    milestone_display: e.target.value as 'all' | 'none' | 'last',
+                  },
+                })
+              }
+            >
+              <option value="all">すべて表示</option>
+              <option value="last">最後のマイルストンのみ</option>
+              <option value="none">非表示</option>
+            </Select>
             <span className="mt-1 block text-[11px] text-[var(--ink3)]">
-              絞り込みパネルに出す列（未選択なら担当・ステータス）。
+              ガントの◇（節目）の表示。シート共通で全員に反映されます。
             </span>
-          </div>
+          </label>
 
           <label className="flex items-start gap-2 text-[12px] text-[var(--ink2)]">
             <input

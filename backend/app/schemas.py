@@ -241,6 +241,12 @@ class MilestoneIn(BaseModel):
 class SnapshotOut(BaseModel):
     rows: list[dict[str, Any]]
     effort: list[dict[str, Any]]
+    # Week the returned data actually represents (nearest recorded snapshot <=
+    # requested; oldest record when the request predates all snapshots). None when
+    # no snapshot exists at all (brand-new sheet → live state).
+    as_of_week: Optional[str] = None
+    # True when as_of_week == the requested week (an exact record for that week).
+    exact: bool = False
 
 
 class ChangeOut(BaseModel):

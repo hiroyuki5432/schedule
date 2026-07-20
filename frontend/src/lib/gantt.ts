@@ -57,6 +57,9 @@ export interface RowGantt {
   actualSum: number
 }
 
+/** Which milestone diamonds (◇) to draw: every one, none, or only the last. */
+export type MilestoneDisplay = 'all' | 'none' | 'last'
+
 interface BuildArgs {
   weeks: Date[]
   /** week_start (YYYY-MM-DD) -> effort for this row. */
@@ -70,6 +73,8 @@ interface BuildArgs {
    *  this range (range外は無色). When omitted, legacy behavior (start=0/end=chart). */
   startDate?: string | null
   endDate?: string | null
+  /** Milestone diamond visibility (default 'all'). */
+  milestoneDisplay?: MilestoneDisplay
 }
 
 interface Segment {
@@ -141,14 +146,25 @@ function buildSegments(
 }
 
 /** Planned (boundary) + actual (completion) diamond positions by week index. */
-function buildMarkers(weeks: Date[], sorted: Milestone[]) {
+function buildMarkers(
+  weeks: Date[],
+  sorted: Milestone[],
+  display: MilestoneDisplay = 'all',
+) {
   const planned = new Map<number, MarkerInfo>()
   const actual = new Map<number, MarkerInfo>()
+  if (display === 'none') return { planned, actual }
   const inRange = (i: number) => i >= 0 && i < weeks.length
+  // 'last' shows only the final milestone-kind entry (sorted asc by order/date).
+  const lastMs =
+    display === 'last'
+      ? [...sorted].reverse().find((m) => kindOf(m) === 'milestone')
+      : null
   for (const m of sorted) {
     // Only milestone-kind entries draw a diamond (◇). Phase boundaries are shown
     // by the color change of their segment, not a marker.
     if (kindOf(m) !== 'milestone') continue
+    if (display === 'last' && m !== lastMs) continue
     const pIdx = weekIndex(weeks, parseDate(m.boundary_date))
     const actualDate = m.actual_date ?? null
     // Actual diamond: at the actual_date week; fall back to the boundary when
@@ -184,6 +200,7 @@ export function buildRowGantt({
   changedWeekIdx,
   startDate,
   endDate,
+  milestoneDisplay = 'all',
 }: BuildArgs): RowGantt {
   const sorted = [...milestones].sort(
     (a, b) =>
@@ -191,7 +208,11 @@ export function buildRowGantt({
       parseDate(a.boundary_date).getTime() - parseDate(b.boundary_date).getTime(),
   )
   const segs = buildSegments(weeks, sorted, currentWeekIdx, startDate, endDate)
-  const { planned: plannedM, actual: actualM } = buildMarkers(weeks, sorted)
+  const { planned: plannedM, actual: actualM } = buildMarkers(
+    weeks,
+    sorted,
+    milestoneDisplay,
+  )
   const cells: Array<WeekCell | null> = weeks.map(() => null)
   let plannedSum = 0
   let actualSum = 0
