@@ -258,6 +258,52 @@ class WorkLog(Base):
     )
 
 
+class RowEvent(Base):
+    """One recorded change to a task (変更履歴 / 変化点).
+
+    Written synchronously by the row and effort endpoints. Unlike the weekly
+    snapshot diff (which can only tell you "something changed between these two
+    weeks"), this keeps the exact who/when/what for every edit.
+
+    Labels are snapshots taken at write time (`field_label` holds the column name
+    as it was then), so renaming or deleting a column never makes old history
+    unreadable. `row_id` is SET NULL on task delete while `row_key` keeps the id
+    the task had, so the deletion itself stays in the log.
+    """
+
+    __tablename__ = "row_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    sheet_id: Mapped[int] = mapped_column(
+        ForeignKey("sheets.id", ondelete="CASCADE"), nullable=False
+    )
+    row_id: Mapped[int | None] = mapped_column(
+        ForeignKey("rows.id", ondelete="SET NULL"), nullable=True
+    )
+    # key_value at the time of the change (survives the row being deleted).
+    row_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # 'create' | 'update' | 'delete' | 'effort'
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Human-readable name of what changed (column name / 工数 2026-06-15 / ID …).
+    field_label: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    old_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_rowevent_row_at", "row_id", "created_at"),
+        Index("ix_rowevent_sheet_at", "sheet_id", "created_at"),
+    )
+
+
 class Notification(Base):
     """An in-app notification (ベル). Created lazily on access — no cron:
 

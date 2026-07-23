@@ -6,6 +6,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { TableSkeleton } from '@/components/ui/Skeleton'
 import { Button } from '@/components/ui/Button'
 import { useAuth } from '@/hooks/useAuth'
 import { toast } from '@/lib/toast'
@@ -78,7 +80,13 @@ export function AllUsersWorklogPage() {
         <Card>
           <CardBody className="px-0 py-0">
             {q.isLoading ? (
-              <div className="px-5 py-8 text-center text-[var(--ink3)]">読み込み中…</div>
+              <TableSkeleton rows={6} cols={5} />
+            ) : users.length === 0 ? (
+              <EmptyState
+                compact
+                title="この日の入力はまだありません"
+                body="メンバーが実績入力を保存すると、ここに一覧で出ます。上の日付を変えると別の日を確認できます。"
+              />
             ) : (
               <table className="w-full border-collapse text-[12.5px]">
                 <thead>

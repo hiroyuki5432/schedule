@@ -1,18 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { usePersistentState } from '@/hooks/usePersistentState'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useMembers, useWeekStartWeekday } from '@/hooks/useSheets'
 import { useScheduleData } from '@/hooks/useScheduleData'
 import type { ViewMode } from '@/hooks/useScheduleData'
 import { useEffortMutation } from '@/hooks/useEffortMutation'
+import { useEffortBulkMutation } from '@/hooks/useEffortBulkMutation'
+import type { BulkEffortEdit } from '@/hooks/useEffortBulkMutation'
 import { useRowMutation } from '@/hooks/useRowMutation'
+import { useUndo, useUndoHotkeys } from '@/hooks/useUndo'
+import type { UndoDirection } from '@/hooks/useUndo'
 import * as api from '@/api/client'
 import { GanttGrid } from '@/components/schedule/GanttGrid'
 import type { WeekEdit } from '@/components/schedule/GanttGrid'
 import { Legend } from '@/components/schedule/Legend'
 import { MilestoneEditor } from '@/components/schedule/MilestoneEditor'
 import { DependencyEditor } from '@/components/schedule/DependencyEditor'
+import { HistoryPanel } from '@/components/schedule/HistoryPanel'
+import { GridSkeleton } from '@/components/ui/Skeleton'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { SaveStatus } from '@/components/SaveStatus'
 import { Button } from '@/components/ui/Button'
 import { Avatar } from '@/components/ui/Avatar'
 import { Input } from '@/components/ui/Input'
@@ -23,7 +31,23 @@ import type { ColFilter } from '@/lib/colFilter'
 import { addWeeks, fmtISO, fmtMD, parseDate, startOfWeek } from '@/lib/dates'
 import { phaseWeightByName, redistributeMilestones } from '@/lib/milestones'
 import { cn } from '@/lib/format'
+import { toast } from '@/lib/toast'
 import type { CellValue, Column, NotificationItem, Row } from '@/types/api'
+
+/** One reversible edit. Entries hold DATA only — never a captured row object —
+ *  so undoing later uses the row's current version instead of a stale one. */
+type UndoEntry =
+  | { label: string; kind: 'effort'; edits: WeekEdit[] }
+  | {
+      label: string
+      kind: 'cell'
+      rowId: string
+      colId: string
+      before: CellValue
+      after: CellValue
+    }
+  | { label: string; kind: 'progress'; rowId: string; before: number | null; after: number | null }
+  | { label: string; kind: 'key'; rowId: string; before: string; after: string }
 
 const VIEW_MODES: Array<{ m: ViewMode; label: string }> = [
   { m: 'week', label: '週' },
@@ -40,6 +64,7 @@ interface Props {
 export function SchedulePage({ sheetId, sheetName }: Props) {
   const { user } = useAuth()
   const qc = useQueryClient()
+  const navigate = useNavigate()
   // Notification deep-link: ?focus=<rowId>&t=<nonce> scrolls to + highlights a task.
   const [searchParams] = useSearchParams()
   const focusRowId = searchParams.get('focus')
@@ -59,6 +84,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const [asOfOffset, setAsOfOffset] = useState(0)
   const [milestoneRow, setMilestoneRow] = useState<Row | null>(null)
   const [depRow, setDepRow] = useState<Row | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [showDepLines, setShowDepLines] = usePersistentState(k('showDepLines'), false)
   // Excel-style per-column header filters + full-text search + quick toggles
   // (hide-done / this-week-only). Each column keeps a ColFilter: a checked value
@@ -114,7 +140,13 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   )
 
   const effortMut = useEffortMutation(sheetId)
+  const bulkEffortMut = useEffortBulkMutation(sheetId)
   const rowMut = useRowMutation(sheetId)
+
+  // Undo/redo needs the CURRENT rows when an entry is replayed (versions move on
+  // after every save), so it reads them through a ref rather than a closure.
+  const rowsRef = useRef(grid.rows)
+  rowsRef.current = grid.rows
 
   const memberName = useMemo(
     () => new Map(members.map((m) => [String(m.id), m.name])),
@@ -229,53 +261,150 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     setAsOfOffset(0)
   }
 
-  function saveWeek(edit: WeekEdit) {
-    // Month view: the edited "week" is a month column. Distribute the entered
-    // total evenly across that month's weeks (remainder on the first week),
-    // writing the same field (past month → actual, else planned).
-    if (viewMode === 'month' && grid.monthWeeks) {
-      const weeksOfMonth = grid.monthWeeks.get(edit.weekStart) ?? [edit.weekStart]
-      const n = weeksOfMonth.length || 1
-      const total = edit.value ?? 0
-      const share = Math.round((total / n) * 100) / 100
-      weeksOfMonth.forEach((ws, i) => {
-        const value =
-          total === 0
-            ? null
-            : i === 0
-              ? Math.round((total - share * (n - 1)) * 100) / 100
-              : share
-        effortMut.mutate({ rowId: edit.rowId, weekStart: ws, field: edit.field, value })
-      })
+  /** One grid edit → the actual per-week writes. In month view the entered total
+   *  is spread evenly over that month's weeks (remainder on the first week). */
+  const expandEdit = useCallback(
+    (edit: WeekEdit, value: number | null): BulkEffortEdit[] => {
+      if (viewMode === 'month' && grid.monthWeeks) {
+        const weeksOfMonth = grid.monthWeeks.get(edit.weekStart) ?? [edit.weekStart]
+        const n = weeksOfMonth.length || 1
+        const total = value ?? 0
+        const share = Math.round((total / n) * 100) / 100
+        return weeksOfMonth.map((ws, i) => ({
+          rowId: edit.rowId,
+          weekStart: ws,
+          field: edit.field,
+          value:
+            total === 0
+              ? null
+              : i === 0
+                ? Math.round((total - share * (n - 1)) * 100) / 100
+                : share,
+        }))
+      }
+      return [
+        { rowId: edit.rowId, weekStart: edit.weekStart, field: edit.field, value },
+      ]
+    },
+    [viewMode, grid.monthWeeks],
+  )
+
+  /** Write a cell without recording undo — shared by the editor and by replay. */
+  const writeCell = useCallback(
+    (row: Row, colId: string, value: CellValue) => {
+      const col = grid.columns.find((c) => String(c.id) === String(colId))
+      // 開始日/完了日 (sched_role) columns also re-distribute the row's ◇ dates.
+      if (col?.config?.sched_role) {
+        void saveSpanCell(row, col, value)
+        return
+      }
+      const patch: Record<string, CellValue> = { [colId]: value }
+      // Weekly-reset columns: stamp the current week so the value shows this week
+      // and clears next week (visible again when stepping back to this week).
+      if (col?.config?.weekly_reset) patch[`__wk_${colId}`] = currentWeekIso
+      rowMut.mutate({ row, patch })
+    },
+    // saveSpanCell is a hoisted function declaration in this component.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [grid.columns, currentWeekIso, rowMut],
+  )
+
+  const applyUndoEntry = useCallback(
+    (entry: UndoEntry, dir: UndoDirection) => {
+      if (entry.kind === 'effort') {
+        const items = entry.edits.flatMap((e) =>
+          expandEdit(e, dir === 'undo' ? e.prev : e.value),
+        )
+        bulkEffortMut.mutate(items)
+        return
+      }
+      const model = rowsRef.current.find((r) => String(r.row.id) === entry.rowId)
+      if (!model) {
+        toast.show('対象の行が見つかりませんでした（削除された可能性があります）', 'warn')
+        return
+      }
+      const row = model.row
+      if (entry.kind === 'cell') {
+        writeCell(row, entry.colId, dir === 'undo' ? entry.before : entry.after)
+      } else if (entry.kind === 'progress') {
+        rowMut.mutate({ row, patch: {}, progress: dir === 'undo' ? entry.before : entry.after })
+      } else {
+        rowMut.mutate({ row, patch: {}, keyValue: dir === 'undo' ? entry.before : entry.after })
+      }
+    },
+    [expandEdit, bulkEffortMut, writeCell, rowMut],
+  )
+
+  // The stack resets per sheet: recorded row ids mean nothing on another sheet.
+  const undo = useUndo<UndoEntry>(applyUndoEntry, sheetId)
+
+  const doUndo = useCallback(() => {
+    const entry = undo.undo()
+    if (!entry) {
+      toast.show('元に戻せる操作はありません', 'info', 2000)
       return
     }
-    effortMut.mutate({
-      rowId: edit.rowId,
-      weekStart: edit.weekStart,
-      field: edit.field,
-      value: edit.value,
-    })
+    toast.show(`「${entry.label}」を元に戻しました`, 'success', 2500)
+  }, [undo])
+
+  const doRedo = useCallback(() => {
+    const entry = undo.redo()
+    if (!entry) {
+      toast.show('やり直せる操作はありません', 'info', 2000)
+      return
+    }
+    toast.show(`「${entry.label}」をやり直しました`, 'success', 2500)
+  }, [undo])
+
+  useUndoHotkeys(doUndo, doRedo)
+
+  function saveWeek(edit: WeekEdit) {
+    if (edit.value === edit.prev) return
+    undo.push({ kind: 'effort', label: '工数の入力', edits: [edit] })
+    for (const item of expandEdit(edit, edit.value)) effortMut.mutate(item)
+  }
+
+  /** Range paste / range clear — one request for the whole block. */
+  function saveWeeksBulk(edits: WeekEdit[]) {
+    if (edits.length === 0) return
+    undo.push({ kind: 'effort', label: `工数 ${edits.length}セルの一括編集`, edits })
+    bulkEffortMut.mutate(edits.flatMap((e) => expandEdit(e, e.value)))
   }
 
   function saveRowCell(row: Row, colId: string, value: CellValue) {
     const col = grid.columns.find((c) => String(c.id) === String(colId))
-    // 開始日/完了日 (sched_role) columns also re-distribute the row's ◇ dates.
-    if (col?.config?.sched_role) {
-      void saveSpanCell(row, col, value)
-      return
-    }
-    const patch: Record<string, CellValue> = { [colId]: value }
-    // Weekly-reset columns: stamp the current week so the value shows this week
-    // and clears next week (visible again when stepping back to this week).
-    if (col?.config?.weekly_reset) patch[`__wk_${colId}`] = currentWeekIso
-    rowMut.mutate({ row, patch })
+    const before = row.data[colId] ?? null
+    if (before === value) return
+    undo.push({
+      kind: 'cell',
+      label: col?.name ?? '項目の変更',
+      rowId: String(row.id),
+      colId,
+      before,
+      after: value,
+    })
+    writeCell(row, colId, value)
   }
 
   function saveRowKey(row: Row, key: string) {
+    undo.push({
+      kind: 'key',
+      label: 'IDの変更',
+      rowId: String(row.id),
+      before: row.key_value,
+      after: key,
+    })
     rowMut.mutate({ row, patch: {}, keyValue: key })
   }
 
   function saveProgress(row: Row, value: number | null) {
+    undo.push({
+      kind: 'progress',
+      label: '進捗の変更',
+      rowId: String(row.id),
+      before: row.progress,
+      after: value,
+    })
     rowMut.mutate({ row, patch: {}, progress: value })
   }
 
@@ -446,6 +575,40 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          <SaveStatus />
+
+          {/* undo / redo — the keyboard shortcuts exist too, but most people
+              won't guess that a web grid supports Ctrl+Z unless it's shown. */}
+          <div className="flex items-center overflow-hidden rounded-[9px] border border-[var(--line)] bg-[var(--surface)]">
+            <button
+              onClick={doUndo}
+              disabled={!undo.canUndo}
+              title="元に戻す（Ctrl+Z）"
+              aria-label="元に戻す"
+              className="px-2.5 py-1.5 text-[13px] leading-none text-[var(--ink2)] enabled:hover:bg-[var(--line2)] disabled:text-[var(--line)]"
+            >
+              ↶
+            </button>
+            <button
+              onClick={doRedo}
+              disabled={!undo.canRedo}
+              title="やり直す（Ctrl+Y）"
+              aria-label="やり直す"
+              className="border-l border-[var(--line)] px-2.5 py-1.5 text-[13px] leading-none text-[var(--ink2)] enabled:hover:bg-[var(--line2)] disabled:text-[var(--line)]"
+            >
+              ↷
+            </button>
+          </div>
+
+          {/* change history (誰がいつ何を変えたか) */}
+          <button
+            onClick={() => setHistoryOpen(true)}
+            title="このシートの変更履歴（誰がいつ何を変えたか）"
+            className="rounded-[9px] border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5 text-[12px] text-[var(--ink2)] hover:bg-[var(--line2)]"
+          >
+            変更履歴
+          </button>
+
           {/* as-of stepper (week view only) — view a past week's recorded plan.
               No banner; the blue 基準 line + this label indicate the as-of week. */}
           {viewMode === 'week' && (
@@ -616,9 +779,46 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
       {/* Board */}
       <div className="flex min-h-0 flex-1 flex-col px-[22px] pb-5">
         {grid.loading ? (
-          <div className="flex flex-1 items-center justify-center rounded-[14px] border border-[var(--line)] bg-[var(--surface)] text-[var(--ink3)]">
-            読み込み中…
-          </div>
+          <GridSkeleton />
+        ) : grid.rows.length === 0 ? (
+          <EmptyState
+            title="まだタスクがありません"
+            body="このシートはこれから作るところです。1件追加して週ごとの予定工数を入れるか、すでにExcelで管理しているなら、シート設定から取り込めます。"
+            actions={
+              <>
+                <Button size="sm" onClick={newRow}>
+                  <PlusIcon className="h-[15px] w-[15px]" />
+                  最初のタスクを追加
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => navigate(`/sheets/${sheetId}/settings`)}
+                >
+                  シート設定（列・Excel取込）
+                </Button>
+              </>
+            }
+          />
+        ) : visibleRows.length === 0 ? (
+          <EmptyState
+            title="条件に一致するタスクがありません"
+            body="絞り込みや検索の条件を緩めると表示されます。"
+            actions={
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setColFilters({})
+                  setSearch('')
+                  setHideDone(false)
+                  setThisWeekOnly(false)
+                }}
+              >
+                絞り込みをすべて解除
+              </Button>
+            }
+          />
         ) : (
           <GanttGrid
             rows={visibleRows}
@@ -648,6 +848,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
               })
             }
             onSaveWeek={saveWeek}
+            onBulkSaveWeeks={saveWeeksBulk}
             onEditRowCell={saveRowCell}
             onEditRowKey={saveRowKey}
             onEditMilestones={setMilestoneRow}
@@ -658,7 +859,8 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           />
         )}
         <div className="mt-2 px-1 text-[11.5px] text-[var(--ink3)]">
-          セルはクリックで入力（Enter保存／Esc取消）。右上で週／月を切替（月は各週へ均等分割）。
+          セルはクリックで入力（Enter保存／Esc取消）。ドラッグで範囲選択 → Ctrl+C / Ctrl+V
+          でコピー・貼り付け、Delete でまとめて消去。Ctrl+Z で元に戻せます。
         </div>
       </div>
 
@@ -678,6 +880,13 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           candidates={depCandidates}
           sheetId={sheetId}
           onClose={() => setDepRow(null)}
+        />
+      )}
+
+      {historyOpen && (
+        <HistoryPanel
+          scope={{ kind: 'sheet', sheetId, name: sheetName }}
+          onClose={() => setHistoryOpen(false)}
         />
       )}
     </>

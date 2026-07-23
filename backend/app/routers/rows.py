@@ -8,10 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import history_service
 from app.db import get_db
 from app.deps import get_row_for_user, get_sheet_for_user
-from app.models import Row, Sheet, User
-from app.schemas import RowCreate, RowOut, RowUpdate
+from app.models import Row, RowEvent, Sheet, User
+from app.schemas import RowCreate, RowEventOut, RowOut, RowUpdate
 from app.security import current_user
 from app.weeks import current_week_start
 from app.worklog_service import org_week_start_weekday
@@ -86,6 +87,7 @@ def create_row(
             detail=f"key_value '{key_value}' already exists in this sheet",
         )
     db.refresh(row)
+    _log_created(db, user, row, "行を追加")
     return row
 
 
@@ -132,7 +134,16 @@ def create_child_row(
             detail=f"key_value '{key_value}' already exists in this sheet",
         )
     db.refresh(row)
+    _log_created(db, user, row, "子タスクを追加")
     return row
+
+
+def _log_created(db: Session, user: User, row: Row, what: str) -> None:
+    """Record a creation event (needs the committed row so it has an id)."""
+    history_service.record(
+        db, user=user, row=row, kind="create", changes=[(what, None, row.key_value or "")]
+    )
+    db.commit()
 
 
 @router.patch("/rows/{row_id}")
@@ -154,12 +165,22 @@ def update_row(
                 }
             ),
         )
+    fields = payload.model_dump(exclude_unset=True)
+    # Log the diff BEFORE mutating, while `row` still holds the old values.
+    history_service.record_row_update(
+        db,
+        user=user,
+        row=row,
+        new_data=payload.data,
+        new_key=payload.key_value,
+        new_progress=payload.progress if "progress" in fields else ...,
+        new_depends_on=payload.depends_on if "depends_on" in fields else ...,
+    )
     if payload.key_value is not None and payload.key_value != row.key_value:
         row.key_value = payload.key_value
     row.data = payload.data
     # progress / depends_on are applied only when present in the body (so a normal
     # data edit never clears them); an explicit null clears progress.
-    fields = payload.model_dump(exclude_unset=True)
     if "progress" in fields:
         row.progress = payload.progress
         # Stamp the week this progress applies to (for weekly-reset display).
@@ -189,6 +210,78 @@ def delete_row(
     row_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> Response:
     row = get_row_for_user(db, row_id, user)
+    # Log first: the event's row_id is SET NULL by the delete, but row_key keeps
+    # the task id so the deletion stays traceable in the sheet history.
+    history_service.record(
+        db, user=user, row=row, kind="delete", changes=[("行を削除", row.key_value or "", None)]
+    )
     db.delete(row)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _events_out(db: Session, events: list[RowEvent]) -> list[RowEventOut]:
+    """Attach the author's display name to each event."""
+    user_ids = {e.user_id for e in events if e.user_id is not None}
+    names: dict[int, str] = {}
+    if user_ids:
+        names = {
+            uid: name
+            for uid, name in db.execute(
+                select(User.id, User.name).where(User.id.in_(user_ids))
+            ).all()
+        }
+    return [
+        RowEventOut(
+            id=e.id,
+            row_id=e.row_id,
+            row_key=e.row_key,
+            user_name=names.get(e.user_id or -1, "(不明)"),
+            kind=e.kind,
+            field_label=e.field_label,
+            old_value=e.old_value,
+            new_value=e.new_value,
+            created_at=e.created_at,
+        )
+        for e in events
+    ]
+
+
+@router.get("/rows/{row_id}/history", response_model=list[RowEventOut])
+def row_history(
+    row_id: int,
+    limit: int = 200,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[RowEventOut]:
+    """Full change log for one task, newest first."""
+    get_row_for_user(db, row_id, user)
+    events = list(
+        db.execute(
+            select(RowEvent)
+            .where(RowEvent.row_id == row_id)
+            .order_by(RowEvent.created_at.desc(), RowEvent.id.desc())
+            .limit(min(limit, 500))
+        ).scalars()
+    )
+    return _events_out(db, events)
+
+
+@router.get("/sheets/{sheet_id}/history", response_model=list[RowEventOut])
+def sheet_history(
+    sheet_id: int,
+    limit: int = 200,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[RowEventOut]:
+    """Recent changes across the whole sheet, newest first (「先週から何が変わった？」)."""
+    get_sheet_for_user(db, sheet_id, user)
+    events = list(
+        db.execute(
+            select(RowEvent)
+            .where(RowEvent.sheet_id == sheet_id)
+            .order_by(RowEvent.created_at.desc(), RowEvent.id.desc())
+            .limit(min(limit, 500))
+        ).scalars()
+    )
+    return _events_out(db, events)

@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { useOrg, useSheets } from '@/hooks/useSheets'
 import { cn, initial } from '@/lib/format'
 import { AddSheetDialog } from '@/components/AddSheetDialog'
+import { GlobalSearch, useGlobalSearchHotkey } from '@/components/GlobalSearch'
 import { NotificationBell } from '@/components/NotificationBell'
 import {
   CalendarIcon,
@@ -13,6 +14,7 @@ import {
   MembersIcon,
   MenuIcon,
   PlusIcon,
+  SearchIcon,
   TableIcon,
   TasksIcon,
   XIcon,
@@ -42,7 +44,11 @@ export function AppLayout() {
   const sheetsQ = useSheets()
   const [showAdd, setShowAdd] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
   const location = useLocation()
+
+  const openSearch = useCallback(() => setSearchOpen(true), [])
+  useGlobalSearchHotkey(openSearch)
 
   const sheets = [...(sheetsQ.data ?? [])].sort((a, b) => a.order - b.order)
   const appTitle = org?.settings?.app_title?.trim() || '工数スケジュール'
@@ -94,6 +100,19 @@ export function AppLayout() {
             <div className="truncate text-[13px] text-white">{org?.name ?? 'デモ組織'}</div>
           </div>
         </div>
+
+        {/* Cross-sheet search — the one place to look when you know a task ID
+            but not which sheet it lives on. */}
+        <button
+          onClick={openSearch}
+          className="mb-3 flex items-center gap-2 rounded-[9px] bg-[var(--green-d)] px-2.5 py-2 text-[12.5px] text-[#C2D7CC] transition-colors hover:bg-[var(--green-line)] hover:text-white"
+        >
+          <SearchIcon className="h-[15px] w-[15px] flex-shrink-0" />
+          <span>タスクを検索</span>
+          <kbd className="ml-auto rounded border border-[var(--green-line)] px-1 text-[10px] text-[#8FB0A2]">
+            Ctrl K
+          </kbd>
+        </button>
 
         <nav className="flex min-h-0 flex-1 flex-col overflow-y-auto">
           {/* ---- Sheets group ---- */}
@@ -155,7 +174,14 @@ export function AppLayout() {
             <span className="h-2 w-2 flex-shrink-0 rounded-full bg-[var(--green)]" />
             <span className="truncate">{appTitle}</span>
           </span>
-          <span className="ml-auto">
+          <span className="ml-auto flex items-center gap-1">
+            <button
+              onClick={openSearch}
+              className="rounded-md p-1.5 text-[var(--ink2)] hover:bg-[var(--line2)]"
+              aria-label="タスクを検索"
+            >
+              <SearchIcon className="h-[18px] w-[18px]" />
+            </button>
             <NotificationBell variant="light" align="right" />
           </span>
         </div>
@@ -163,6 +189,7 @@ export function AppLayout() {
       </main>
 
       {showAdd && <AddSheetDialog onClose={() => setShowAdd(false)} />}
+      {searchOpen && <GlobalSearch onClose={() => setSearchOpen(false)} />}
     </div>
   )
 }

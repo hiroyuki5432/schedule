@@ -20,6 +20,7 @@ from app.routers import (
     notifications,
     org,
     rows,
+    search,
     sheets,
     snapshots,
     worklog,
@@ -65,6 +66,7 @@ app.include_router(export.router)
 app.include_router(excel.router)
 app.include_router(worklog.router)
 app.include_router(notifications.router)
+app.include_router(search.router)
 
 
 @app.get("/api/health", tags=["health"])

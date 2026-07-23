@@ -192,6 +192,40 @@ export interface Effort {
   version?: number
 }
 
+/** One cell in a bulk weekly-effort write (範囲貼り付け／一括クリア). */
+export interface EffortBulkItem {
+  row_id: string
+  week_start: string
+  planned_hours?: number | null
+  actual_hours?: number | null
+}
+
+/** One result from the cross-sheet search (Ctrl+K). */
+export interface SearchHit {
+  row_id: string
+  sheet_id: string
+  sheet_name: string
+  key_value: string | null
+  title: string
+  /** Column whose value matched; null when the ID or title matched. */
+  matched_field: string | null
+}
+
+/** One recorded change to a task (変更履歴). Values are display strings. */
+export interface RowEvent {
+  id: string
+  row_id: string | null
+  /** Task ID as it was at the time (survives the task being deleted). */
+  row_key: string | null
+  user_name: string
+  kind: 'create' | 'update' | 'delete' | 'effort'
+  /** What changed — column name, 「工数 2026-06-15」, 「ID」 etc. */
+  field_label: string
+  old_value: string | null
+  new_value: string | null
+  created_at: string
+}
+
 export interface Milestone {
   id: string
   row_id: string

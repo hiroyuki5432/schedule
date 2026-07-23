@@ -1,19 +1,26 @@
 import { useMemo } from 'react'
-import { useSheets, useMembers, useWeekStartWeekday } from '@/hooks/useSheets'
+import { Link } from 'react-router-dom'
+import { useMembers, useWeekStartWeekday } from '@/hooks/useSheets'
+import { useSelectedSheet } from '@/hooks/useSelectedSheet'
 import { useScheduleData } from '@/hooks/useScheduleData'
 import { useAuth } from '@/hooks/useAuth'
 import { PageHeader } from '@/components/PageHeader'
+import { SheetPicker } from '@/components/SheetPicker'
 import { Card, CardBody } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Avatar } from '@/components/ui/Avatar'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { TableSkeleton } from '@/components/ui/Skeleton'
 
 export function MyTasksPage() {
   const { user } = useAuth()
   const weekStartWeekday = useWeekStartWeekday()
-  const sheetsQ = useSheets()
   const membersQ = useMembers()
   const members = useMemo(() => membersQ.data ?? [], [membersQ.data])
-  const sheetId = sheetsQ.data?.[0]?.id
+  const { sheets, sheetId, setSheetId, loading: sheetsLoading } = useSelectedSheet(
+    'view:myTasks:sheetId',
+    true,
+  )
 
   const grid = useScheduleData({
     sheetId,
@@ -30,17 +37,29 @@ export function MyTasksPage() {
 
   return (
     <>
-      <PageHeader title="マイタスク" subtitle="自分が担当している行" />
+      <PageHeader
+        title="マイタスク"
+        subtitle="自分が担当しているタスク"
+        actions={<SheetPicker sheets={sheets} sheetId={sheetId} onChange={setSheetId} />}
+      />
 
       <div className="flex flex-col gap-4 overflow-auto px-[22px] pb-6">
         <Card>
           <CardBody className="px-0 py-0">
-            {grid.loading ? (
-              <div className="px-5 py-4 text-[var(--ink3)]">読み込み中…</div>
+            {sheetsLoading || grid.loading ? (
+              <TableSkeleton rows={5} cols={5} />
+            ) : !sheetId ? (
+              <EmptyState
+                compact
+                title="スケジュールのシートがありません"
+                body="左のサイドバーから「シート追加」でスケジュールを作ると、担当タスクがここに並びます。"
+              />
             ) : mine.length === 0 ? (
-              <div className="px-5 py-4 text-[var(--ink3)]">
-                担当しているタスクはありません。
-              </div>
+              <EmptyState
+                compact
+                title="このシートで担当しているタスクはありません"
+                body="担当者の列に自分が設定されたタスクがここに出ます。別のシートを見るには右上で切り替えてください。"
+              />
             ) : (
               <table className="w-full border-collapse text-[12.5px]">
                 <thead>
@@ -55,7 +74,16 @@ export function MyTasksPage() {
                 <tbody>
                   {mine.map((r) => (
                     <tr key={r.row.id} className="border-b border-[var(--line2)]">
-                      <td className="px-5 py-2.5 font-semibold">{r.keyValue}</td>
+                      <td className="px-5 py-2.5 font-semibold">
+                        {/* Jump straight to the task in the schedule (scrolls + flashes). */}
+                        <Link
+                          to={`/sheets/${sheetId}?focus=${r.row.id}&t=${Date.now()}`}
+                          className="hover:text-[var(--green-d)] hover:underline"
+                          title="スケジュールでこのタスクを表示"
+                        >
+                          {r.keyValue}
+                        </Link>
+                      </td>
                       <td className="px-5 py-2.5">{r.title}</td>
                       <td className="px-5 py-2.5">
                         <div className="flex items-center gap-2">

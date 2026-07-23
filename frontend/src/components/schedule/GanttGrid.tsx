@@ -22,6 +22,7 @@ import { Avatar } from '@/components/ui/Avatar'
 import { Badge } from '@/components/ui/Badge'
 import { DiamondIcon, PlusIcon, TrashIcon } from '@/components/ui/icons'
 import { cn, normalizeDateForSort } from '@/lib/format'
+import { toast } from '@/lib/toast'
 import { fmtISO, fmtMD, parseDate } from '@/lib/dates'
 import type { WeekCell } from '@/lib/gantt'
 import type { StatusBadge } from '@/lib/status'
@@ -237,7 +238,26 @@ export interface WeekEdit {
   weekStart: string
   field: 'planned_hours' | 'actual_hours'
   value: number | null
+  /** The value before this edit — lets the page offer 元に戻す (Ctrl+Z). */
+  prev: number | null
 }
+
+/** A cell address in the week area (row id + week index). */
+interface CellRef {
+  rowId: string
+  wi: number
+}
+
+/** The selected rectangle, as display-row and week index bounds (inclusive). */
+interface SelRect {
+  r0: number
+  r1: number
+  w0: number
+  w1: number
+}
+
+/** How many week columns to render beyond the viewport on each side. */
+const WEEK_OVERSCAN = 6
 
 interface Props {
   rows: ScheduleRowModel[]
@@ -270,6 +290,8 @@ interface Props {
   filterOptions: Map<string, ColFilterOptions>
   onColFilterChange: (colId: string, next: ColFilter | undefined) => void
   onSaveWeek: (edit: WeekEdit) => void
+  /** Range paste / range clear — written in one request instead of per cell. */
+  onBulkSaveWeeks: (edits: WeekEdit[]) => void
   onEditRowCell: (row: Row, colId: string, value: CellValue) => void
   onEditRowKey: (row: Row, key: string) => void
   onEditMilestones: (row: Row) => void
@@ -291,6 +313,8 @@ interface Tip {
 interface EditingCell {
   rowId: string
   wi: number
+  /** Typed character that opened the editor (Excel-style type-to-replace). */
+  seed?: string
 }
 
 export function GanttGrid({
@@ -314,6 +338,7 @@ export function GanttGrid({
   filterOptions,
   onColFilterChange,
   onSaveWeek,
+  onBulkSaveWeeks,
   onEditRowCell,
   onEditRowKey,
   onEditMilestones,
@@ -326,6 +351,13 @@ export function GanttGrid({
   const didScrollRef = useRef(false)
   const [tip, setTip] = useState<Tip | null>(null)
   const [editing, setEditing] = useState<EditingCell | null>(null)
+  // Excel-style range selection over the week cells: an anchor plus a moving
+  // focus corner. Drag with the mouse, extend with Shift+arrows.
+  const [sel, setSel] = useState<{ anchor: CellRef; focus: CellRef } | null>(null)
+  // Set while the mouse is down inside the week area. `moved` (set once the
+  // pointer reaches a DIFFERENT cell) distinguishes a plain click — which opens
+  // the editor, the long-standing behaviour — from a drag, which selects a range.
+  const dragRef = useRef<{ start: CellRef; moved: boolean } | null>(null)
   // Transient highlight for a notification-focused task (cleared after a few s).
   const [highlightId, setHighlightId] = useState<string | null>(null)
   const [sort, setSort] = useState<SortState | null>(null)
@@ -467,40 +499,6 @@ export function GanttGrid({
   const toggleMenu = (key: SortKey) =>
     setOpenMenu((cur) => (cur === key ? null : key))
 
-  // Spreadsheet-style cell navigation (Feature 1): from the currently-edited week
-  // cell, move to the next editable cell in `dir` (Tab/Shift+Tab/arrows/Enter).
-  // Skips non-editable cells (past weeks, parent rows in month view); stops at the
-  // grid edge by closing the editor.
-  const moveEditing = useCallback(
-    (from: EditingCell, dir: 'up' | 'down' | 'left' | 'right') => {
-      const curIdx = displayRows.findIndex(
-        (m) => String(m.row.id) === String(from.rowId),
-      )
-      if (curIdx < 0) {
-        setEditing(null)
-        return
-      }
-      const stepRow = dir === 'down' ? 1 : dir === 'up' ? -1 : 0
-      const stepCol = dir === 'right' ? 1 : dir === 'left' ? -1 : 0
-      let r = curIdx
-      let w = from.wi
-      // Guard against runaway loops; the grid is finite anyway.
-      for (let guard = 0; guard < 100000; guard++) {
-        r += stepRow
-        w += stepCol
-        if (r < 0 || r >= displayRows.length || w < 0 || w >= weeks.length) break
-        const m = displayRows[r]
-        const ce = editable && w >= lineIndex && (viewMode === 'week' || !m.hasChildren)
-        if (ce) {
-          setEditing({ rowId: m.row.id, wi: w })
-          return
-        }
-      }
-      setEditing(null)
-    },
-    [displayRows, weeks.length, editable, lineIndex, viewMode],
-  )
-
   // Plain rows (for status option lists) + lookup resolver for lookup columns.
   const plainRows = useMemo(() => displayRows.map((r) => r.row), [displayRows])
   // Freezable sequence = [attribute columns…, summary columns…]. The first
@@ -537,9 +535,447 @@ export function GanttGrid({
     estimateSize: () => ROW_H,
     overscan: 10,
   })
+
+  // ---- Week-column virtualization -------------------------------------------
+  // Rows were already virtualized, but every visible row still painted ~3 years
+  // of week cells, so the DOM grew with (visible rows × weeks). We now render
+  // only the weeks inside the viewport. The week area starts at pinnedW + attrW
+  // in scroll-content coordinates, and the frozen columns cover the leftmost
+  // `pinnedW` pixels of the viewport, so both offsets enter the calculation.
+  const [weekRange, setWeekRange] = useState<[number, number]>([0, 0])
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    let raf = 0
+    const recompute = () => {
+      raf = 0
+      const gridLeft = pinnedW + attrW
+      const viewLeft = el.scrollLeft + pinnedW
+      const viewRight = el.scrollLeft + el.clientWidth
+      const start = Math.max(
+        0,
+        Math.floor((viewLeft - gridLeft) / weekColWidth) - WEEK_OVERSCAN,
+      )
+      const end = Math.min(
+        weeks.length,
+        Math.ceil((viewRight - gridLeft) / weekColWidth) + WEEK_OVERSCAN,
+      )
+      setWeekRange((prev) =>
+        prev[0] === start && prev[1] === end ? prev : [start, Math.max(start, end)],
+      )
+    }
+    const onScroll = () => {
+      if (!raf) raf = requestAnimationFrame(recompute)
+    }
+    recompute()
+    el.addEventListener('scroll', onScroll, { passive: true })
+    const ro = new ResizeObserver(onScroll)
+    ro.observe(el)
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      ro.disconnect()
+      if (raf) cancelAnimationFrame(raf)
+    }
+  }, [pinnedW, attrW, weekColWidth, weeks.length])
+
+  /** Week indices currently worth rendering (viewport + overscan). */
+  const visibleWeeks = useMemo(() => {
+    const out: number[] = []
+    for (let i = weekRange[0]; i < weekRange[1]; i++) out.push(i)
+    return out
+  }, [weekRange])
+
+  /** Scroll horizontally so a week column is not hidden behind the frozen area. */
+  const ensureWeekVisible = useCallback(
+    (wi: number) => {
+      const el = scrollRef.current
+      if (!el) return
+      const cellLeft = pinnedW + attrW + wi * weekColWidth
+      const cellRight = cellLeft + weekColWidth
+      const viewLeft = el.scrollLeft + pinnedW
+      const viewRight = el.scrollLeft + el.clientWidth
+      if (cellLeft < viewLeft) el.scrollLeft = cellLeft - pinnedW - 8
+      else if (cellRight > viewRight) el.scrollLeft = cellRight - el.clientWidth + 8
+    },
+    [pinnedW, attrW, weekColWidth],
+  )
+
   const gridW = weeks.length * weekColWidth
   const totalW = pinnedW + attrW + gridW
   const totalH = displayRows.length * ROW_H
+
+  // ---- Cell selection, keyboard navigation and clipboard ---------------------
+  const rowIndexById = useMemo(() => {
+    const m = new Map<string, number>()
+    displayRows.forEach((r, i) => m.set(String(r.row.id), i))
+    return m
+  }, [displayRows])
+
+  /** Can this cell take a typed value? Past weeks hold 実績 (entered on 日報),
+   *  and in month view a parent's cell is a read-only roll-up of its subtasks. */
+  const isCellEditable = useCallback(
+    (m: ScheduleRowModel, wi: number) =>
+      editable && wi >= lineIndex && (viewMode === 'week' || !m.hasChildren),
+    [editable, lineIndex, viewMode],
+  )
+
+  const selRect: SelRect | null = useMemo(() => {
+    if (!sel) return null
+    const a = rowIndexById.get(String(sel.anchor.rowId))
+    const b = rowIndexById.get(String(sel.focus.rowId))
+    if (a == null || b == null) return null
+    return {
+      r0: Math.min(a, b),
+      r1: Math.max(a, b),
+      w0: Math.min(sel.anchor.wi, sel.focus.wi),
+      w1: Math.max(sel.anchor.wi, sel.focus.wi),
+    }
+  }, [sel, rowIndexById])
+
+  const selCount = selRect
+    ? (selRect.r1 - selRect.r0 + 1) * (selRect.w1 - selRect.w0 + 1)
+    : 0
+
+  /** The number a cell currently shows: 実績 for past weeks, 予定 from now on. */
+  const shownValue = useCallback(
+    (m: ScheduleRowModel, wi: number): number | null => {
+      const cell = m.gantt.cells[wi]
+      if (!cell) return null
+      const past = wi < lineIndex && live
+      const v = past ? cell.actual : cell.planned
+      return v ? round1(v) : null
+    },
+    [lineIndex, live],
+  )
+
+  /** Turn a value the user typed into what gets stored. On a parent task the
+   *  entered number is the combined (親＋子) total, so we store the parent's own
+   *  share; a leaf stores the number as-is. */
+  const toStored = useCallback(
+    (m: ScheduleRowModel, wi: number, value: number | null): number | null => {
+      if (!m.hasChildren || value == null) return value
+      const childSum = m.childPlannedByWeek?.get(fmtISO(weeks[wi])) ?? 0
+      return Math.max(0, round1(value - childSum))
+    },
+    [weeks],
+  )
+
+  /** Build the write for one cell, including the value it had before (for undo).
+   *
+   *  Both `value` and `prev` are in STORED space (a parent's own share), not the
+   *  combined 親＋子 number the cell displays — undo writes `prev` straight back,
+   *  so mixing the two would inflate a parent by its children's hours. */
+  const buildEdit = useCallback(
+    (m: ScheduleRowModel, wi: number, value: number | null): WeekEdit => {
+      const past = wi < lineIndex && live
+      const field = past ? 'actual_hours' : 'planned_hours'
+      const cell = m.gantt.cells[wi]
+      const shown = past ? cell?.actual : cell?.planned
+      const toStore = (v: number | null) =>
+        field === 'planned_hours' ? toStored(m, wi, v) : v
+      return {
+        rowId: m.row.id,
+        weekStart: fmtISO(weeks[wi]),
+        field,
+        value: toStore(value),
+        prev: shown ? toStore(round1(shown)) : null,
+      }
+    },
+    [weeks, toStored, lineIndex, live],
+  )
+
+  /** Build the writes for a whole operation (range paste / range clear).
+   *
+   *  A parent's cell shows 親＋子 combined, and buildEdit stores `entered −
+   *  現在の子合計`. When the SAME operation also rewrites that parent's subtasks,
+   *  the child total is about to change, so using the current one would leave the
+   *  parent displaying entered + (child delta) instead of what was pasted. This
+   *  nets out that delta so the parent lands on the number the user actually
+   *  entered. */
+  const buildEdits = useCallback(
+    (cells: Array<{ m: ScheduleRowModel; wi: number; value: number | null }>): WeekEdit[] => {
+      const childDelta = new Map<string, number>()
+      for (const { m, wi, value } of cells) {
+        if (!m.parentRowId) continue
+        const before = m.gantt.cells[wi]?.planned ?? 0
+        const key = `${m.parentRowId}|${wi}`
+        childDelta.set(key, (childDelta.get(key) ?? 0) + ((value ?? 0) - before))
+      }
+      return cells.map(({ m, wi, value }) => {
+        const edit = buildEdit(m, wi, value)
+        if (!m.hasChildren || edit.value == null || edit.field !== 'planned_hours') return edit
+        const delta = childDelta.get(`${String(m.row.id)}|${wi}`) ?? 0
+        if (delta === 0) return edit
+        return { ...edit, value: Math.max(0, round1(edit.value - delta)) }
+      })
+    },
+    [buildEdit],
+  )
+
+  /** Move (or, with `extend`, grow) the selection by one cell. */
+  const moveSelection = useCallback(
+    (dir: 'up' | 'down' | 'left' | 'right', extend: boolean) => {
+      if (!sel) return
+      const idx = rowIndexById.get(String(sel.focus.rowId))
+      if (idx == null) return
+      const dr = dir === 'down' ? 1 : dir === 'up' ? -1 : 0
+      const dw = dir === 'right' ? 1 : dir === 'left' ? -1 : 0
+      const r = Math.max(0, Math.min(displayRows.length - 1, idx + dr))
+      const w = Math.max(0, Math.min(weeks.length - 1, sel.focus.wi + dw))
+      const focus: CellRef = { rowId: String(displayRows[r].row.id), wi: w }
+      setSel(extend ? { anchor: sel.anchor, focus } : { anchor: focus, focus })
+      ensureWeekVisible(w)
+      rowVirt.scrollToIndex(r)
+    },
+    [sel, rowIndexById, displayRows, weeks.length, ensureWeekVisible, rowVirt],
+  )
+
+  // Spreadsheet-style cell navigation: from the currently-edited week cell, move
+  // to the next editable cell in `dir` (Tab/Shift+Tab/arrows/Enter). Skips
+  // non-editable cells (past weeks, parent rows in month view); stops at the grid
+  // edge by closing the editor.
+  const moveEditing = useCallback(
+    (from: EditingCell, dir: 'up' | 'down' | 'left' | 'right') => {
+      const curIdx = rowIndexById.get(String(from.rowId))
+      if (curIdx == null) {
+        setEditing(null)
+        return
+      }
+      const stepRow = dir === 'down' ? 1 : dir === 'up' ? -1 : 0
+      const stepCol = dir === 'right' ? 1 : dir === 'left' ? -1 : 0
+      let r = curIdx
+      let w = from.wi
+      // Guard against runaway loops; the grid is finite anyway.
+      for (let guard = 0; guard < 100000; guard++) {
+        r += stepRow
+        w += stepCol
+        if (r < 0 || r >= displayRows.length || w < 0 || w >= weeks.length) break
+        const m = displayRows[r]
+        if (isCellEditable(m, w)) {
+          setEditing({ rowId: m.row.id, wi: w })
+          setSel({
+            anchor: { rowId: String(m.row.id), wi: w },
+            focus: { rowId: String(m.row.id), wi: w },
+          })
+          ensureWeekVisible(w)
+          rowVirt.scrollToIndex(r)
+          return
+        }
+      }
+      setEditing(null)
+    },
+    [rowIndexById, displayRows, weeks.length, isCellEditable, ensureWeekVisible, rowVirt],
+  )
+
+  /** Clear every editable cell in the selection (Delete/Backspace). */
+  const clearSelection = useCallback(() => {
+    if (!selRect || !editable) return
+    const cells: Array<{ m: ScheduleRowModel; wi: number; value: number | null }> = []
+    for (let r = selRect.r0; r <= selRect.r1; r++) {
+      const m = displayRows[r]
+      for (let w = selRect.w0; w <= selRect.w1; w++) {
+        if (!isCellEditable(m, w)) continue
+        if (shownValue(m, w) == null) continue
+        cells.push({ m, wi: w, value: null })
+      }
+    }
+    if (cells.length === 0) return
+    const edits = buildEdits(cells)
+    onBulkSaveWeeks(edits)
+    toast.show(`${edits.length}セルを空にしました（Ctrl+Z で元に戻せます）`, 'info', 3000)
+  }, [
+    selRect,
+    editable,
+    displayRows,
+    isCellEditable,
+    shownValue,
+    buildEdits,
+    onBulkSaveWeeks,
+  ])
+
+  /** Copy the selection as TSV so it pastes straight into Excel. */
+  const handleCopy = useCallback(
+    (e: React.ClipboardEvent) => {
+      if (!selRect || editing) return
+      const lines: string[] = []
+      for (let r = selRect.r0; r <= selRect.r1; r++) {
+        const m = displayRows[r]
+        const cells: string[] = []
+        for (let w = selRect.w0; w <= selRect.w1; w++) {
+          const v = shownValue(m, w)
+          cells.push(v == null ? '' : String(v))
+        }
+        lines.push(cells.join('\t'))
+      }
+      e.clipboardData.setData('text/plain', lines.join('\n'))
+      e.preventDefault()
+      toast.show(`${selCount}セルをコピーしました`, 'info', 2000)
+    },
+    [selRect, editing, displayRows, shownValue, selCount],
+  )
+
+  /** Paste TSV (from this grid or from Excel) starting at the selection's
+   *  top-left. Cells that can't take a value — past weeks, parent roll-ups in
+   *  month view — are skipped rather than silently dropping the whole paste. */
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent) => {
+      if (!selRect || editing || !editable) return
+      const text = e.clipboardData.getData('text/plain')
+      if (!text) return
+      e.preventDefault()
+      const matrix = text
+        .replace(/\r\n?/g, '\n')
+        .replace(/\n+$/, '')
+        .split('\n')
+        .map((line) => line.split('\t'))
+
+      const cells: Array<{ m: ScheduleRowModel; wi: number; value: number | null }> = []
+      let skipped = 0
+      for (let dr = 0; dr < matrix.length; dr++) {
+        const r = selRect.r0 + dr
+        if (r >= displayRows.length) break
+        const m = displayRows[r]
+        for (let dc = 0; dc < matrix[dr].length; dc++) {
+          const w = selRect.w0 + dc
+          if (w >= weeks.length) break
+          if (!isCellEditable(m, w)) {
+            skipped++
+            continue
+          }
+          const raw = matrix[dr][dc].trim()
+          if (raw === '') {
+            cells.push({ m, wi: w, value: null })
+            continue
+          }
+          const n = Number(raw)
+          if (!Number.isFinite(n)) {
+            skipped++
+            continue
+          }
+          cells.push({ m, wi: w, value: n })
+        }
+      }
+      const edits = buildEdits(cells)
+      if (edits.length === 0) {
+        toast.show('貼り付けできるセルがありませんでした（過去週は日報から入力します）', 'warn')
+        return
+      }
+      onBulkSaveWeeks(edits)
+      // Grow the selection to cover what was actually pasted.
+      const lastRow = Math.min(displayRows.length - 1, selRect.r0 + matrix.length - 1)
+      const widest = Math.max(...matrix.map((row) => row.length))
+      const lastWeek = Math.min(weeks.length - 1, selRect.w0 + widest - 1)
+      setSel({
+        anchor: { rowId: String(displayRows[selRect.r0].row.id), wi: selRect.w0 },
+        focus: { rowId: String(displayRows[lastRow].row.id), wi: lastWeek },
+      })
+      toast.show(
+        skipped > 0
+          ? `${edits.length}セルに貼り付けました（${skipped}セルは入力できないためスキップ）`
+          : `${edits.length}セルに貼り付けました（Ctrl+Z で元に戻せます）`,
+        skipped > 0 ? 'warn' : 'info',
+        3500,
+      )
+    },
+    [
+      selRect,
+      editing,
+      editable,
+      displayRows,
+      weeks.length,
+      isCellEditable,
+      buildEdits,
+      onBulkSaveWeeks,
+    ],
+  )
+
+  /** Keyboard handling for the grid when no cell editor is open. */
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (editing) return
+      // Let the page-level Ctrl+Z / Ctrl+Y and the browser's own copy/paste
+      // shortcuts through — those arrive as copy/paste events instead.
+      if (e.ctrlKey || e.metaKey) return
+      if (!sel) return
+      switch (e.key) {
+        case 'ArrowUp':
+        case 'ArrowDown':
+        case 'ArrowLeft':
+        case 'ArrowRight': {
+          e.preventDefault()
+          const dir =
+            e.key === 'ArrowUp'
+              ? 'up'
+              : e.key === 'ArrowDown'
+                ? 'down'
+                : e.key === 'ArrowLeft'
+                  ? 'left'
+                  : 'right'
+          moveSelection(dir, e.shiftKey)
+          return
+        }
+        case 'Enter':
+        case 'F2': {
+          const idx = rowIndexById.get(String(sel.focus.rowId))
+          if (idx == null) return
+          const m = displayRows[idx]
+          if (!isCellEditable(m, sel.focus.wi)) return
+          e.preventDefault()
+          setEditing({ rowId: m.row.id, wi: sel.focus.wi })
+          return
+        }
+        case 'Delete':
+        case 'Backspace':
+          e.preventDefault()
+          clearSelection()
+          return
+        case 'Escape':
+          e.preventDefault()
+          setSel(null)
+          return
+      }
+      // Typing a number opens the editor seeded with that character, like Excel.
+      if (e.key.length === 1 && /[0-9.]/.test(e.key)) {
+        const idx = rowIndexById.get(String(sel.focus.rowId))
+        if (idx == null) return
+        const m = displayRows[idx]
+        if (!isCellEditable(m, sel.focus.wi)) return
+        e.preventDefault()
+        setEditing({ rowId: m.row.id, wi: sel.focus.wi, seed: e.key })
+      }
+    },
+    [
+      editing,
+      sel,
+      moveSelection,
+      rowIndexById,
+      displayRows,
+      isCellEditable,
+      clearSelection,
+    ],
+  )
+
+  // Mouse-down inside the week area starts either a click (open the editor on
+  // mouse-up) or a drag-select. The window listener also catches a mouse-up
+  // outside the grid so a drag can never get stuck on.
+  const beginCellDrag = useCallback(
+    (m: ScheduleRowModel, wi: number, shiftKey: boolean) => {
+      const ref: CellRef = { rowId: String(m.row.id), wi }
+      setSel((prev) =>
+        shiftKey && prev ? { anchor: prev.anchor, focus: ref } : { anchor: ref, focus: ref },
+      )
+      dragRef.current = { start: ref, moved: false }
+    },
+    [],
+  )
+
+  useEffect(() => {
+    const onUp = () => {
+      dragRef.current = null
+    }
+    window.addEventListener('mouseup', onUp)
+    return () => window.removeEventListener('mouseup', onUp)
+  }, [])
 
   // 週計 (Feature 2): per-week column totals + grand totals, over the rows
   // currently shown (= filter-aware, since `rows` is the filtered set). Parents
@@ -725,7 +1161,19 @@ export function GanttGrid({
 
   return (
     <div className="relative flex-1 overflow-hidden rounded-[14px] border border-[var(--line)] bg-[var(--surface)]">
-      <div ref={scrollRef} className="h-full overflow-auto">
+      <div
+        ref={scrollRef}
+        // tabIndex makes the grid focusable so arrow keys, Delete and the
+        // native copy/paste events reach it. outline-none because the selection
+        // rectangle already shows where the keyboard is.
+        tabIndex={0}
+        role="grid"
+        aria-label="週次工数グリッド"
+        onKeyDown={handleKeyDown}
+        onCopy={handleCopy}
+        onPaste={handlePaste}
+        className="h-full overflow-auto outline-none"
+      >
         <div className="relative" style={{ width: totalW, height: HEAD_H + totalH + FOOT_H }}>
           {/* ---- Header (sticky top) ---- */}
           <div
@@ -1044,7 +1492,7 @@ export function GanttGrid({
                   )}
                   style={{ width: gridW, height: ROW_H }}
                 >
-                  {weeks.map((_w, wi) => {
+                  {visibleWeeks.map((wi) => {
                     const cell = model.gantt.cells[wi]
                     // Past weeks show ACTUAL, which is now derived from 日報
                     // (work logs) — so only planned (current/future) cells are
@@ -1053,37 +1501,21 @@ export function GanttGrid({
                     // combined (親＋子) total and editing adjusts the parent's OWN
                     // part (floored so the total never drops below the children's
                     // sum). Month view keeps parents read-only (子合計は週単位のため).
-                    const cellEditable =
-                      editable && wi >= lineIndex && (viewMode === 'week' || !model.hasChildren)
+                    const cellEditable = isCellEditable(model, wi)
                     const isEditing =
                       editing?.rowId === model.row.id && editing.wi === wi
                     if (isEditing) {
                       const past = wi < lineIndex && live
-                      const field = past ? 'actual_hours' : 'planned_hours'
                       const current = past ? cell?.actual ?? 0 : cell?.planned ?? 0
-                      const childSum =
-                        model.childPlannedByWeek?.get(fmtISO(weeks[wi])) ?? 0
                       return (
                         <WeekCellInput
                           key={wi}
                           left={wi * weekColWidth}
                           width={weekColWidth}
                           initial={current}
+                          seed={editing.seed}
                           onCommitMove={(value, dir) => {
-                            // Parent: the entered number is the combined total, so
-                            // store own = total − 子合計 (≥0). Leaf: store as-is.
-                            const toSave =
-                              model.hasChildren && field === 'planned_hours'
-                                ? value == null
-                                  ? null
-                                  : Math.max(0, round1(value - childSum))
-                                : value
-                            onSaveWeek({
-                              rowId: model.row.id,
-                              weekStart: fmtISO(weeks[wi]),
-                              field,
-                              value: toSave,
-                            })
+                            onSaveWeek(buildEdit(model, wi, value))
                             // Tab/arrow/Enter move to the next cell; blur closes.
                             if (dir) moveEditing({ rowId: model.row.id, wi }, dir)
                             else setEditing(null)
@@ -1092,6 +1524,12 @@ export function GanttGrid({
                         />
                       )
                     }
+                    const selected =
+                      selRect != null &&
+                      vRow.index >= selRect.r0 &&
+                      vRow.index <= selRect.r1 &&
+                      wi >= selRect.w0 &&
+                      wi <= selRect.w1
                     return (
                       <WeekCellView
                         key={wi}
@@ -1101,11 +1539,38 @@ export function GanttGrid({
                         width={weekColWidth}
                         live={live}
                         editable={cellEditable}
-                        onClick={() => {
-                          if (!cellEditable) return
-                          setEditing({ rowId: model.row.id, wi })
+                        selected={selected}
+                        onMouseDown={(e) => {
+                          // Left button only; Shift extends the existing range.
+                          if (e.button !== 0) return
+                          beginCellDrag(model, wi, e.shiftKey)
+                        }}
+                        onMouseUp={() => {
+                          // A press-and-release without movement is a plain
+                          // click: keep the long-standing click-to-edit.
+                          if (dragRef.current && !dragRef.current.moved && cellEditable) {
+                            setEditing({ rowId: model.row.id, wi })
+                          }
                         }}
                         onHover={(e) => {
+                          const drag = dragRef.current
+                          // Only a move that REACHES ANOTHER CELL counts as a
+                          // drag; jitter inside the pressed cell stays a click.
+                          if (
+                            drag &&
+                            (drag.start.wi !== wi ||
+                              drag.start.rowId !== String(model.row.id))
+                          ) {
+                            drag.moved = true
+                            setSel((prev) =>
+                              prev
+                                ? {
+                                    anchor: prev.anchor,
+                                    focus: { rowId: String(model.row.id), wi },
+                                  }
+                                : prev,
+                            )
+                          }
                           if (!cell || ((cell.planned ?? 0) <= 0 && (cell.actual ?? 0) <= 0)) {
                             setTip(null)
                             return
@@ -1202,6 +1667,25 @@ export function GanttGrid({
             </svg>
           )}
 
+          {/* ---- Selection outline (Excel-style range) ----
+              One rectangle over the whole selection rather than a border per
+              cell, so the range reads as a single block. z-[13] keeps it above
+              the coloured cells but below the frozen columns (z-20), which is
+              what makes it disappear behind them on horizontal scroll. */}
+          {selRect && (
+            <div
+              className="pointer-events-none absolute z-[13] rounded-[2px]"
+              style={{
+                left: pinnedW + attrW + selRect.w0 * weekColWidth,
+                top: HEAD_H + selRect.r0 * ROW_H,
+                width: (selRect.w1 - selRect.w0 + 1) * weekColWidth,
+                height: (selRect.r1 - selRect.r0 + 1) * ROW_H,
+                border: '2px solid var(--green)',
+                boxShadow: '0 0 0 1px rgba(255,255,255,.5) inset',
+              }}
+            />
+          )}
+
           {/* ---- Vertical today / as-of line (in the week area) ----
               z-10: above the colored week cells but BELOW the frozen columns
               (z-20) so it never paints over the pinned region when the today
@@ -1255,7 +1739,7 @@ export function GanttGrid({
               <FooterSummaryCells cols={scrollSummary} footTotals={footTotals} />
             </div>
             <div className="relative flex-shrink-0" style={{ width: gridW, height: FOOT_H }}>
-              {weeks.map((_w, wi) => {
+              {visibleWeeks.map((wi) => {
                 // Single line: past weeks (今日より前) show 実績, this week onward
                 // (今週以降) shows 予定. Rounded to a whole number.
                 const past = wi < lineIndex
@@ -1707,7 +2191,10 @@ interface WeekCellViewProps {
   width: number
   live: boolean
   editable: boolean
-  onClick: () => void
+  /** Inside the current range selection — tinted so partial ranges stay legible. */
+  selected: boolean
+  onMouseDown: (e: React.MouseEvent) => void
+  onMouseUp: () => void
   onHover: (e: React.MouseEvent) => void
   onLeave: () => void
 }
@@ -1719,7 +2206,9 @@ function WeekCellView({
   width,
   live,
   editable,
-  onClick,
+  selected,
+  onMouseDown,
+  onMouseUp,
   onHover,
   onLeave,
 }: WeekCellViewProps) {
@@ -1739,10 +2228,17 @@ function WeekCellView({
         editable && !colored && 'hover:bg-[var(--line2)]',
       )}
       style={{ left, width, background: colored ? cell!.color : undefined }}
-      onClick={onClick}
+      onMouseDown={onMouseDown}
+      onMouseUp={onMouseUp}
       onMouseMove={onHover}
       onMouseLeave={onLeave}
     >
+      {selected && (
+        <span
+          className="pointer-events-none absolute inset-0 z-[1]"
+          style={{ background: 'rgba(38,107,83,.14)' }}
+        />
+      )}
       {(cell?.milestoneActual || cell?.milestoneMarker) && (
         <span
           title={cell ? milestoneTip(cell) : undefined}
@@ -1788,22 +2284,29 @@ function WeekCellInput({
   left,
   width,
   initial,
+  seed,
   onCommitMove,
   onCancel,
 }: {
   left: number
   width: number
   initial: number
+  /** Character typed to open the editor — replaces the value, as in Excel. */
+  seed?: string
   onCommitMove: (value: number | null, dir: 'up' | 'down' | 'left' | 'right' | null) => void
   onCancel: () => void
 }) {
   const ref = useRef<HTMLInputElement>(null)
-  const [val, setVal] = useState(initial ? String(initial) : '')
+  const [val, setVal] = useState(seed ?? (initial ? String(initial) : ''))
   const done = useRef(false)
 
   useEffect(() => {
     ref.current?.focus()
-    ref.current?.select()
+    // Opened by a click or Enter: select all, so typing replaces the value.
+    // Opened by typing: the seed is already the whole value, caret at the end.
+    // (setSelectionRange is not allowed on type=number, hence the plain focus.)
+    if (!seed) ref.current?.select()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   function commit(dir: 'up' | 'down' | 'left' | 'right' | null) {

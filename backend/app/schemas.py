@@ -208,6 +208,36 @@ class EffortUpsert(BaseModel):
     version: Optional[int] = None
 
 
+class EffortBulkItem(BaseModel):
+    """One cell in a bulk write (range paste / range clear / undo of either)."""
+
+    row_id: int
+    week_start: date
+    planned_hours: Optional[float] = None
+    actual_hours: Optional[float] = None
+
+
+class EffortBulkRequest(BaseModel):
+    items: list[EffortBulkItem] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Change history (変更履歴)
+# ---------------------------------------------------------------------------
+class RowEventOut(BaseModel):
+    id: int
+    row_id: Optional[int] = None
+    row_key: Optional[str] = None
+    # Resolved display name of who made the change ("(削除済み)" when the account
+    # is gone).
+    user_name: str
+    kind: Literal["create", "update", "delete", "effort"]
+    field_label: str
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+    created_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # Milestones
 # ---------------------------------------------------------------------------
@@ -351,6 +381,19 @@ class NotificationItem(BaseModel):
 
 class NotificationRegister(BaseModel):
     items: list[NotificationItem] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Cross-sheet search
+# ---------------------------------------------------------------------------
+class SearchHit(BaseModel):
+    row_id: int
+    sheet_id: int
+    sheet_name: str
+    key_value: Optional[str] = None
+    title: str = ""
+    # Column name whose value matched; None when the ID or title matched.
+    matched_field: Optional[str] = None
 
 
 class MarkReadRequest(BaseModel):

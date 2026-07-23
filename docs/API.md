@@ -78,6 +78,7 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 |---|---|---|
 | GET | `/api/sheets/{id}/effort?from=YYYY-MM-DD&to=YYYY-MM-DD` | `[effort]`（範囲省略時は全件）|
 | PUT | `/api/rows/{rowId}/effort/{week_start}` | `{planned_hours?, actual_hours?, version?}` → upsert |
+| PUT | `/api/effort/bulk` | `{items:[{row_id, week_start, planned_hours?, actual_hours?}]}` → `[effort]`。範囲貼り付け・一括クリア・その取り消しを1リクエストで書き込む。**version チェックなし（last-write-wins）**：範囲上書きは意図的な操作で、数百セル分の衝突解決をユーザーに求める方が害が大きいため。省略したフィールドは変更しない（予定の貼り付けが日報由来の実績を消さない）。全セルが変更履歴に残る |
 
 ## マイルストン（フェーズ境界・連続バーの色分け）
 `milestone = { id, row_id, name, kind('phase'|'milestone'), boundary_date, color, order, done, actual_date }`
@@ -92,6 +93,28 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 |---|---|---|
 | GET | `/api/sheets/{id}/snapshot?week=YYYY-MM-DD` | その週時点の計画（`{ rows, effort }`）。基準週(as-of)切替に使用 |
 | GET | `/api/sheets/{id}/changes?week=YYYY-MM-DD` | 前週との差分 `[{row_id, field, old, new}]`（変化点）|
+
+## 変更履歴（誰がいつ何を変えたか）
+`row_event = { id, row_id, row_key, user_name, kind('create'|'update'|'delete'|'effort'), field_label, old_value, new_value, created_at }`
+- スナップショット差分が「この2週間のどこかで変わった」しか言えないのに対し、こちらは**編集そのもの**を1件ずつ記録する。
+- 値は記録時点の**表示用文字列**（メンバーIDは氏名、プルダウンは表示値）。`field_label` も記録時点の列名なので、列を改名・削除しても過去の履歴が読めなくならない。
+- 行削除時は `row_id` が NULL になるが `row_key` にその時のタスクIDが残るため、削除自体も追跡できる。
+- 内部キー（`__wk_*` など週次リセットの週スタンプ）は記録しない。
+
+| メソッド | パス | 概要 |
+|---|---|---|
+| GET | `/api/rows/{rowId}/history?limit=200` | そのタスクの全変更（新しい順）|
+| GET | `/api/sheets/{id}/history?limit=200` | シート全体の最近の変更（新しい順）。「先週から何が変わった？」用 |
+
+## 横断検索
+`search_hit = { row_id, sheet_id, sheet_name, key_value, title, matched_field }`
+- 組織内の全シートを対象に、タスクID と全属性値（JSONB を text にキャストして ILIKE）を検索。
+- `matched_field` は値が一致した列名。ID 一致は `"ID"`、件名一致は `null`。ID/件名の一致が先頭に並ぶ。
+- 上限 50 件。
+
+| メソッド | パス | 概要 |
+|---|---|---|
+| GET | `/api/search?q=...&limit=50` | `[search_hit]` |
 
 ## 集計（ダッシュボード）
 | メソッド | パス | 概要 |

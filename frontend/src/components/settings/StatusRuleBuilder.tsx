@@ -1,9 +1,10 @@
 // Rule builder for a status column: an ordered list of rules
 //   { conditions: [{ col_id, op, value }], label, color }
 // evaluated top-down, "first match wins". Ops per lib/status.ts.
-import { useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useMemo, useState } from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import * as api from '@/api/client'
+import { badgeForRule, firstMatchingRule } from '@/lib/status'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
@@ -15,7 +16,7 @@ import {
   PlusIcon,
   TrashIcon,
 } from '@/components/ui/icons'
-import type { Column, StatusRule, StatusRuleCondition } from '@/types/api'
+import type { Column, Row, StatusRule, StatusRuleCondition } from '@/types/api'
 
 const OPS: Array<{ value: string; label: string; needsValue: boolean }> = [
   { value: '=', label: '=', needsValue: true },
@@ -52,6 +53,19 @@ export function StatusRuleBuilder({
 
   // Columns selectable as a condition's left-hand side (exclude self).
   const condCols = columns.filter((c) => String(c.id) !== String(column.id))
+
+  // Live preview: run the DRAFT rules over this sheet's real rows so the effect
+  // of a rule is visible before saving. Rules are hard to get right blind — this
+  // is what turns "I think that's the condition" into "yes, 12 tasks land here".
+  const rowsQ = useQuery({
+    queryKey: ['rows', column.sheet_id],
+    queryFn: () => api.getRows(column.sheet_id),
+    staleTime: 30_000,
+  })
+  const preview = useMemo(
+    () => buildPreview(rowsQ.data ?? [], rules),
+    [rowsQ.data, rules],
+  )
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -169,14 +183,29 @@ export function StatusRuleBuilder({
                 cols={condCols}
                 onChange={(conds) => setRule(i, { ...rule, conditions: conds })}
               />
-              <div className="mt-1.5 flex items-center gap-2">
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
                 <Badge bg={rule.color} color="#3a382f">
                   {rule.label || '（ラベル未設定）'}
                 </Badge>
+                <RuleMatchHint
+                  count={preview.counts[i] ?? 0}
+                  total={preview.total}
+                  unreachable={preview.unreachableFrom != null && i > preview.unreachableFrom}
+                  loading={rowsQ.isLoading}
+                />
               </div>
             </div>
           ))}
         </div>
+
+        {!autoFromMilestones && (
+          <RulePreview
+            rules={rules}
+            rows={rowsQ.data ?? []}
+            preview={preview}
+            loading={rowsQ.isLoading}
+          />
+        )}
 
         <button
           onClick={addRule}
@@ -193,6 +222,149 @@ export function StatusRuleBuilder({
         </div>
       </CardBody>
     </Card>
+  )
+}
+
+interface PreviewResult {
+  total: number
+  /** How many rows land on each rule (first match wins, so these don't overlap). */
+  counts: number[]
+  /** Rows matching no rule at all — they show a blank status in the grid. */
+  unmatched: number
+  /** Index of the first "always matches" rule; anything after it is dead. */
+  unreachableFrom: number | null
+  /** A few example rows per rule, for the sample table. */
+  samples: Array<{ ruleIndex: number; keyValue: string }>
+}
+
+const SAMPLE_LIMIT = 6
+
+function buildPreview(rows: Row[], rules: StatusRule[]): PreviewResult {
+  const counts = new Array(rules.length).fill(0)
+  const samples: PreviewResult['samples'] = []
+  let unmatched = 0
+  for (const row of rows) {
+    const i = firstMatchingRule(row, rules)
+    if (i < 0) {
+      unmatched++
+      continue
+    }
+    counts[i]++
+    if (samples.length < SAMPLE_LIMIT) {
+      samples.push({ ruleIndex: i, keyValue: row.key_value || `#${row.id}` })
+    }
+  }
+  // A rule with no conditions matches everything, so nothing below it can ever
+  // be reached — a mistake that's invisible without saying so.
+  const alwaysIdx = rules.findIndex((r) => r.conditions.length === 0)
+  return {
+    total: rows.length,
+    counts,
+    unmatched,
+    unreachableFrom: alwaysIdx >= 0 && alwaysIdx < rules.length - 1 ? alwaysIdx : null,
+    samples,
+  }
+}
+
+/** "12件が該当" chip next to each rule. */
+function RuleMatchHint({
+  count,
+  total,
+  unreachable,
+  loading,
+}: {
+  count: number
+  total: number
+  unreachable: boolean
+  loading: boolean
+}) {
+  if (loading) return null
+  if (unreachable) {
+    return (
+      <span className="rounded bg-[#FAE6E0] px-1.5 py-0.5 text-[10.5px] font-medium text-[#A8442B]">
+        上のルールが常に一致するため、ここには届きません
+      </span>
+    )
+  }
+  if (total === 0) return null
+  if (count === 0) {
+    return (
+      <span className="rounded bg-[#FBF3E6] px-1.5 py-0.5 text-[10.5px] text-[#8A5A1E]">
+        今は該当なし
+      </span>
+    )
+  }
+  return (
+    <span className="rounded bg-[var(--line2)] px-1.5 py-0.5 text-[10.5px] text-[var(--ink3)]">
+      {count}件が該当
+    </span>
+  )
+}
+
+/** Overall preview: how the current rules would label this sheet's rows today. */
+function RulePreview({
+  rules,
+  rows,
+  preview,
+  loading,
+}: {
+  rules: StatusRule[]
+  rows: Row[]
+  preview: PreviewResult
+  loading: boolean
+}) {
+  if (loading) {
+    return (
+      <p className="mt-4 text-[11.5px] text-[var(--ink3)]">プレビューを読み込み中…</p>
+    )
+  }
+  if (rules.length === 0) return null
+
+  const byKey = new Map(rows.map((r) => [r.key_value || `#${r.id}`, r]))
+
+  return (
+    <div className="mt-4 rounded-[10px] border border-[var(--line)] bg-[#FCFBF7] p-3">
+      <div className="mb-1.5 text-[12px] font-medium text-[var(--ink2)]">
+        いまのデータだとこう表示されます
+      </div>
+      {preview.total === 0 ? (
+        <p className="text-[11.5px] text-[var(--ink3)]">
+          このシートにはまだ行がないため、試せるデータがありません。
+        </p>
+      ) : (
+        <>
+          <p className="mb-2 text-[11.5px] text-[var(--ink3)]">
+            全 {preview.total} 件のうち
+            {preview.unmatched > 0 ? (
+              <>
+                、<b className="font-semibold text-[#8A5A1E]">{preview.unmatched} 件</b>
+                はどのルールにも当てはまらず、ステータスが空欄になります。
+              </>
+            ) : (
+              'すべてがいずれかのルールに当てはまります。'
+            )}
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {preview.samples.map((s, i) => {
+              const rule = rules[s.ruleIndex]
+              if (!rule || !byKey.has(s.keyValue)) return null
+              const badge = badgeForRule(rule)
+              return (
+                <span
+                  key={`${s.keyValue}-${i}`}
+                  className="flex items-center gap-1.5 rounded-[7px] border border-[var(--line)] bg-[var(--surface)] px-1.5 py-1 text-[11px]"
+                >
+                  <span className="font-semibold">{s.keyValue}</span>
+                  <Badge bg={badge.bg} color={badge.color}>
+                    {rule.label || '（ラベル未設定）'}
+                  </Badge>
+                </span>
+              )
+            })}
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 

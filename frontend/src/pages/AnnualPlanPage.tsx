@@ -12,6 +12,8 @@ import * as api from '@/api/client'
 import { useMembers, useSheets } from '@/hooks/useSheets'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { TableSkeleton } from '@/components/ui/Skeleton'
 import { Select } from '@/components/ui/Select'
 import { parseDate } from '@/lib/dates'
 import { cn } from '@/lib/format'
@@ -318,11 +320,13 @@ export function AnnualPlanPage() {
         <Card>
           <CardBody className="px-0 py-0">
             {loading ? (
-              <div className="px-5 py-8 text-center text-[var(--ink3)]">読み込み中…</div>
+              <TableSkeleton rows={8} cols={6} />
             ) : tree.length === 0 ? (
-              <div className="px-5 py-8 text-center text-[var(--ink3)]">
-                {year}年度に予定のあるタスクがありません。
-              </div>
+              <EmptyState
+                compact
+                title={`${year}年度に予定のあるタスクがありません`}
+                body="スケジュール画面で週ごとの予定工数を入れると、その月がここに集計されます。上の年度を切り替えて別の期間も確認できます。"
+              />
             ) : (
               <div className="min-w-[680px]">
                 <MonthHeader currentMonth={currentMonth} />

@@ -1,9 +1,13 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as api from '@/api/client'
-import { useOrg, useSheets, useWeekStartWeekday } from '@/hooks/useSheets'
+import { useOrg, useWeekStartWeekday } from '@/hooks/useSheets'
+import { useSelectedSheet } from '@/hooks/useSelectedSheet'
 import { PageHeader } from '@/components/PageHeader'
+import { SheetPicker } from '@/components/SheetPicker'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/Card'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { TableSkeleton } from '@/components/ui/Skeleton'
 import { Select } from '@/components/ui/Select'
 import { Button } from '@/components/ui/Button'
 import { DownloadIcon } from '@/components/ui/icons'
@@ -20,8 +24,9 @@ function num(v: number | string | null | undefined): number {
 const round1 = (x: number) => Math.round(x * 10) / 10
 
 export function DashboardPage() {
-  const sheetsQ = useSheets()
-  const sheetId = sheetsQ.data?.[0]?.id
+  const { sheets, sheetId, setSheetId, loading: sheetsLoading } = useSelectedSheet(
+    'view:dashboard:sheetId',
+  )
   const wsd = useWeekStartWeekday()
   const orgQ = useOrg()
   const closing = orgQ.data?.settings?.closing ?? {}
@@ -47,7 +52,12 @@ export function DashboardPage() {
   )
 
   const [groupBy, setGroupBy] = useState<string>('')
-  const effectiveGroupBy = groupBy || groupable[0]?.id || ''
+  // Column ids are per sheet, so a remembered choice can't survive a sheet
+  // switch — fall back to the first groupable column instead of querying a
+  // column that doesn't exist here.
+  const effectiveGroupBy = groupable.some((c) => String(c.id) === groupBy)
+    ? groupBy
+    : groupable[0]?.id || ''
 
   const aggQ = useQuery({
     queryKey: ['aggregate', sheetId, effectiveGroupBy],
@@ -135,12 +145,24 @@ export function DashboardPage() {
       />
 
       <div className="flex flex-col gap-4 overflow-auto px-[22px] pb-6">
-        {!sheetId ? (
+        {sheetsLoading ? (
           <Card>
-            <CardBody className="text-[var(--ink3)]">シートがありません。</CardBody>
+            <CardBody className="px-0 py-0">
+              <TableSkeleton rows={5} cols={4} />
+            </CardBody>
           </Card>
+        ) : !sheetId ? (
+          <EmptyState
+            compact
+            title="集計するシートがありません"
+            body="左のサイドバーから「シート追加」でスケジュールを作ると、ここに予定と実績の集計が出ます。"
+          />
         ) : (
           <>
+            <div className="flex flex-wrap items-center gap-3">
+              <SheetPicker sheets={sheets} sheetId={sheetId} onChange={setSheetId} />
+            </div>
+
             {periods.length > 0 && (
               <div className="flex flex-wrap items-center gap-2 text-[12px] text-[var(--ink2)]">
                 集計期間（締め）:
@@ -420,7 +442,13 @@ function BurnUp({ effort, todayWeek }: { effort: Effort[]; todayWeek: string }) 
 
 function PivotTable({ rows }: { rows: AggregateRow[] }) {
   if (rows.length === 0) {
-    return <div className="px-5 py-4 text-[var(--ink3)]">データがありません。</div>
+    return (
+      <EmptyState
+        compact
+        title="集計できるデータがありません"
+        body="週ごとの予定または実績の工数を入れると、グループごとの合計がここに出ます。"
+      />
+    )
   }
   return (
     <table className="w-full border-collapse text-[12.5px]">

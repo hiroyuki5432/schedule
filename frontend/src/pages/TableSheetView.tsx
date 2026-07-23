@@ -12,7 +12,10 @@ import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { TableSkeleton } from '@/components/ui/Skeleton'
 import { InlineCell } from '@/components/schedule/InlineCell'
+import { HistoryPanel } from '@/components/schedule/HistoryPanel'
 import { Modal } from '@/components/ui/Modal'
 import { statusFromPhases } from '@/lib/status'
 import { normalizeDateForSort } from '@/lib/format'
@@ -218,9 +221,20 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
 
       <div className="flex min-h-0 flex-1 flex-col overflow-auto px-[22px] pb-6">
         {detailQ.isLoading ? (
-          <Card className="flex flex-1 items-center justify-center text-[var(--ink3)]">
-            読み込み中…
+          <Card>
+            <TableSkeleton rows={7} cols={5} />
           </Card>
+        ) : rows.length === 0 ? (
+          <EmptyState
+            title="まだレコードがありません"
+            body="「新規行」で1件追加すると、列に沿って値を入れられます。列の追加や変更はシート設定から行えます。"
+            actions={
+              <Button size="sm" onClick={addRow}>
+                <PlusIcon className="h-[15px] w-[15px]" />
+                最初のレコードを追加
+              </Button>
+            }
+          />
         ) : (
           <Card className="overflow-auto">
             <table className="w-full table-fixed border-collapse text-[12.5px]">
@@ -300,16 +314,6 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                     </td>
                   </tr>
                 ))}
-                {rows.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={columns.length + 3}
-                      className="px-3 py-6 text-center text-[var(--ink3)]"
-                    >
-                      行がありません。「新規行」で追加します。
-                    </td>
-                  </tr>
-                )}
               </tbody>
             </table>
           </Card>
@@ -365,6 +369,7 @@ function RecordModal({
   onSaveKey: (v: string) => void
   onDelete: () => void
 }) {
+  const [showHistory, setShowHistory] = useState(false)
   return (
     <Modal
       title={`レコード詳細 — ${row.key_value || '（IDなし）'}`}
@@ -399,10 +404,22 @@ function RecordModal({
         >
           このレコードを削除
         </button>
-        <Button size="sm" variant="outline" onClick={onClose}>
-          閉じる
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => setShowHistory(true)}>
+            変更履歴
+          </Button>
+          <Button size="sm" variant="outline" onClick={onClose}>
+            閉じる
+          </Button>
+        </div>
       </div>
+
+      {showHistory && (
+        <HistoryPanel
+          scope={{ kind: 'row', rowId: row.id, name: row.key_value || '（IDなし）' }}
+          onClose={() => setShowHistory(false)}
+        />
+      )}
     </Modal>
   )
 }

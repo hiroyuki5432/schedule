@@ -71,6 +71,20 @@ function evalCondition(
   }
 }
 
+/** Index of the first rule whose conditions all pass, or -1 when none do.
+ *  Exposed so the settings screen can show WHICH rule a row would land on. */
+export function firstMatchingRule(row: Row, rules: StatusRule[]): number {
+  for (let i = 0; i < rules.length; i++) {
+    if (rules[i].conditions.every((c) => evalCondition(c, row))) return i
+  }
+  return -1
+}
+
+/** Badge for a rule, with readable text colour. */
+export function badgeForRule(rule: StatusRule): StatusBadge {
+  return { label: rule.label, color: readableInk(rule.color), bg: rule.color }
+}
+
 export function deriveStatus(
   row: Row,
   statusColumn: Column | undefined,
@@ -79,13 +93,8 @@ export function deriveStatus(
     return null
   }
   const rules = statusColumn.config?.rules ?? []
-  for (const rule of rules) {
-    const all = rule.conditions.every((c) => evalCondition(c, row))
-    if (all) {
-      return { label: rule.label, color: readableInk(rule.color), bg: rule.color }
-    }
-  }
-  return null
+  const i = firstMatchingRule(row, rules)
+  return i >= 0 ? badgeForRule(rules[i]) : null
 }
 
 // Fallback palette for common literal status values (used when the value is a

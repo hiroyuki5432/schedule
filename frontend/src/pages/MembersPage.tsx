@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Badge } from '@/components/ui/Badge'
 import { Avatar } from '@/components/ui/Avatar'
+import { TableSkeleton } from '@/components/ui/Skeleton'
 import { ApiError } from '@/lib/http'
 import { cn } from '@/lib/format'
 import { toast } from '@/lib/toast'
@@ -84,7 +85,7 @@ export function MembersPage() {
         <Card>
           <CardBody className="px-0 py-0">
             {membersQ.isLoading ? (
-              <div className="px-5 py-4 text-[var(--ink3)]">読み込み中…</div>
+              <TableSkeleton rows={4} cols={5} />
             ) : (
               <table className="w-full border-collapse text-[12.5px]">
                 <thead>

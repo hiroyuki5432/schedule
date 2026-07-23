@@ -3,12 +3,17 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { useSheets, useColumns } from '@/hooks/useSheets'
+import { usePersistentState } from '@/hooks/usePersistentState'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Badge } from '@/components/ui/Badge'
+import { Tabs } from '@/components/ui/Tabs'
+import type { TabDef } from '@/components/ui/Tabs'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { TableSkeleton } from '@/components/ui/Skeleton'
 import { ChevronDownIcon, ChevronUpIcon, TrashIcon } from '@/components/ui/icons'
 import { DropdownOptionsEditor } from '@/components/settings/DropdownOptionsEditor'
 import { StatusRuleBuilder } from '@/components/settings/StatusRuleBuilder'
@@ -43,164 +48,268 @@ export function SheetSettingsPage() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const selected = columns.find((c) => String(c.id) === String(selectedId)) ?? null
+  const [tab, setTab] = usePersistentState<TabKey>('view:sheetSettings:tab', 'columns')
 
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: ['columns', sheetId] })
     void qc.invalidateQueries({ queryKey: ['sheet', sheetId] })
   }
 
-  // Reorder a column up/down by swapping its `order` with its neighbor's
-  // (Feature 2). Persisted via PATCH /api/columns/{id}. Falls back to index-based
-  // order values when neighbors happen to share the same order.
+  // Move a column to a new position (drag & drop, or the up/down buttons).
+  // Rewrites the whole sequence to 0..n-1 and PATCHes only what actually moved,
+  // which also repairs sheets whose columns share duplicate order values.
   const reorder = useMutation({
-    mutationFn: async ({ index, dir }: { index: number; dir: -1 | 1 }) => {
-      const j = index + dir
-      if (j < 0 || j >= columns.length) return
-      const a = columns[index]
-      const b = columns[j]
-      // Distinct target orders even if a.order === b.order in the current data.
-      const orderA = a.order !== b.order ? b.order : j
-      const orderB = a.order !== b.order ? a.order : index
-      await Promise.all([
-        api.updateColumn(a.id, { order: orderA }),
-        api.updateColumn(b.id, { order: orderB }),
-      ])
+    mutationFn: async ({ from, to }: { from: number; to: number }) => {
+      if (from === to || from < 0 || to < 0 || from >= columns.length || to >= columns.length)
+        return
+      const next = columns.slice()
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
+      await Promise.all(
+        next
+          .map((c, i) => ({ c, i }))
+          .filter(({ c, i }) => c.order !== i)
+          .map(({ c, i }) => api.updateColumn(c.id, { order: i })),
+      )
     },
     onSuccess: invalidate,
+    onError: () => toast.show('列の並べ替えを保存できませんでした。', 'error'),
   })
 
   if (!sheetId) {
     return <PageHeader title="シート設定" subtitle="シートが選択されていません。" />
   }
 
+  const tabs: ReadonlyArray<TabDef<TabKey>> = [
+    { key: 'columns', label: '列', hint: '表に出す項目と、その型・選択肢を決めます。行をドラッグすると並び順を変えられます。' },
+    {
+      key: 'display',
+      label: '表示',
+      hint: sheet?.has_week_grid
+        ? '固定する列、完了とみなす条件、ガントのフェーズ（◇）などの見え方を設定します。'
+        : '固定する列や完了とみなす条件など、一覧の見え方を設定します。',
+    },
+    { key: 'io', label: '入出力', hint: 'Excel への書き出しと、Excel からの取り込み。' },
+    { key: 'danger', label: '危険な操作', hint: '取り消せない操作です。実行前に内容をよく確認してください。' },
+  ]
+
   return (
     <>
       <PageHeader
         title="シート設定"
-        subtitle={`列定義・型・採番・色基準（${sheet?.name ?? '—'}）`}
+        subtitle={sheet?.name ?? '—'}
       />
 
-      <div className="grid grid-cols-1 gap-4 overflow-auto px-[22px] pb-6 lg:grid-cols-2">
-        <div className="flex flex-col gap-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>列一覧</CardTitle>
-            </CardHeader>
-            <CardBody className="px-0 py-0">
-              {columnsQ.isLoading ? (
-                <div className="px-5 py-4 text-[var(--ink3)]">読み込み中…</div>
-              ) : (
-                <table className="w-full border-collapse text-[12.5px]">
-                  <thead>
-                    <tr className="border-b border-[var(--line)] text-left text-[var(--ink3)]">
-                      <th className="px-3 py-2.5 font-medium">並び</th>
-                      <th className="px-5 py-2.5 font-medium">名前</th>
-                      <th className="px-5 py-2.5 font-medium">型</th>
-                      <th className="px-5 py-2.5 font-medium">キー</th>
-                      <th className="px-5 py-2.5" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {columns.map((c, i) => (
-                      <tr
-                        key={c.id}
-                        onClick={() => setSelectedId(c.id)}
-                        className={
-                          'cursor-pointer border-b border-[var(--line2)] hover:bg-[#FCFBF7]' +
-                          (String(c.id) === String(selectedId) ? ' bg-[#FCFBF7]' : '')
-                        }
-                      >
-                        <td className="px-3 py-2.5">
-                          <div className="flex flex-col">
-                            <button
-                              title="上へ"
-                              disabled={i === 0 || reorder.isPending}
-                              className="text-[var(--ink3)] hover:text-[var(--ink)] disabled:opacity-30"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                reorder.mutate({ index: i, dir: -1 })
-                              }}
-                            >
-                              <ChevronUpIcon className="h-3.5 w-3.5" />
-                            </button>
-                            <button
-                              title="下へ"
-                              disabled={i === columns.length - 1 || reorder.isPending}
-                              className="text-[var(--ink3)] hover:text-[var(--ink)] disabled:opacity-30"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                reorder.mutate({ index: i, dir: 1 })
-                              }}
-                            >
-                              <ChevronDownIcon className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        </td>
-                        <td className="px-5 py-2.5">{c.name}</td>
-                        <td className="px-5 py-2.5 text-[var(--ink2)]">
-                          {TYPE_LABEL[c.type]}
-                        </td>
-                        <td className="px-5 py-2.5">
-                          {c.is_key && (
-                            <Badge bg="#E3EFEA" color="#266B53">
-                              キー
-                            </Badge>
-                          )}
-                        </td>
-                        <td className="px-5 py-2.5 text-right">
-                          <DeleteColumnButton columnId={c.id} onDone={invalidate} />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-              <div className="border-t border-[var(--line)] px-5 py-4">
-                <AddColumnForm sheetId={sheetId} onDone={invalidate} />
-              </div>
-            </CardBody>
-          </Card>
+      <div className="flex min-h-0 flex-1 flex-col overflow-auto px-[22px] pb-6">
+        <Tabs tabs={tabs} active={tab} onChange={setTab} className="mb-4" />
 
-          <ExcelIOCard sheetId={sheetId} />
-
-          {sheet && (
-            <SheetLevelSettings
-              sheetId={sheetId}
-              columns={columns}
-              hasWeekGrid={sheet.has_week_grid}
-              keyColumnId={sheet.key_column_id}
-              colorBasisColumnId={sheet.color_basis_column_id}
-              settings={sheet.settings ?? {}}
-            />
-          )}
-
-          {/* Milestones (gantt phases) are schedule-only — hidden for table sheets. */}
-          {sheet && sheet.has_week_grid && (
-            <DefaultMilestonesEditor sheetId={sheetId} settings={sheet.settings ?? {}} />
-          )}
-
-          {sheet && <DangerZone sheetId={sheetId} sheetName={sheet.name} />}
-        </div>
-
-        <div className="flex flex-col gap-4">
-          {selected ? (
-            <ColumnDetailEditor
-              key={selected.id}
-              column={selected}
-              columns={columns}
-              sheetId={sheetId}
-              onDone={invalidate}
-            />
-          ) : (
+        {tab === 'columns' && (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Card>
-              <CardBody className="text-[var(--ink3)]">
-                左の一覧から列を選択すると、名前・型・型別の設定を編集できます。
+              <CardHeader>
+                <CardTitle>列一覧</CardTitle>
+              </CardHeader>
+              <CardBody className="px-0 py-0">
+                {columnsQ.isLoading ? (
+                  <TableSkeleton rows={5} cols={4} />
+                ) : columns.length === 0 ? (
+                  <EmptyState
+                    compact
+                    title="まだ列がありません"
+                    body="「件名」「担当」「ステータス」あたりから作ると、すぐ使える形になります。"
+                  />
+                ) : (
+                  <ColumnList
+                    columns={columns}
+                    selectedId={selectedId}
+                    busy={reorder.isPending}
+                    onSelect={setSelectedId}
+                    onMove={(from, to) => reorder.mutate({ from, to })}
+                    onDeleted={invalidate}
+                  />
+                )}
+                <div className="border-t border-[var(--line)] px-5 py-4">
+                  <AddColumnForm sheetId={sheetId} onDone={invalidate} />
+                </div>
               </CardBody>
             </Card>
-          )}
-        </div>
+
+            {selected ? (
+              <ColumnDetailEditor
+                key={selected.id}
+                column={selected}
+                columns={columns}
+                sheetId={sheetId}
+                onDone={invalidate}
+              />
+            ) : (
+              <Card>
+                <CardBody>
+                  <EmptyState
+                    compact
+                    title="列を選んでください"
+                    body="左の一覧から列をクリックすると、名前・型・型ごとの細かい設定（選択肢やルールなど）を編集できます。"
+                  />
+                </CardBody>
+              </Card>
+            )}
+          </div>
+        )}
+
+        {tab === 'display' && (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {sheet && (
+              <SheetLevelSettings
+                sheetId={sheetId}
+                columns={columns}
+                hasWeekGrid={sheet.has_week_grid}
+                keyColumnId={sheet.key_column_id}
+                colorBasisColumnId={sheet.color_basis_column_id}
+                settings={sheet.settings ?? {}}
+              />
+            )}
+            {/* Milestones (gantt phases) are schedule-only — hidden for table sheets. */}
+            {sheet && sheet.has_week_grid && (
+              <DefaultMilestonesEditor sheetId={sheetId} settings={sheet.settings ?? {}} />
+            )}
+          </div>
+        )}
+
+        {tab === 'io' && (
+          <div className="max-w-[720px]">
+            <ExcelIOCard sheetId={sheetId} />
+          </div>
+        )}
+
+        {tab === 'danger' && (
+          <div className="max-w-[720px]">
+            {sheet && <DangerZone sheetId={sheetId} sheetName={sheet.name} />}
+          </div>
+        )}
       </div>
     </>
+  )
+}
+
+type TabKey = 'columns' | 'display' | 'io' | 'danger'
+
+/** The column list. Rows drag to reorder; the ▲▼ buttons do the same thing for
+ *  anyone not using a mouse. */
+function ColumnList({
+  columns,
+  selectedId,
+  busy,
+  onSelect,
+  onMove,
+  onDeleted,
+}: {
+  columns: Column[]
+  selectedId: string | null
+  busy: boolean
+  onSelect: (id: string) => void
+  onMove: (from: number, to: number) => void
+  onDeleted: () => void
+}) {
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [overIndex, setOverIndex] = useState<number | null>(null)
+
+  return (
+    <table className="w-full border-collapse text-[12.5px]">
+      <thead>
+        <tr className="border-b border-[var(--line)] text-left text-[var(--ink3)]">
+          <th className="px-3 py-2.5 font-medium">並び</th>
+          <th className="px-5 py-2.5 font-medium">名前</th>
+          <th className="px-5 py-2.5 font-medium">型</th>
+          <th className="px-5 py-2.5 font-medium">キー</th>
+          <th className="px-5 py-2.5" />
+        </tr>
+      </thead>
+      <tbody>
+        {columns.map((c, i) => (
+          <tr
+            key={c.id}
+            draggable={!busy}
+            onDragStart={(e) => {
+              setDragIndex(i)
+              e.dataTransfer.effectAllowed = 'move'
+              // Firefox refuses to start a drag without payload.
+              e.dataTransfer.setData('text/plain', String(c.id))
+            }}
+            onDragOver={(e) => {
+              if (dragIndex == null) return
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'move'
+              setOverIndex(i)
+            }}
+            onDrop={(e) => {
+              e.preventDefault()
+              if (dragIndex != null && dragIndex !== i) onMove(dragIndex, i)
+              setDragIndex(null)
+              setOverIndex(null)
+            }}
+            onDragEnd={() => {
+              setDragIndex(null)
+              setOverIndex(null)
+            }}
+            onClick={() => onSelect(c.id)}
+            className={cn(
+              'cursor-pointer border-b border-[var(--line2)] hover:bg-[#FCFBF7]',
+              String(c.id) === String(selectedId) && 'bg-[#FCFBF7]',
+              dragIndex === i && 'opacity-40',
+              overIndex === i && dragIndex !== i && 'shadow-[inset_0_2px_0_var(--green)]',
+            )}
+          >
+            <td className="px-3 py-2.5">
+              <div className="flex items-center gap-1">
+                <span
+                  title="ドラッグして並べ替え"
+                  className="cursor-grab select-none text-[13px] leading-none text-[var(--ink3)]"
+                  aria-hidden
+                >
+                  ⠿
+                </span>
+                <div className="flex flex-col">
+                  <button
+                    title="上へ"
+                    disabled={i === 0 || busy}
+                    className="text-[var(--ink3)] hover:text-[var(--ink)] disabled:opacity-30"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onMove(i, i - 1)
+                    }}
+                  >
+                    <ChevronUpIcon className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    title="下へ"
+                    disabled={i === columns.length - 1 || busy}
+                    className="text-[var(--ink3)] hover:text-[var(--ink)] disabled:opacity-30"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onMove(i, i + 1)
+                    }}
+                  >
+                    <ChevronDownIcon className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            </td>
+            <td className="px-5 py-2.5">{c.name}</td>
+            <td className="px-5 py-2.5 text-[var(--ink2)]">{TYPE_LABEL[c.type]}</td>
+            <td className="px-5 py-2.5">
+              {c.is_key && (
+                <Badge bg="#E3EFEA" color="#266B53">
+                  キー
+                </Badge>
+              )}
+            </td>
+            <td className="px-5 py-2.5 text-right">
+              <DeleteColumnButton columnId={c.id} onDone={onDeleted} />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   )
 }
 

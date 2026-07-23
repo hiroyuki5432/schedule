@@ -7,6 +7,7 @@ import type {
   ColumnConfig,
   ColumnType,
   Effort,
+  EffortBulkItem,
   Member,
   Milestone,
   Notification,
@@ -14,6 +15,8 @@ import type {
   Org,
   Role,
   Row,
+  RowEvent,
+  SearchHit,
   Sheet,
   SheetDetail,
   SheetSettings,
@@ -156,6 +159,21 @@ export const putEffort = (
   weekStart: string,
   body: { planned_hours?: number | null; actual_hours?: number | null; version?: number },
 ) => http.put<Effort>(`/api/rows/${rowId}/effort/${weekStart}`, body)
+
+/** Write many weekly cells in one request (範囲貼り付け / 一括クリア / その取り消し). */
+export const putEffortBulk = (items: EffortBulkItem[]) =>
+  http.put<Effort[]>('/api/effort/bulk', { items })
+
+// ---- Cross-sheet search (Ctrl+K) ----
+export const searchRows = (q: string) =>
+  http.get<SearchHit[]>(`/api/search?q=${encodeURIComponent(q)}`)
+
+// ---- Change history (変更履歴) ----
+export const getRowHistory = (rowId: string) =>
+  http.get<RowEvent[]>(`/api/rows/${rowId}/history`)
+
+export const getSheetHistory = (sheetId: string, limit = 200) =>
+  http.get<RowEvent[]>(`/api/sheets/${sheetId}/history?limit=${limit}`)
 
 // ---- Milestones ----
 /** All milestones for every row in a sheet (one request — used by the schedule). */
