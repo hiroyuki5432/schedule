@@ -19,11 +19,12 @@ dist-types/
 .claude/settings.local.json
 .claude/launch.json
 
-# Operator/dev-specific docs NOT for the using side (contain personal email /
-# GitHub username / PAT steps / CI deploy method). Kept locally, not pushed.
+# Operator-specific docs NOT for the using side (contain personal email /
+# GitHub username / PAT steps). Kept locally, not pushed.
+# NOTE: .github/workflows IS pushed (needed for CI/CD to actually run) — it only
+# references secrets by name, no personal details.
 /DEPLOY.md
 /OPERATIONS.md
-/.github/
 
 # Env / secrets (real .env is ignored; *.example templates are kept)
 .env
