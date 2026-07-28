@@ -230,6 +230,35 @@ export async function importXlsx(
   return payload
 }
 
+/** Upload an .xlsx as a BRAND NEW sheet: columns are inferred from the header
+ *  row, then the rows are imported. Returns the new sheet id + counts. */
+export async function importNewSheetXlsx(
+  file: File,
+  opts: { name?: string; hasWeekGrid: boolean },
+): Promise<{
+  sheet_id: number
+  name: string
+  columns: number
+  created: number
+  updated: number
+}> {
+  const form = new FormData()
+  form.append('file', file)
+  if (opts.name) form.append('name', opts.name)
+  form.append('has_week_grid', String(opts.hasWeekGrid))
+  const res = await fetch('/api/sheets/import.xlsx', {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  })
+  const text = await res.text()
+  const payload = text ? JSON.parse(text) : {}
+  if (!res.ok) {
+    throw new ApiError(res.status, payload?.detail ?? `HTTP ${res.status}`)
+  }
+  return payload
+}
+
 export const exportWorklogXlsxUrl = (from: string, to: string) =>
   `/api/worklog/export.xlsx?from=${from}&to=${to}`
 

@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import io
 from datetime import date, datetime, timedelta
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -362,17 +363,10 @@ def _parse_week_header(raw) -> date | None:
     return None
 
 
-@router.post("/{sheet_id}/import.xlsx")
-def import_xlsx(
-    sheet_id: int,
-    file: UploadFile,
-    user: User = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> dict:
+def _load_active_sheet(file: UploadFile):
+    """Read an uploaded .xlsx and return (worksheet, header tuple, row iterator)."""
     from openpyxl import load_workbook
 
-    sheet = get_sheet_for_user(db, sheet_id, user)
-    ensure_schedule_columns(db, sheet)
     try:
         wb = load_workbook(io.BytesIO(file.file.read()), data_only=True, read_only=True)
     except Exception:
@@ -386,7 +380,24 @@ def import_xlsx(
         header = next(rows_iter)
     except StopIteration:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="空のファイルです")
+    return ws, header, rows_iter
 
+
+@router.post("/{sheet_id}/import.xlsx")
+def import_xlsx(
+    sheet_id: int,
+    file: UploadFile,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    sheet = get_sheet_for_user(db, sheet_id, user)
+    ensure_schedule_columns(db, sheet)
+    _ws, header, rows_iter = _load_active_sheet(file)
+    return _import_rows(db, user, sheet, header, rows_iter)
+
+
+def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter) -> dict:
+    """Upsert rows (by ID) from an already-opened worksheet into `sheet`."""
     columns = list(
         db.execute(
             select(Column).where(Column.sheet_id == sheet.id).order_by(Column.order, Column.id)
@@ -563,6 +574,143 @@ def import_xlsx(
 
     db.commit()
     return {"created": created, "updated": updated}
+
+
+# --------------------------------------------------------------------------- #
+# Import as a NEW sheet (シートごとExcelから取り込む)
+# --------------------------------------------------------------------------- #
+_DROPDOWN_MAX_OPTIONS = 20
+# Palette reused from the dropdown options editor, so inferred lists look native.
+_SWATCHES = [
+    "#E3EFEA", "#EFEDE4", "#FAE6E0", "#E6F0DB",
+    "#CBD9EE", "#F1DBAC", "#E7DDEA", "#DCE6EA",
+]
+
+
+def _looks_numeric(v) -> bool:
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float)):
+        return True
+    try:
+        float(str(v).strip())
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _infer_type(values: list, member_names: set[str]) -> tuple[str, dict]:
+    """Guess a column type from its sample values. Returns (type, config)."""
+    vals = [v for v in values if v is not None and str(v).strip() != ""]
+    if not vals:
+        return "text", {}
+    strs = [str(v).strip() for v in vals]
+
+    if all(_coerce_date_obj(v) is not None for v in vals):
+        return "date", {}
+    if all(_looks_numeric(v) for v in vals):
+        return "number", {}
+    # Every value naming an org member → 担当者 column.
+    if member_names and all(s in member_names for s in strs):
+        return "member", {}
+
+    distinct = sorted(set(strs))
+    # A short, repeating set of labels is a pick-list, not free text: at most 20
+    # distinct values, and they must cover no more than 2/3 of the rows (so a
+    # column of mostly-unique free text stays text).
+    if 1 < len(distinct) <= _DROPDOWN_MAX_OPTIONS and len(distinct) * 3 <= len(strs) * 2:
+        options = [
+            {"id": uuid4().hex, "value": v, "color": _SWATCHES[i % len(_SWATCHES)]}
+            for i, v in enumerate(distinct)
+        ]
+        return "dropdown", {"options": options}
+    return "text", {}
+
+
+@router.post("/import.xlsx", status_code=status.HTTP_201_CREATED)
+def import_new_sheet_xlsx(
+    file: UploadFile,
+    name: str = Form(default=""),
+    has_week_grid: bool = Form(default=True),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a NEW sheet from an .xlsx and fill it (要望: シートもexcelから取り込める).
+
+    The first row is the header. Column A is the row ID (key_value); every other
+    header becomes a column whose type is guessed from its values (日付 / 数値 /
+    メンバー / プルダウン / 自由入力). On a schedule sheet the reserved headers —
+    進捗(%), 先行タスク(ID), ◇予定/◇実績 and ISO-date week columns — keep their
+    normal meaning and do NOT become attribute columns.
+    """
+    ws, header, rows_iter = _load_active_sheet(file)
+
+    sheet_name = (name or "").strip() or str(ws.title or "").strip() or "取り込みシート"
+    max_order = db.execute(
+        select(func.coalesce(func.max(Sheet.order), -1)).where(Sheet.org_id == user.org_id)
+    ).scalar_one()
+    sheet = Sheet(
+        org_id=user.org_id,
+        name=sheet_name[:80],
+        has_week_grid=has_week_grid,
+        order=max_order + 1,
+        numbering_rule={"prefix": "", "digits": 3, "next_seq": 1},
+    )
+    db.add(sheet)
+    db.flush()
+    # Schedule sheets get their 開始日/完了日 columns before inference, so those
+    # headers bind to the real columns instead of creating duplicates.
+    ensure_schedule_columns(db, sheet)
+
+    # Buffer the data rows: type inference needs a look at the values, and the
+    # worksheet iterator is single-pass (read_only mode).
+    data_rows = [r for r in rows_iter if r is not None and any(v not in (None, "") for v in r)]
+
+    existing_names = {
+        c.name
+        for c in db.execute(select(Column).where(Column.sheet_id == sheet.id)).scalars()
+    }
+    member_names = set(_members_by_name(db, user.org_id).keys())
+
+    reserved = {PROGRESS_HEADER, DEPS_HEADER}
+    created_cols = 0
+    order = len(existing_names)
+    for idx, raw_name in enumerate(header):
+        if idx == 0 or raw_name is None:
+            continue  # column A is the ID
+        nm = str(raw_name).strip()
+        if not nm or nm in existing_names:
+            continue
+        if has_week_grid:
+            if nm in reserved or _parse_week_header(raw_name) is not None:
+                continue
+            # 「◇名（予定）」/「◇名（実績）」 are handled by the milestone importer.
+            if nm.endswith("（予定）") or nm.endswith("（実績）"):
+                continue
+        sample = [r[idx] if idx < len(r) else None for r in data_rows[:200]]
+        ctype, config = _infer_type(sample, member_names)
+        db.add(
+            Column(
+                sheet_id=sheet.id,
+                name=nm[:80],
+                type=ctype,
+                order=order,
+                is_key=False,
+                config=config,
+            )
+        )
+        existing_names.add(nm)
+        order += 1
+        created_cols += 1
+    db.flush()
+
+    result = _import_rows(db, user, sheet, header, iter(data_rows))
+    return {
+        "sheet_id": sheet.id,
+        "name": sheet.name,
+        "columns": created_cols,
+        **result,
+    }
 
 
 def _gen_key(db: Session, sheet: Sheet) -> str:

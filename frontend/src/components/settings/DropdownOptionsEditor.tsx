@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { TrashIcon } from '@/components/ui/icons'
 import { cn } from '@/lib/format'
+import { toast } from '@/lib/toast'
 import type { Column, DropdownOption } from '@/types/api'
 
 const SWATCHES = [
@@ -55,7 +56,9 @@ export function DropdownOptionsEditor({
       // Renames may have remapped stored values → refresh the sheet's rows.
       void qc.invalidateQueries({ queryKey: ['sheet'] })
       onDone()
+      toast.show('選択肢を保存しました', 'success', 2000)
     },
+    onError: () => toast.show('選択肢を保存できませんでした。', 'error'),
   })
 
   function add() {

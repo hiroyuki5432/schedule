@@ -16,6 +16,14 @@ export function avatarBg(seed: string | undefined | null): string {
   return AVATAR_BG[h % AVATAR_BG.length]
 }
 
+/** Display format for 工数 (hours): whole numbers only (要望: 工数の表示は小数いらない).
+ *  Stored values keep their precision — this is presentation only, so a 0.5h
+ *  entry still adds 0.5 to every total; it just isn't printed with a decimal.
+ *  Use `round1` where the exact value matters (tooltips, editors). */
+export function fmtHours(n: number): string {
+  return String(Math.round(n))
+}
+
 /** cn — join class names, dropping falsy. */
 export function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(' ')

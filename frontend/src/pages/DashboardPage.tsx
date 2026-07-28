@@ -21,7 +21,9 @@ function num(v: number | string | null | undefined): number {
   const n = typeof v === 'number' ? v : Number(v)
   return Number.isFinite(n) ? n : 0
 }
-const round1 = (x: number) => Math.round(x * 10) / 10
+// Hours are shown as whole numbers here (要望: 工数の表示は小数いらない). Only the
+// display rounds — every total is still summed from the exact stored values.
+const round1 = (x: number) => Math.round(x)
 
 export function DashboardPage() {
   const { sheets, sheetId, setSheetId, loading: sheetsLoading } = useSelectedSheet(

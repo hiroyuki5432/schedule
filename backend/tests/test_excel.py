@@ -230,6 +230,96 @@ def test_export_has_week_columns_without_effort(auth_client):
     assert float(effort[0]["actual_hours"] or 0) + float(effort[0]["planned_hours"] or 0) == 8.0
 
 
+def _xlsx(rows: list[list]) -> io.BytesIO:
+    wb = Workbook()
+    ws = wb.active
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def test_import_creates_new_sheet_with_inferred_columns(auth_client):
+    """POST /api/sheets/import.xlsx builds a sheet from the header row and guesses
+    each column's type from its values (要望: シートもexcelから取り込める)."""
+    buf = _xlsx(
+        [
+            ["ID", "件名", "担当", "区分", "開始予定", "見積"],
+            ["A-1", "設計する", "Admin", "開発", "2026-04-01", 12],
+            ["A-2", "実装する", "Admin", "開発", "2026-04-08", 30],
+            ["A-3", "確認する", "Admin", "検証", "2026-04-15", 4],
+        ]
+    )
+    r = auth_client.post(
+        "/api/sheets/import.xlsx",
+        files={"file": ("plan.xlsx", buf, _MEDIA)},
+        data={"name": "取込テスト", "has_week_grid": "true"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["created"] == 3
+    sid = body["sheet_id"]
+
+    detail = auth_client.get(f"/api/sheets/{sid}").json()
+    assert detail["sheet"]["name"] == "取込テスト"
+    by_name = {c["name"]: c for c in detail["columns"]}
+    assert by_name["件名"]["type"] == "text"
+    assert by_name["担当"]["type"] == "member"  # matches an org member's name
+    assert by_name["区分"]["type"] == "dropdown"  # few repeated labels
+    assert sorted(o["value"] for o in by_name["区分"]["config"]["options"]) == ["検証", "開発"]
+    assert by_name["開始予定"]["type"] == "date"
+    assert by_name["見積"]["type"] == "number"
+
+    rows = {x["key_value"]: x for x in detail["rows"]}
+    assert rows["A-1"]["data"][str(by_name["件名"]["id"])] == "設計する"
+    assert rows["A-1"]["data"][str(by_name["担当"]["id"])] == auth_client.org_admin["admin_id"]
+    assert rows["A-3"]["data"][str(by_name["見積"]["id"])] == 4
+
+
+def test_import_new_sheet_keeps_week_columns_out_of_attributes(auth_client):
+    """ISO-date headers stay week columns (工数) instead of becoming attributes."""
+    buf = _xlsx([["ID", "件名", "2099-01-05"], ["W-1", "作業", 9]])
+    r = auth_client.post(
+        "/api/sheets/import.xlsx",
+        files={"file": ("wk.xlsx", buf, _MEDIA)},
+        data={"has_week_grid": "true"},
+    )
+    assert r.status_code == 201, r.text
+    sid = r.json()["sheet_id"]
+
+    names = {c["name"] for c in auth_client.get(f"/api/sheets/{sid}").json()["columns"]}
+    assert "2099-01-05" not in names
+    assert {"件名", "開始日", "完了日"} <= names
+
+    effort = auth_client.get(f"/api/sheets/{sid}/effort").json()
+    assert len(effort) == 1
+    assert float(effort[0]["planned_hours"]) == 9.0
+
+
+def test_import_new_sheet_defaults_name_to_worksheet(auth_client):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "作業一覧"
+    ws.append(["ID", "件名"])
+    ws.append(["N-1", "メモ"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    r = auth_client.post(
+        "/api/sheets/import.xlsx",
+        files={"file": ("x.xlsx", buf, _MEDIA)},
+        data={"has_week_grid": "false"},
+    )
+    assert r.status_code == 201, r.text
+    sid = r.json()["sheet_id"]
+    detail = auth_client.get(f"/api/sheets/{sid}").json()
+    assert detail["sheet"]["name"] == "作業一覧"
+    assert detail["sheet"]["has_week_grid"] is False
+
+
 def test_import_weekly_effort_future_planned(auth_client):
     sid = make_sheet(auth_client, "Z")  # week-grid sheet
     _add_text_column(auth_client, sid, "件名")

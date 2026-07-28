@@ -19,6 +19,7 @@ import { HistoryPanel } from '@/components/schedule/HistoryPanel'
 import { Modal } from '@/components/ui/Modal'
 import { statusFromPhases } from '@/lib/status'
 import { normalizeDateForSort } from '@/lib/format'
+import { defaultColWidth, fitWidth, useColumnWidths } from '@/lib/colWidth'
 import { usePersistentState } from '@/hooks/usePersistentState'
 import { PlusIcon, TrashIcon } from '@/components/ui/icons'
 import type { CellValue, Column, Member, Milestone, Row } from '@/types/api'
@@ -47,22 +48,21 @@ function SortArrow({ dir }: { dir: SortDir | null }) {
   return <span className="ml-0.5 text-[9px]">{dir === 'asc' ? '▲' : '▼'}</span>
 }
 
-/** Fixed table-column width by type, so display↔edit never reflows neighbors. */
-function colWidth(c: Column): number {
-  switch (c.type) {
-    case 'status':
-      return 140
-    case 'member':
-      return 160
-    case 'date':
-      return 140
-    case 'number':
-      return 110
-    case 'lookup':
-      return 180
-    default:
-      return 200
+/** Display string for a cell — only used to measure the content-fit width. */
+function measureValue(
+  c: Column,
+  row: Row,
+  members: Member[],
+  lookupValue: (column: Column, row: Row) => string | null,
+): string {
+  if (c.type === 'member') {
+    const id = row.data[c.id]
+    return members.find((m) => String(m.id) === String(id ?? ''))?.name ?? ''
   }
+  if (c.type === 'lookup') return lookupValue(c, row) ?? ''
+  const v = row.data[c.id]
+  // Multi-line text only ever shows its first line in the table.
+  return v == null ? '' : String(v).split('\n')[0]
 }
 
 export function TableSheetView({ sheetId, sheetName }: Props) {
@@ -174,6 +174,24 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
   const dirFor = (key: string): SortDir | null =>
     sort?.key === key ? sort.dir : null
 
+  // Column widths: fit each column to its widest value instead of a flat 200px
+  // (要望: リスト作成時 幅広すぎ)、and let the header edge be dragged to a fixed
+  // width that sticks (shared with the schedule grid, keyed by column id).
+  const fitWidths = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const c of columns)
+      m.set(
+        c.id,
+        fitWidth(
+          c,
+          rows.map((r) => measureValue(c, r, members, lookupValue)),
+        ),
+      )
+    return m
+  }, [columns, rows, members, lookupValue])
+  const { colW, startResize, resetWidth } = useColumnWidths()
+  const cw = (c: Column) => colW[c.id] ?? fitWidths.get(c.id) ?? defaultColWidth(c)
+
   function addRow() {
     api
       .createRow(sheetId, { data: {} })
@@ -237,12 +255,12 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
           />
         ) : (
           <Card className="overflow-auto">
-            <table className="w-full table-fixed border-collapse text-[12.5px]">
+            <table className="table-fixed border-collapse text-[12.5px]">
               <colgroup>
                 <col style={{ width: 56 }} />
                 <col style={{ width: 120 }} />
                 {columns.map((c) => (
-                  <col key={c.id} style={{ width: colWidth(c) }} />
+                  <col key={c.id} style={{ width: cw(c) }} />
                 ))}
                 <col style={{ width: 48 }} />
               </colgroup>
@@ -257,11 +275,17 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                     />
                   </th>
                   {columns.map((c) => (
-                    <th key={c.id} className="px-3 py-2.5 font-medium">
+                    <th key={c.id} className="relative px-3 py-2.5 font-medium">
                       <SortHeader
                         label={c.name}
                         dir={dirFor(c.id)}
                         onClick={() => setSort((p) => cycleSort(p, c.id))}
+                      />
+                      <span
+                        onMouseDown={(e) => startResize(e, c.id, cw(c))}
+                        onDoubleClick={() => resetWidth(c.id)}
+                        title="ドラッグで列幅を変更（ダブルクリックで自動幅に戻す）"
+                        className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-[var(--green-l)]/40"
                       />
                     </th>
                   ))}

@@ -22,6 +22,7 @@ import { ExcelToolbar } from '@/components/ExcelToolbar'
 import { PlusIcon } from '@/components/ui/icons'
 import { cn } from '@/lib/format'
 import { toast } from '@/lib/toast'
+import { ApiError } from '@/lib/http'
 import type { Column, ColumnType, DefaultMilestone, SheetSettings } from '@/types/api'
 
 const TYPE_LABEL: Record<ColumnType, string> = {
@@ -129,7 +130,11 @@ export function SheetSettingsPage() {
                   />
                 )}
                 <div className="border-t border-[var(--line)] px-5 py-4">
-                  <AddColumnForm sheetId={sheetId} onDone={invalidate} />
+                  <AddColumnForm
+                    sheetId={sheetId}
+                    onDone={invalidate}
+                    onCreated={setSelectedId}
+                  />
                 </div>
               </CardBody>
             </Card>
@@ -295,7 +300,14 @@ function ColumnList({
               </div>
             </td>
             <td className="px-5 py-2.5">{c.name}</td>
-            <td className="px-5 py-2.5 text-[var(--ink2)]">{TYPE_LABEL[c.type]}</td>
+            <td className="px-5 py-2.5 text-[var(--ink2)]">
+              {TYPE_LABEL[c.type]}
+              {/* A dropdown with no options can't be picked from — say so here
+                  instead of leaving an empty select in the grid. */}
+              {c.type === 'dropdown' && (c.config?.options?.length ?? 0) === 0 && (
+                <span className="ml-1.5 text-[11px] text-[#A8442B]">選択肢 未設定</span>
+              )}
+            </td>
             <td className="px-5 py-2.5">
               {c.is_key && (
                 <Badge bg="#E3EFEA" color="#266B53">
@@ -338,17 +350,47 @@ function DeleteColumnButton({
   )
 }
 
-function AddColumnForm({ sheetId, onDone }: { sheetId: string; onDone: () => void }) {
+function AddColumnForm({
+  sheetId,
+  onDone,
+  onCreated,
+}: {
+  sheetId: string
+  onDone: () => void
+  /** Select the new column so its type-specific editor (選択肢 / ルール / 参照先)
+   *  opens immediately — otherwise "プルダウンを追加したのに選択肢が入れられない". */
+  onCreated: (columnId: string) => void
+}) {
   const [name, setName] = useState('')
   const [type, setType] = useState<ColumnType>('text')
+  const [error, setError] = useState<string | null>(null)
 
   const mutation = useMutation({
     mutationFn: () => api.createColumn(sheetId, { name: name.trim(), type }),
-    onSuccess: () => {
+    onSuccess: (col) => {
       setName('')
+      setType('text')
       onDone()
+      onCreated(String(col.id))
+      toast.show(`「${col.name}」を追加しました`, 'success', 2000)
+    },
+    // Without this a rejected request looked like "追加しても効かない" — nothing
+    // moved and nothing was said.
+    onError: (e) => {
+      const msg = e instanceof ApiError ? e.message : '列を追加できませんでした。'
+      setError(msg)
+      toast.show(msg, 'error')
     },
   })
+
+  function submit() {
+    setError(null)
+    if (!name.trim()) {
+      setError('列名を入力してください。')
+      return
+    }
+    mutation.mutate()
+  }
 
   return (
     <div>
@@ -357,13 +399,16 @@ function AddColumnForm({ sheetId, onDone }: { sheetId: string; onDone: () => voi
         className="flex flex-wrap items-center gap-2"
         onSubmit={(e) => {
           e.preventDefault()
-          if (name.trim()) mutation.mutate()
+          submit()
         }}
       >
         <Input
           placeholder="列名"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => {
+            setName(e.target.value)
+            if (error) setError(null)
+          }}
           className="flex-1"
         />
         <Select value={type} onChange={(e) => setType(e.target.value as ColumnType)}>
@@ -374,9 +419,15 @@ function AddColumnForm({ sheetId, onDone }: { sheetId: string; onDone: () => voi
           ))}
         </Select>
         <Button type="submit" disabled={mutation.isPending}>
-          追加
+          {mutation.isPending ? '追加中…' : '追加'}
         </Button>
       </form>
+      {error && <div className="mt-2 text-[11.5px] text-[#A8442B]">{error}</div>}
+      {type === 'dropdown' && !error && (
+        <div className="mt-2 text-[11.5px] text-[var(--ink3)]">
+          追加すると右側に「選択肢」の編集欄が開きます。そこで値を入れて「保存」してください。
+        </div>
+      )}
     </div>
   )
 }

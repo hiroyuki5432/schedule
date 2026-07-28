@@ -1,16 +1,22 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { useMembers, useWeekStartWeekday } from '@/hooks/useSheets'
 import { useSelectedSheet } from '@/hooks/useSelectedSheet'
 import { useScheduleData } from '@/hooks/useScheduleData'
 import { useAuth } from '@/hooks/useAuth'
+import { usePersistentState } from '@/hooks/usePersistentState'
 import { PageHeader } from '@/components/PageHeader'
 import { SheetPicker } from '@/components/SheetPicker'
+import { Select } from '@/components/ui/Select'
 import { Card, CardBody } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Avatar } from '@/components/ui/Avatar'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { TableSkeleton } from '@/components/ui/Skeleton'
+import { fmtHours } from '@/lib/format'
+
+/** Member picker value meaning "everyone's tasks, not just one person's". */
+const ALL = '__all__'
 
 export function MyTasksPage() {
   const { user } = useAuth()
@@ -21,6 +27,13 @@ export function MyTasksPage() {
     'view:myTasks:sheetId',
     true,
   )
+  // Whose tasks to show. Defaults to the signed-in user, but any member (or
+  // everyone) can be selected — the same page doubles as a team view
+  // (要望: マイタスクは他の人も見れるように).
+  const [who, setWho] = usePersistentState<string>('view:myTasks:userId', '')
+  useEffect(() => {
+    if (!who && user?.id) setWho(String(user.id))
+  }, [who, user?.id, setWho])
 
   const grid = useScheduleData({
     sheetId,
@@ -29,18 +42,41 @@ export function MyTasksPage() {
     asOfWeek: null,
   })
 
-  // "自分担当の行" filter (SPEC 3 / 5).
-  const mine = useMemo(
-    () => grid.rows.filter((r) => r.assigneeId && r.assigneeId === user?.id),
-    [grid.rows, user?.id],
-  )
+  const mine = useMemo(() => {
+    if (who === ALL) return grid.rows.filter((r) => !!r.assigneeId)
+    const target = who || String(user?.id ?? '')
+    return grid.rows.filter((r) => r.assigneeId && String(r.assigneeId) === target)
+  }, [grid.rows, who, user?.id])
+
+  const isMe = who === '' || who === String(user?.id ?? '')
+  const whoName =
+    who === ALL
+      ? '全メンバー'
+      : (members.find((m) => String(m.id) === who)?.name ?? user?.name ?? '')
 
   return (
     <>
       <PageHeader
         title="マイタスク"
-        subtitle="自分が担当しているタスク"
-        actions={<SheetPicker sheets={sheets} sheetId={sheetId} onChange={setSheetId} />}
+        subtitle={isMe ? '自分が担当しているタスク' : `${whoName} が担当しているタスク`}
+        actions={
+          <div className="flex items-center gap-2">
+            <Select
+              value={who || String(user?.id ?? '')}
+              onChange={(e) => setWho(e.target.value)}
+              title="表示する担当者"
+              className="w-[160px]"
+            >
+              {members.map((m) => (
+                <option key={m.id} value={String(m.id)}>
+                  {String(m.id) === String(user?.id) ? `${m.name}（自分）` : m.name}
+                </option>
+              ))}
+              <option value={ALL}>全メンバー</option>
+            </Select>
+            <SheetPicker sheets={sheets} sheetId={sheetId} onChange={setSheetId} />
+          </div>
+        }
       />
 
       <div className="flex flex-col gap-4 overflow-auto px-[22px] pb-6">
@@ -57,8 +93,12 @@ export function MyTasksPage() {
             ) : mine.length === 0 ? (
               <EmptyState
                 compact
-                title="このシートで担当しているタスクはありません"
-                body="担当者の列に自分が設定されたタスクがここに出ます。別のシートを見るには右上で切り替えてください。"
+                title={
+                  isMe
+                    ? 'このシートで担当しているタスクはありません'
+                    : `このシートで ${whoName} が担当しているタスクはありません`
+                }
+                body="担当者の列に設定されたタスクがここに出ます。別のシートや担当者を見るには右上で切り替えてください。"
               />
             ) : (
               <table className="w-full border-collapse text-[12.5px]">
@@ -99,7 +139,7 @@ export function MyTasksPage() {
                         )}
                       </td>
                       <td className="px-5 py-2.5 text-right text-[var(--ink2)]">
-                        {r.gantt.plannedSum}h
+                        {fmtHours(r.gantt.plannedSum)}h
                       </td>
                     </tr>
                   ))}

@@ -7,7 +7,7 @@ import { cn } from '@/lib/format'
 
 type SortDir = 'asc' | 'desc'
 
-const MENU_W = 250
+const MENU_W = 264
 
 interface Props {
   colName: string
@@ -26,9 +26,13 @@ interface Props {
 }
 
 /** Dropdown shown when a column header title is clicked: sort (昇順/降順/解除) plus
- *  a type-aware filter — checkbox list (text), month list (date), or a min/max
- *  range (number). Rendered in a portal with fixed positioning so it escapes the
- *  grid's scroll container (which would otherwise clip/overlap it). */
+ *  a type-aware filter — checkbox list (text), date tree (date), or a numeric
+ *  condition. Rendered in a portal with fixed positioning so it escapes the
+ *  grid's scroll container (which would otherwise clip/overlap it).
+ *
+ *  Filter edits are held in a DRAFT and only applied when OK is pressed, the way
+ *  Excel behaves (要望: チェックを変えた瞬間ではなく OK で確定). Sorting still applies
+ *  immediately — that's also what Excel does. */
 export function ColumnHeaderMenu({
   colName,
   kind,
@@ -43,6 +47,13 @@ export function ColumnHeaderMenu({
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ top: number; left: number; maxH: number } | null>(null)
+  // Pending selection. `undefined` = no filter (everything shown).
+  const [draft, setDraft] = useState<ColFilter | undefined>(filter)
+
+  const apply = () => {
+    onFilter(draft)
+    onClose()
+  }
 
   // Position under the header cell; flip left if it would overflow the viewport.
   useLayoutEffect(() => {
@@ -51,10 +62,12 @@ export function ColumnHeaderMenu({
     const r = el.getBoundingClientRect()
     let left = r.left
     if (left + MENU_W > window.innerWidth - 8) left = Math.max(8, r.right - MENU_W)
-    setPos({ top: r.bottom + 4, left, maxH: Math.max(180, window.innerHeight - r.bottom - 16) })
+    setPos({ top: r.bottom + 4, left, maxH: Math.max(220, window.innerHeight - r.bottom - 16) })
   }, [anchorRef])
 
-  // Close on outside click, scroll (any element), or Escape.
+  // Close on outside click, on a scroll of something OUTSIDE the menu, or Escape.
+  // Scrolling *inside* the menu (mouse wheel over the value list) must not close
+  // it — that was the 「マウスくるくるすると消える」 bug.
   useEffect(() => {
     function onDown(e: MouseEvent) {
       const t = e.target as Node
@@ -62,7 +75,12 @@ export function ColumnHeaderMenu({
       if (anchorRef.current?.contains(t)) return
       onClose()
     }
-    function onScroll() {
+    function onScroll(e: Event) {
+      const t = e.target as Node | null
+      if (t && menuRef.current?.contains(t)) return
+      onClose()
+    }
+    function onResize() {
       onClose()
     }
     function onKey(e: KeyboardEvent) {
@@ -70,12 +88,12 @@ export function ColumnHeaderMenu({
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('scroll', onScroll, true)
-    window.addEventListener('resize', onScroll)
+    window.addEventListener('resize', onResize)
     document.addEventListener('keydown', onKey)
     return () => {
       document.removeEventListener('mousedown', onDown)
       document.removeEventListener('scroll', onScroll, true)
-      window.removeEventListener('resize', onScroll)
+      window.removeEventListener('resize', onResize)
       document.removeEventListener('keydown', onKey)
     }
   }, [anchorRef, onClose])
@@ -85,15 +103,17 @@ export function ColumnHeaderMenu({
   return createPortal(
     <div
       ref={menuRef}
-      className="fixed z-[100] flex flex-col overflow-y-auto rounded-[11px] border border-[var(--line)] bg-[var(--surface)] p-2.5 text-left shadow-lg"
+      // The wheel must scroll the value list, not the grid behind it.
+      onWheel={(e) => e.stopPropagation()}
+      className="fixed z-[100] flex flex-col overflow-hidden rounded-[11px] border border-[var(--line)] bg-[var(--surface)] p-2.5 text-left shadow-lg"
       style={{ top: pos.top, left: pos.left, width: MENU_W, maxHeight: pos.maxH }}
     >
       <div className="mb-1.5 truncate px-1 text-[12px] font-semibold text-[var(--ink)]">
         {colName}
       </div>
 
-      {/* Sort */}
-      <div className="mb-1 flex gap-1">
+      {/* Sort — applied immediately (Excel behaviour). */}
+      <div className="mb-1 flex flex-shrink-0 gap-1">
         <SortBtn active={sortDir === 'asc'} onClick={() => onSort('asc')}>
           ▲ 昇順
         </SortBtn>
@@ -107,14 +127,45 @@ export function ColumnHeaderMenu({
 
       {filterable && (
         <>
-          <div className="my-2 border-t border-[var(--line2)]" />
-          {kind === 'number' ? (
-            <NumberFilter options={options} filter={filter} onFilter={onFilter} />
-          ) : kind === 'dates' ? (
-            <DateTreeFilter options={options} filter={filter} onFilter={onFilter} />
-          ) : (
-            <CheckFilter kind={kind} options={options} filter={filter} onFilter={onFilter} />
-          )}
+          <div className="my-2 flex-shrink-0 border-t border-[var(--line2)]" />
+          {/* min-h-0 lets this flex child actually shrink so its own overflow
+              scrolls instead of pushing the OK row out of the menu. */}
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {kind === 'number' ? (
+              <NumberFilter options={options} filter={draft} onFilter={setDraft} />
+            ) : kind === 'dates' ? (
+              <DateTreeFilter options={options} filter={draft} onFilter={setDraft} />
+            ) : (
+              <CheckFilter kind={kind} options={options} filter={draft} onFilter={setDraft} />
+            )}
+          </div>
+
+          <div className="mt-2 flex flex-shrink-0 items-center gap-1.5 border-t border-[var(--line2)] pt-2">
+            <button
+              type="button"
+              onClick={() => setDraft(undefined)}
+              disabled={draft === undefined}
+              title="この列の絞り込みを解除（OKで確定）"
+              className="rounded-[7px] px-1.5 py-1 text-[11px] text-[var(--ink3)] hover:text-[var(--ink)] disabled:opacity-40 disabled:hover:text-[var(--ink3)]"
+            >
+              クリア
+            </button>
+            <div className="flex-1" />
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-[7px] border border-[var(--line)] px-2.5 py-1 text-[11.5px] text-[var(--ink2)] hover:bg-[var(--line2)]"
+            >
+              キャンセル
+            </button>
+            <button
+              type="button"
+              onClick={apply}
+              className="rounded-[7px] border border-[var(--green)] bg-[var(--green)] px-3.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90"
+            >
+              OK
+            </button>
+          </div>
         </>
       )}
     </div>,
@@ -176,7 +227,11 @@ function CheckFilter({
 }
 
 /** Reusable "(すべて選択) + value checkboxes (+ 空白セル)" list with a search box.
- *  `selected` = checked key set; undefined = everything checked (no filter). */
+ *  `selected` = checked key set; undefined = everything checked (no filter).
+ *
+ *  Typing in the search box narrows the ticked set to the matches and unticks
+ *  everything else, like Excel (要望: 検索するときは他のを外す). Clearing the box
+ *  leaves that selection in place so it can still be adjusted by hand. */
 function ValueChecklist({
   values,
   hasBlank,
@@ -211,22 +266,53 @@ function ValueChecklist({
   const ql = q.trim().toLowerCase()
   const shown = ql ? items.filter((i) => i.label.toLowerCase().includes(ql)) : items
 
+  /** Searching replaces the selection with the matches (Excel-style). */
+  function search(next: string) {
+    setQ(next)
+    const needle = next.trim().toLowerCase()
+    if (!needle) return
+    const hits = items.filter((i) => i.label.toLowerCase().includes(needle)).map((i) => i.key)
+    onChange(hits.length >= allKeys.length ? undefined : hits)
+  }
+
+  // Tick / untick just the rows currently matching the search box.
+  const shownKeys = shown.map((i) => i.key)
+  const shownState: 'on' | 'off' | 'mixed' = (() => {
+    const on = shownKeys.filter(isChecked).length
+    return on === 0 ? 'off' : on === shownKeys.length ? 'on' : 'mixed'
+  })()
+  function setShown(on: boolean) {
+    const cur = new Set(selected ?? allKeys)
+    for (const k of shownKeys) {
+      if (on) cur.add(k)
+      else cur.delete(k)
+    }
+    onChange(cur.size >= allKeys.length ? undefined : [...cur])
+  }
+
   return (
     <div>
-      {items.length > 8 && (
+      {items.length > 5 && (
         <input
           value={q}
-          onChange={(e) => setQ(e.target.value)}
+          onChange={(e) => search(e.target.value)}
           placeholder="検索"
-          className="mb-1 w-full rounded-[7px] border border-[var(--line)] bg-[var(--surface)] px-2 py-1 text-[11px] outline-none focus:border-[var(--green)]"
+          className="mb-1 w-full rounded-[7px] border border-[var(--line)] bg-[var(--surface)] px-2 py-1 text-[11.5px] outline-none focus:border-[var(--green)]"
         />
       )}
-      <div className="max-h-[190px] overflow-y-auto pr-0.5">
-        {!ql && (
+      <div className="max-h-[210px] overflow-y-auto pr-0.5">
+        {!ql ? (
           <label className="flex cursor-pointer items-center gap-1.5 py-0.5 text-[11.5px] text-[var(--ink)]">
             <input type="checkbox" checked={allChecked} onChange={toggleAll} />
             <span className="font-medium">(すべて選択)</span>
           </label>
+        ) : (
+          shown.length > 0 && (
+            <label className="flex cursor-pointer items-center gap-1.5 py-0.5 text-[11.5px] text-[var(--ink)]">
+              <TriCheckbox state={shownState} onChange={() => setShown(shownState !== 'on')} />
+              <span className="font-medium">(検索結果をすべて選択)</span>
+            </label>
+          )
         )}
         {shown.map((it) => (
           <label

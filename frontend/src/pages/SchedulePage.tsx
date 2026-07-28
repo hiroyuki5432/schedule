@@ -13,7 +13,7 @@ import { useUndo, useUndoHotkeys } from '@/hooks/useUndo'
 import type { UndoDirection } from '@/hooks/useUndo'
 import * as api from '@/api/client'
 import { GanttGrid } from '@/components/schedule/GanttGrid'
-import type { WeekEdit } from '@/components/schedule/GanttGrid'
+import type { SortState, WeekEdit } from '@/components/schedule/GanttGrid'
 import { Legend } from '@/components/schedule/Legend'
 import { MilestoneEditor } from '@/components/schedule/MilestoneEditor'
 import { DependencyEditor } from '@/components/schedule/DependencyEditor'
@@ -53,6 +53,24 @@ const VIEW_MODES: Array<{ m: ViewMode; label: string }> = [
   { m: 'week', label: '週' },
   { m: 'month', label: '月' },
 ]
+
+/** The filter + sort state a user can save as this sheet's 既定の表示. */
+interface ViewPreset {
+  colFilters: Record<string, ColFilter>
+  sort: SortState | null
+  search: string
+  hideDone: boolean
+  thisWeekOnly: boolean
+}
+
+/** "Nothing applied" — what 既定に戻す falls back to when nothing is saved. */
+const EMPTY_VIEW: ViewPreset = {
+  colFilters: {},
+  sort: null,
+  search: '',
+  hideDone: false,
+  thisWeekOnly: false,
+}
 const WEEK_W = 22 // weekly column width (px)
 const MONTH_W = 52 // monthly column width (px)
 
@@ -98,6 +116,38 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const [hideDone, setHideDone] = usePersistentState(k('hideDone'), false)
   const [thisWeekOnly, setThisWeekOnly] = usePersistentState(k('thisWeekOnly'), false)
   const [pinsCollapsed, setPinsCollapsed] = usePersistentState(k('pinsCollapsed'), false)
+  // Sort lives here (not inside GanttGrid) so it survives the grid unmounting —
+  // which happens the moment a filter matches nothing (要望: 昇順のあとに検索フィルタ
+  // すると並びが戻る) — and so it can be part of the saved default view.
+  const [sort, setSort] = usePersistentState<SortState | null>(k('sort'), null)
+  // 既定の表示 (default filter/sort): saved on demand, restored with one click.
+  const [defaultView, setDefaultView] = usePersistentState<ViewPreset | null>(
+    k('defaultView'),
+    null,
+  )
+
+  const currentView = (): ViewPreset => ({
+    colFilters,
+    sort,
+    search,
+    hideDone,
+    thisWeekOnly,
+  })
+  function applyView(v: ViewPreset) {
+    setColFilters(v.colFilters ?? {})
+    setSort(v.sort ?? null)
+    setSearch(v.search ?? '')
+    setHideDone(!!v.hideDone)
+    setThisWeekOnly(!!v.thisWeekOnly)
+  }
+  function resetView() {
+    applyView(defaultView ?? EMPTY_VIEW)
+    toast.show(defaultView ? '既定の表示に戻しました' : '絞り込み・並べ替えを解除しました', 'success', 2000)
+  }
+  function saveAsDefault() {
+    setDefaultView(currentView())
+    toast.show('今の絞り込み・並べ替えを既定にしました', 'success', 2500)
+  }
 
   // As-of stepping is meaningful in week view (column = week); disable in month.
   const live = asOfOffset === 0 || viewMode === 'month'
@@ -757,6 +807,18 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
               <XIcon className="h-[13px] w-[13px]" />
             </button>
           )}
+
+          {/* 既定の表示: one click back to the saved filter/sort (or to nothing). */}
+          <DefaultViewButton
+            hasDefault={defaultView != null}
+            onReset={resetView}
+            onSave={saveAsDefault}
+            onClear={() => {
+              setDefaultView(null)
+              toast.show('既定の表示を削除しました', 'info', 2000)
+            }}
+          />
+
           <Button size="sm" onClick={newRow}>
             <PlusIcon className="h-[15px] w-[15px]" />
             新規行
@@ -808,12 +870,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => {
-                  setColFilters({})
-                  setSearch('')
-                  setHideDone(false)
-                  setThisWeekOnly(false)
-                }}
+                onClick={() => applyView(EMPTY_VIEW)}
               >
                 絞り込みをすべて解除
               </Button>
@@ -839,6 +896,8 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             focusNonce={focusNonce}
             colFilters={colFilters}
             filterOptions={filterOptions}
+            sort={sort}
+            onSortChange={setSort}
             onColFilterChange={(colId, next) =>
               setColFilters((f) => {
                 const c = { ...f }
@@ -890,6 +949,85 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
         />
       )}
     </>
+  )
+}
+
+/** 既定の表示 control: the main button restores the saved filter/sort (or clears
+ *  everything when none is saved); the ▾ half saves the current view as the
+ *  default or deletes it. Saved per sheet, in this browser. */
+function DefaultViewButton({
+  hasDefault,
+  onReset,
+  onSave,
+  onClear,
+}: {
+  hasDefault: boolean
+  onReset: () => void
+  onSave: () => void
+  onClear: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  const item =
+    'block w-full whitespace-nowrap px-3 py-1.5 text-left text-[12px] text-[var(--ink2)] hover:bg-[var(--line2)] disabled:opacity-40 disabled:hover:bg-transparent'
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <div className="flex items-center overflow-hidden rounded-[9px] border border-[var(--line)] bg-[var(--surface)]">
+        <button
+          onClick={onReset}
+          title={
+            hasDefault
+              ? 'この画面の絞り込み・並べ替えを、保存した既定に戻す'
+              : '絞り込み・並べ替えをすべて解除（「今の表示を既定にする」で既定を登録できます）'
+          }
+          className="px-3 py-1.5 text-[12px] text-[var(--ink2)] hover:bg-[var(--line2)]"
+        >
+          既定に戻す
+        </button>
+        <button
+          onClick={() => setOpen((o) => !o)}
+          title="既定の表示を設定"
+          aria-label="既定の表示メニュー"
+          className="border-l border-[var(--line)] px-2 py-1.5 text-[10px] leading-none text-[var(--ink3)] hover:bg-[var(--line2)]"
+        >
+          ▾
+        </button>
+      </div>
+      {open && (
+        <div className="absolute right-0 z-50 mt-1 overflow-hidden rounded-[10px] border border-[var(--line)] bg-[var(--surface)] py-1 shadow-lg">
+          <button
+            className={item}
+            onClick={() => {
+              setOpen(false)
+              onSave()
+            }}
+          >
+            今の表示を既定にする
+          </button>
+          <button
+            className={item}
+            disabled={!hasDefault}
+            onClick={() => {
+              setOpen(false)
+              onClear()
+            }}
+          >
+            既定を削除
+          </button>
+        </div>
+      )}
+    </div>
   )
 }
 

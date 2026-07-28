@@ -10,18 +10,19 @@
 //  in accent color; milestone diamonds at boundaries; today/as-of line.
 //  Clicking a week cell turns it into an inline <input>; Enter/blur saves.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { ScheduleRowModel } from '@/hooks/useScheduleData'
 import { InlineCell } from '@/components/schedule/InlineCell'
 import { ColumnHeaderMenu } from '@/components/schedule/ColumnHeaderMenu'
 import { filterKindOf } from '@/lib/colFilter'
 import type { ColFilter, ColFilterOptions } from '@/lib/colFilter'
+import { defaultColWidth, fitWidth, useColumnWidths } from '@/lib/colWidth'
 import { useLookupTargets } from '@/hooks/useLookupTargets'
 import { Avatar } from '@/components/ui/Avatar'
 import { Badge } from '@/components/ui/Badge'
 import { DiamondIcon, PlusIcon, TrashIcon } from '@/components/ui/icons'
-import { cn, normalizeDateForSort } from '@/lib/format'
+import { cn, fmtHours, normalizeDateForSort } from '@/lib/format'
 import { toast } from '@/lib/toast'
 import { fmtISO, fmtMD, parseDate } from '@/lib/dates'
 import type { WeekCell } from '@/lib/gantt'
@@ -63,6 +64,17 @@ function delayText(delay: number | null): string {
   return '予定通り'
 }
 
+/** Escape user-entered text before it goes into the tooltip's innerHTML.
+ *  Task IDs / phase names are free text, so an unescaped 「<img onerror=…>」 would
+ *  otherwise run on hover. */
+function esc(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
 /** Milestone tooltip: planned vs actual date + delay (plain text). */
 function milestoneTip(cell: WeekCell): string {
   if (!cell.milestoneMarker && !cell.milestoneActual) return ''
@@ -81,7 +93,7 @@ type SortDir = 'asc' | 'desc'
 type SortKey = string
 const SORT_ID: SortKey = '__id__'
 
-interface SortState {
+export interface SortState {
   key: SortKey
   dir: SortDir
 }
@@ -151,69 +163,6 @@ function compareValues(a: string | number, b: string | number): number {
 function SortArrow({ dir }: { dir: SortDir | null }) {
   if (!dir) return null
   return <span className="ml-0.5 text-[9px] leading-none">{dir === 'asc' ? '▲' : '▼'}</span>
-}
-
-/** Fallback attribute-column width, by type (used before content is measured). */
-function defaultColWidth(c: Column): number {
-  switch (c.type) {
-    case 'status':
-      return 96
-    case 'member':
-      return 124
-    case 'date':
-      return 116
-    case 'number':
-      return 96
-    case 'text':
-      return 176
-    case 'lookup':
-      return 150
-    default:
-      return 128
-  }
-}
-
-/** [min, max] width clamp per column type — keeps content-fit from overflowing. */
-function widthRange(t: Column['type']): [number, number] {
-  switch (t) {
-    case 'status':
-      return [72, 140]
-    case 'member':
-      return [92, 150]
-    case 'date':
-      return [96, 124]
-    case 'number':
-      return [60, 110]
-    case 'text':
-      return [96, 240]
-    case 'lookup':
-      return [96, 200]
-    default:
-      return [80, 150]
-  }
-}
-
-// Manual column-resize bounds + persistence. Overrides are keyed by column id
-// (globally unique DB pk), so one localStorage map covers every sheet.
-const RESIZE_MIN = 48
-const RESIZE_MAX = 640
-const COLW_KEY = 'gantt.colWidths'
-
-function loadColWidths(): Record<string, number> {
-  try {
-    const raw = localStorage.getItem(COLW_KEY)
-    const obj = raw ? JSON.parse(raw) : null
-    return obj && typeof obj === 'object' ? (obj as Record<string, number>) : {}
-  } catch {
-    return {}
-  }
-}
-
-/** Rough text width: CJK ~9px, other ~6px per char (for content-fit columns). */
-function textPx(s: string): number {
-  let px = 0
-  for (const ch of s) px += ch.charCodeAt(0) > 0x2e7f ? 9 : 6
-  return px
 }
 
 /** Display string for a cell, used only to measure content width. */
@@ -289,6 +238,11 @@ interface Props {
   colFilters: Record<string, ColFilter>
   filterOptions: Map<string, ColFilterOptions>
   onColFilterChange: (colId: string, next: ColFilter | undefined) => void
+  /** Sort lives on the page (persisted per sheet) so filtering — which can briefly
+   *  unmount this grid when nothing matches — never silently drops it
+   *  (要望: 昇順のあとに絞り込むと並びが戻る). */
+  sort: SortState | null
+  onSortChange: (next: SortState | null) => void
   onSaveWeek: (edit: WeekEdit) => void
   /** Range paste / range clear — written in one request instead of per cell. */
   onBulkSaveWeeks: (edits: WeekEdit[]) => void
@@ -302,12 +256,6 @@ interface Props {
   /** Open the dependency (先行タスク) editor for a row. */
   onEditDeps: (row: Row) => void
   onDeleteRow: (row: Row) => void
-}
-
-interface Tip {
-  x: number
-  y: number
-  html: string
 }
 
 interface EditingCell {
@@ -337,6 +285,8 @@ export function GanttGrid({
   colFilters,
   filterOptions,
   onColFilterChange,
+  sort,
+  onSortChange,
   onSaveWeek,
   onBulkSaveWeeks,
   onEditRowCell,
@@ -349,7 +299,22 @@ export function GanttGrid({
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const didScrollRef = useRef(false)
-  const [tip, setTip] = useState<Tip | null>(null)
+  // The hover tooltip is driven through a ref, NOT state: it used to be a
+  // useState set from every week cell's onMouseMove, which re-rendered the whole
+  // grid (all virtual rows × all visible week columns) on every pointer move —
+  // the main reason the board felt heavy once the sheet grew.
+  const tipRef = useRef<HTMLDivElement>(null)
+  const showTip = useCallback((x: number, y: number, html: string) => {
+    const el = tipRef.current
+    if (!el) return
+    el.innerHTML = html
+    el.style.transform = `translate(${x}px, ${y}px)`
+    el.style.visibility = 'visible'
+  }, [])
+  const hideTip = useCallback(() => {
+    const el = tipRef.current
+    if (el) el.style.visibility = 'hidden'
+  }, [])
   const [editing, setEditing] = useState<EditingCell | null>(null)
   // Excel-style range selection over the week cells: an anchor plus a moving
   // focus corner. Drag with the mouse, extend with Shift+arrows.
@@ -360,7 +325,6 @@ export function GanttGrid({
   const dragRef = useRef<{ start: CellRef; moved: boolean } | null>(null)
   // Transient highlight for a notification-focused task (cleared after a few s).
   const [highlightId, setHighlightId] = useState<string | null>(null)
-  const [sort, setSort] = useState<SortState | null>(null)
   // Which column header menu is open (column id, or SORT_ID for the ID column).
   const [openMenu, setOpenMenu] = useState<SortKey | null>(null)
   // Collapsed parents (子タスクを畳む). Empty = all expanded.
@@ -383,62 +347,22 @@ export function GanttGrid({
   // (header included), clamped per type so nothing gets too wide or too narrow.
   const colWidths = useMemo(() => {
     const m = new Map<string, number>()
-    for (const c of ordered) {
-      let maxPx = textPx(c.name)
-      for (const r of rows)
-        maxPx = Math.max(maxPx, textPx(measureValue(c, r, members, lookupValue)))
-      const pad = c.type === 'member' ? 54 : c.type === 'status' || c.type === 'dropdown' ? 34 : 24
-      const [min, max] = widthRange(c.type)
-      m.set(c.id, Math.round(Math.max(min, Math.min(max, pad + maxPx))))
-    }
+    for (const c of ordered)
+      m.set(
+        c.id,
+        fitWidth(
+          c,
+          rows.map((r) => measureValue(c, r, members, lookupValue)),
+        ),
+      )
     return m
   }, [ordered, rows, members, lookupValue])
 
-  // Manual width overrides (drag the column edge). Persisted per column id; a
-  // column without an override falls back to its content-fit width above.
-  const [colW, setColW] = useState<Record<string, number>>(loadColWidths)
-  useEffect(() => {
-    try {
-      localStorage.setItem(COLW_KEY, JSON.stringify(colW))
-    } catch {
-      /* storage full / unavailable — overrides just won't persist */
-    }
-  }, [colW])
+  // Manual width overrides (drag the column edge, double-click to reset).
+  // Persisted per column id; a column without an override falls back to its
+  // content-fit width above.
+  const { colW, startResize, resetWidth } = useColumnWidths()
   const cw = (c: Column) => colW[c.id] ?? colWidths.get(c.id) ?? defaultColWidth(c)
-
-  // Begin a drag-resize from a column header's right edge. The move/up handlers
-  // are defined locally so removeEventListener gets the same references.
-  const startResize = useCallback(
-    (e: React.MouseEvent, colId: string, startW: number) => {
-      e.preventDefault()
-      e.stopPropagation()
-      const startX = e.clientX
-      const move = (ev: MouseEvent) => {
-        const next = Math.max(RESIZE_MIN, Math.min(RESIZE_MAX, startW + (ev.clientX - startX)))
-        setColW((prev) => ({ ...prev, [colId]: next }))
-      }
-      const up = () => {
-        window.removeEventListener('mousemove', move)
-        window.removeEventListener('mouseup', up)
-        document.body.style.userSelect = ''
-        document.body.style.cursor = ''
-      }
-      document.body.style.userSelect = 'none'
-      document.body.style.cursor = 'col-resize'
-      window.addEventListener('mousemove', move)
-      window.addEventListener('mouseup', up)
-    },
-    [],
-  )
-  // Double-click the edge to drop the override and return to auto (content) fit.
-  const resetWidth = useCallback((colId: string) => {
-    setColW((prev) => {
-      if (!(colId in prev)) return prev
-      const next = { ...prev }
-      delete next[colId]
-      return next
-    })
-  }, [])
 
   // Tree display order: top-level tasks (client-sortable) each followed by their
   // subtasks (子タスク, key_value asc) when expanded. Subtasks always stay grouped
@@ -492,7 +416,7 @@ export function GanttGrid({
 
   // Explicit sort from a header menu (昇順/降順/解除). null clears.
   function setSortDir(key: SortKey, dir: SortDir | null) {
-    setSort(dir ? { key, dir } : null)
+    onSortChange(dir ? { key, dir } : null)
   }
   const dirFor = (key: SortKey): SortDir | null =>
     sort?.key === key ? sort.dir : null
@@ -1063,20 +987,39 @@ export function GanttGrid({
 
   // On first load, restore the last horizontal scroll position (要望: 前回の表示位置
   // から開始) when one is saved; otherwise scroll so "today" is visible.
-  useEffect(() => {
+  //
+  // Assigning scrollLeft only sticks once the scroll content is actually wide
+  // enough; on a fresh mount the week area is still being laid out, so an early
+  // assignment gets CLAMPED (often to 0). We therefore retry over a few frames
+  // until the value takes, and — critically — refuse to persist anything until
+  // the restore has finished, otherwise the clamped 0 overwrites the saved
+  // position and the view is back at the far left on every return to the sheet.
+  useLayoutEffect(() => {
     if (didScrollRef.current) return
     const el = scrollRef.current
-    if (el && displayRows.length > 0 && lineIndex >= 0) {
-      let restored = false
-      if (scrollStorageKey) {
-        const saved = Number(localStorage.getItem(scrollStorageKey))
-        if (Number.isFinite(saved) && saved > 0) {
-          el.scrollLeft = saved
-          restored = true
-        }
+    if (!el || displayRows.length === 0 || lineIndex < 0) return
+
+    const saved = scrollStorageKey ? Number(localStorage.getItem(scrollStorageKey)) : NaN
+    const target =
+      Number.isFinite(saved) && saved > 0 ? saved : Math.max(0, attrW + lineXInGrid - 200)
+
+    let frames = 0
+    let raf = 0
+    const apply = () => {
+      raf = 0
+      const max = el.scrollWidth - el.clientWidth
+      el.scrollLeft = target
+      // Landed (or the content genuinely can't scroll that far) → done.
+      if (Math.abs(el.scrollLeft - Math.min(target, Math.max(0, max))) < 1 || frames > 20) {
+        didScrollRef.current = true
+        return
       }
-      if (!restored) el.scrollLeft = Math.max(0, attrW + lineXInGrid - 200)
-      didScrollRef.current = true
+      frames += 1
+      raf = requestAnimationFrame(apply)
+    }
+    apply()
+    return () => {
+      if (raf) cancelAnimationFrame(raf)
     }
   }, [displayRows.length, attrW, lineIndex, lineXInGrid, scrollStorageKey])
 
@@ -1086,6 +1029,8 @@ export function GanttGrid({
     if (!el || !scrollStorageKey) return
     let t: number | undefined
     const onScroll = () => {
+      // Ignore the scroll events the restore itself produces.
+      if (!didScrollRef.current) return
       window.clearTimeout(t)
       t = window.setTimeout(() => {
         try {
@@ -1147,16 +1092,16 @@ export function GanttGrid({
         ? `<br><span style="color:#F2B8A0">● ${isMonth ? '前月' : '前週'}から変更</span>`
         : ''
     // Milestone segment label (no marker detail here — that goes on its own line).
-    const phase = cell.phaseLabel ? ` ・ ${cell.phaseLabel}` : ''
+    const phase = cell.phaseLabel ? ` ・ ${esc(cell.phaseLabel)}` : ''
     const when = isMonth
       ? `${weeks[wi].getFullYear()}/${weeks[wi].getMonth() + 1}月`
       : `週 ${fmtMD(weeks[wi])}`
     // Milestone planned-vs-actual line when this cell carries a diamond.
     const tip = milestoneTip(cell)
     const ms = tip
-      ? `<br><span style="color:${cell.msDelayDays && cell.msDelayDays > 0 ? '#F2B8A0' : '#CFE0D7'}">◇ ${tip}</span>`
+      ? `<br><span style="color:${cell.msDelayDays && cell.msDelayDays > 0 ? '#F2B8A0' : '#CFE0D7'}">◇ ${esc(tip)}</span>`
       : ''
-    return `<b style="font-weight:600">${model.keyValue}</b>${phase}<br>${when}<br>予定 ${round1(planned)}h ／ 実績 ${round1(actual)}h ／ 差 ${diff > 0 ? '+' : ''}${diff}h${chg}${ms}`
+    return `<b style="font-weight:600">${esc(model.keyValue)}</b>${phase}<br>${when}<br>予定 ${round1(planned)}h ／ 実績 ${round1(actual)}h ／ 差 ${diff > 0 ? '+' : ''}${diff}h${chg}${ms}`
   }
 
   return (
@@ -1572,16 +1517,12 @@ export function GanttGrid({
                             )
                           }
                           if (!cell || ((cell.planned ?? 0) <= 0 && (cell.actual ?? 0) <= 0)) {
-                            setTip(null)
+                            hideTip()
                             return
                           }
-                          setTip({
-                            x: e.clientX + 14,
-                            y: e.clientY + 14,
-                            html: tooltipFor(model, cell, wi),
-                          })
+                          showTip(e.clientX + 14, e.clientY + 14, tooltipFor(model, cell, wi))
                         }}
-                        onLeave={() => setTip(null)}
+                        onLeave={hideTip}
                       />
                     )
                   })}
@@ -1768,13 +1709,12 @@ export function GanttGrid({
         </div>
       </div>
 
-      {tip && (
-        <div
-          className="pointer-events-none fixed z-50 whitespace-nowrap rounded-lg bg-[var(--ink)] px-2.5 py-1.5 text-[11.5px] leading-relaxed text-white"
-          style={{ left: tip.x, top: tip.y }}
-          dangerouslySetInnerHTML={{ __html: tip.html }}
-        />
-      )}
+      {/* Always mounted, moved/filled imperatively by showTip/hideTip. */}
+      <div
+        ref={tipRef}
+        className="pointer-events-none fixed left-0 top-0 z-50 whitespace-nowrap rounded-lg bg-[var(--ink)] px-2.5 py-1.5 text-[11.5px] leading-relaxed text-white"
+        style={{ visibility: 'hidden' }}
+      />
     </div>
   )
 }
@@ -2217,7 +2157,8 @@ function WeekCellView({
   // Show the cell (phase fill + numbers) whenever it has any plan or actual.
   const colored = !!(cell && (planned > 0 || actual > 0) && cell.color)
   const plannedColor = cell?.changed && live ? 'var(--accent)' : '#8a8778'
-  const fmt = (n: number) => String(round1(n))
+  // Whole hours in the cell; the hover tooltip still shows the exact value.
+  const fmt = fmtHours
 
   return (
     <div
@@ -2624,7 +2565,7 @@ function RowSummaryCells({
         if (col.key === 'plan') {
           const delta =
             model.plannedPrev != null
-              ? round1(model.gantt.plannedSum - model.plannedPrev)
+              ? Math.round(model.gantt.plannedSum - model.plannedPrev)
               : null
           return (
             <div
@@ -2632,10 +2573,11 @@ function RowSummaryCells({
               className="flex items-center justify-end gap-0.5 px-2.5 text-right text-[12.5px] font-medium text-[var(--ink2)]"
               style={{ width: col.w }}
               title={
-                model.plannedPrev != null ? `前週 ${round1(model.plannedPrev)}h` : undefined
+                `予定計 ${round1(model.gantt.plannedSum)}h` +
+                (model.plannedPrev != null ? `（前週 ${round1(model.plannedPrev)}h）` : '')
               }
             >
-              {round1(model.gantt.plannedSum)}h
+              {fmtHours(model.gantt.plannedSum)}h
               <SummaryDelta delta={delta} />
             </div>
           )
@@ -2643,7 +2585,7 @@ function RowSummaryCells({
         if (col.key === 'actual') {
           const delta =
             model.actualPrev != null
-              ? round1(model.gantt.actualSum - model.actualPrev)
+              ? Math.round(model.gantt.actualSum - model.actualPrev)
               : null
           return (
             <div
@@ -2651,22 +2593,24 @@ function RowSummaryCells({
               className="flex items-center justify-end gap-0.5 px-2.5 text-right text-[12.5px] font-medium text-[var(--ink2)]"
               style={{ width: col.w }}
               title={
-                model.actualPrev != null ? `前週 ${round1(model.actualPrev)}h` : undefined
+                `実績計 ${round1(model.gantt.actualSum)}h` +
+                (model.actualPrev != null ? `（前週 ${round1(model.actualPrev)}h）` : '')
               }
             >
-              {round1(model.gantt.actualSum)}h
+              {fmtHours(model.gantt.actualSum)}h
               <SummaryDelta delta={delta} />
             </div>
           )
         }
         if (col.key === 'diff') {
-          const diff = round1(model.gantt.plannedSum - model.gantt.actualSum)
+          const exact = round1(model.gantt.plannedSum - model.gantt.actualSum)
+          const diff = Math.round(model.gantt.plannedSum - model.gantt.actualSum)
           return (
             <div
               key="diff"
               className="px-2.5 text-right text-[12.5px] font-medium"
               style={{ width: col.w, color: diff < 0 ? '#A8442B' : 'var(--ink3)' }}
-              title="予定計 − 実績計（マイナス＝予定超過）"
+              title={`予定計 − 実績計 ＝ ${exact}h（マイナス＝予定超過）`}
             >
               {diff > 0 ? '+' : ''}
               {diff}h
