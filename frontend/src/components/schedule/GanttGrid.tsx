@@ -999,18 +999,27 @@ export function GanttGrid({
     const el = scrollRef.current
     if (!el || displayRows.length === 0 || lineIndex < 0) return
 
-    const saved = scrollStorageKey ? Number(localStorage.getItem(scrollStorageKey)) : NaN
-    const target =
-      Number.isFinite(saved) && saved > 0 ? saved : Math.max(0, attrW + lineXInGrid - 200)
+    // A saved position of exactly 0 (scrolled all the way left) is a real,
+    // valid position — `> 0` treated it as "nothing saved" and fell back to the
+    // "today" default, which is exactly the revert the report described.
+    const rawSaved = scrollStorageKey ? localStorage.getItem(scrollStorageKey) : null
+    const saved = rawSaved == null ? NaN : Number(rawSaved)
+    const target = Number.isFinite(saved) && saved >= 0 ? saved : Math.max(0, attrW + lineXInGrid - 200)
 
     let frames = 0
     let raf = 0
     const apply = () => {
       raf = 0
-      const max = el.scrollWidth - el.clientWidth
+      // NOTE: checking "did scrollLeft land where I just set it" is a trap —
+      // the browser ALWAYS clamps the assignment to the CURRENT [0, max], so a
+      // too-early frame (layout not settled: column widths still mid-measurement,
+      // 担当 members not loaded yet, etc.) reads back as a perfect match against
+      // its own (too-small) max and looks "done" on the very first frame. The
+      // only real signal that layout has caught up is the container actually
+      // being WIDE ENOUGH to hold the target without clamping.
+      const max = Math.max(0, el.scrollWidth - el.clientWidth)
       el.scrollLeft = target
-      // Landed (or the content genuinely can't scroll that far) → done.
-      if (Math.abs(el.scrollLeft - Math.min(target, Math.max(0, max))) < 1 || frames > 20) {
+      if (max >= target || frames > 20) {
         didScrollRef.current = true
         return
       }
