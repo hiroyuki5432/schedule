@@ -1,0 +1,669 @@
+// Excel取り込みウィザード — the confirm-as-you-go path for "シート追加 → Excelから
+// 取り込む". Nothing is written until the last step: the file is analysed by
+// POST /api/sheets/import.xlsx/inspect, and the user picks
+//   1. どのワークシートか / 何行目が見出しか / どの列がID か
+//   2. どの列を取り込むか（列名・型も変更できる）
+//   3. プレビューと警告を確認してから取り込む
+import { useEffect, useMemo, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
+import * as api from '@/api/client'
+import type { ImportColumnInfo, ImportColumnRole } from '@/api/client'
+import type { ColumnType } from '@/types/api'
+import { ApiError } from '@/lib/http'
+import { Modal } from '@/components/ui/Modal'
+import { Input } from '@/components/ui/Input'
+import { Select } from '@/components/ui/Select'
+import { Button } from '@/components/ui/Button'
+import { toast } from '@/lib/toast'
+import { cn } from '@/lib/format'
+
+interface Props {
+  file: File
+  /** シート名 typed in the 追加ダイアログ (blank → the worksheet's own name). */
+  defaultName: string
+  hasWeekGrid: boolean
+  /** Back to the 追加ダイアログ. */
+  onBack: () => void
+  onClose: () => void
+}
+
+/** One column as edited in the wizard. */
+interface Pick {
+  index: number
+  selected: boolean
+  name: string
+  type: ColumnType | ''
+}
+
+const STEPS = ['シートと見出し行', '取り込む列', 'プレビュー']
+
+const ROLE_LABEL: Record<ImportColumnRole, string> = {
+  attr: '',
+  week: '週次工数',
+  progress: '進捗',
+  deps: '先行タスク',
+  milestone: 'マイルストン',
+}
+
+const TYPE_LABEL: Record<string, string> = {
+  text: '自由入力',
+  number: '数値',
+  date: '日付',
+  dropdown: 'プルダウン',
+  member: '担当者',
+}
+
+const TYPE_OPTIONS: ColumnType[] = ['text', 'number', 'date', 'dropdown', 'member']
+
+const AUTO_ID = -1
+
+export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onClose }: Props) {
+  const qc = useQueryClient()
+  const navigate = useNavigate()
+  const [step, setStep] = useState(0)
+  const [name, setName] = useState(defaultName)
+  const [sheetName, setSheetName] = useState('')
+  const [headerRow, setHeaderRow] = useState(0) // 0 = 自動判定
+  const [idColumn, setIdColumn] = useState(0)
+  const [picks, setPicks] = useState<Pick[]>([])
+  const [error, setError] = useState<string | null>(null)
+
+  const fileKey = `${file.name}:${file.size}:${file.lastModified}`
+
+  // Structure of the chosen worksheet: worksheets, 見出し行の候補, preview, 列の推定.
+  const insp = useQuery({
+    queryKey: ['xlsx-inspect', fileKey, sheetName, headerRow, idColumn, hasWeekGrid],
+    queryFn: () => api.inspectImportXlsx(file, { sheetName, headerRow, idColumn, hasWeekGrid }),
+    staleTime: Infinity,
+    retry: false,
+  })
+
+  // Re-seed the column picks whenever the worksheet / 見出し行 / ID列 changes.
+  useEffect(() => {
+    if (!insp.data) return
+    setPicks(
+      insp.data.columns.map((c) => ({
+        index: c.index,
+        selected: c.selected,
+        name: c.header,
+        type: c.type,
+      })),
+    )
+  }, [insp.data])
+
+  const info = useMemo(() => {
+    const m = new Map<number, ImportColumnInfo>()
+    insp.data?.columns.forEach((c) => m.set(c.index, c))
+    return m
+  }, [insp.data])
+
+  const chosen = useMemo(
+    () =>
+      picks
+        .filter((p) => p.selected && p.name.trim() !== '' && p.index !== idColumn)
+        .map((p) => ({ index: p.index, name: p.name.trim(), type: p.type })),
+    [picks, idColumn],
+  )
+
+  // Final check against the user's own picks — counts values that would not convert.
+  const check = useQuery({
+    queryKey: [
+      'xlsx-check',
+      fileKey,
+      sheetName,
+      headerRow,
+      idColumn,
+      hasWeekGrid,
+      JSON.stringify(chosen),
+    ],
+    queryFn: () =>
+      api.inspectImportXlsx(file, {
+        sheetName,
+        headerRow,
+        idColumn,
+        hasWeekGrid,
+        columns: chosen,
+      }),
+    enabled: step === 2 && chosen.length > 0,
+    staleTime: Infinity,
+    retry: false,
+  })
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      const r = await api.importNewSheetXlsx(file, {
+        name: name.trim(),
+        hasWeekGrid,
+        sheetName: insp.data?.sheet_name,
+        headerRow: insp.data?.header_row,
+        idColumn,
+        columns: chosen,
+      })
+      toast.show(
+        `「${r.name}」を作成しました（列 ${r.columns} / 行 ${r.created}）`,
+        'success',
+      )
+      return String(r.sheet_id)
+    },
+    onSuccess: async (id) => {
+      await qc.invalidateQueries({ queryKey: ['sheets'] })
+      onClose()
+      navigate(`/sheets/${id}`)
+    },
+    onError: (e) => {
+      setError(e instanceof ApiError ? e.message : 'シートの取り込みに失敗しました。')
+    },
+  })
+
+  const data = insp.data
+  const headerCells = data?.preview.find((r) => r.row === data.header_row)?.cells ?? []
+  const dataPreview = (data?.preview ?? []).filter((r) => r.row > (data?.header_row ?? 0))
+
+  const setPick = (index: number, patch: Partial<Pick>) =>
+    setPicks((prev) => prev.map((p) => (p.index === index ? { ...p, ...patch } : p)))
+
+  return (
+    <Modal title="Excelから取り込む" onClose={onClose} widthClass="w-[860px] max-w-[95vw]">
+      <ol className="mb-4 flex items-center gap-2 text-[11.5px]">
+        {STEPS.map((label, i) => (
+          <li key={label} className="flex items-center gap-2">
+            <span
+              className={cn(
+                'flex items-center gap-1.5 rounded-full px-2.5 py-1',
+                i === step
+                  ? 'bg-[var(--green)] text-white'
+                  : i < step
+                    ? 'bg-[#F2F6F3] text-[var(--green-d)]'
+                    : 'text-[var(--ink3)]',
+              )}
+            >
+              <span className="tabular-nums">{i + 1}</span>
+              {label}
+            </span>
+            {i < STEPS.length - 1 && <span className="text-[var(--ink3)]">›</span>}
+          </li>
+        ))}
+      </ol>
+
+      {insp.isPending && (
+        <div className="py-10 text-center text-[12px] text-[var(--ink3)]">読み込み中…</div>
+      )}
+      {insp.isError && (
+        <div className="py-10 text-center text-[12px] text-[#A8442B]">
+          {insp.error instanceof ApiError
+            ? insp.error.message
+            : 'Excelファイルを読み込めませんでした。'}
+        </div>
+      )}
+
+      {data && step === 0 && (
+        <StepSource
+          data={data}
+          sheetName={sheetName}
+          onSheet={(v) => {
+            setSheetName(v)
+            setHeaderRow(0)
+            setIdColumn(0)
+          }}
+          onHeaderRow={setHeaderRow}
+          idColumn={idColumn}
+          onIdColumn={setIdColumn}
+          headerCells={headerCells}
+        />
+      )}
+
+      {data && step === 1 && (
+        <StepColumns
+          picks={picks}
+          info={info}
+          idColumn={idColumn}
+          onPick={setPick}
+          onAll={(selected) =>
+            setPicks((prev) =>
+              prev.map((p) =>
+                p.index === idColumn || !p.name.trim() ? p : { ...p, selected },
+              ),
+            )
+          }
+        />
+      )}
+
+      {data && step === 2 && (
+        <StepPreview
+          data={data}
+          check={check.data}
+          checking={check.isFetching}
+          chosen={chosen}
+          idColumn={idColumn}
+          dataPreview={dataPreview}
+          name={name}
+          onName={setName}
+          hasWeekGrid={hasWeekGrid}
+        />
+      )}
+
+      {error && <div className="mt-3 text-[12px] text-[#A8442B]">{error}</div>}
+
+      <div className="mt-5 flex items-center justify-between gap-2">
+        <div className="text-[11.5px] text-[var(--ink3)]">
+          {data && `${file.name} ／ データ ${data.total_rows} 行`}
+        </div>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => (step === 0 ? onBack() : setStep(step - 1))}
+            disabled={mutation.isPending}
+          >
+            {step === 0 ? '戻る' : '前へ'}
+          </Button>
+          {step < 2 ? (
+            <Button type="button" size="sm" disabled={!data} onClick={() => setStep(step + 1)}>
+              次へ
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              disabled={!data || chosen.length === 0 || mutation.isPending}
+              onClick={() => {
+                setError(null)
+                mutation.mutate()
+              }}
+            >
+              {mutation.isPending ? '取込中…' : '取り込んで作成'}
+            </Button>
+          )}
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+// --------------------------------------------------------------------------- //
+// Step 1 — worksheet / header row / ID column
+// --------------------------------------------------------------------------- //
+function StepSource({
+  data,
+  sheetName,
+  onSheet,
+  onHeaderRow,
+  idColumn,
+  onIdColumn,
+  headerCells,
+}: {
+  data: api.ImportInspection
+  sheetName: string
+  onSheet: (v: string) => void
+  onHeaderRow: (n: number) => void
+  idColumn: number
+  onIdColumn: (n: number) => void
+  headerCells: string[]
+}) {
+  return (
+    <div>
+      <div className="flex flex-wrap items-end gap-4">
+        <label className="block">
+          <span className="mb-1.5 block text-[12px] text-[var(--ink2)]">ワークシート</span>
+          <Select
+            value={sheetName || data.sheet_name}
+            onChange={(e) => onSheet(e.target.value)}
+            className="min-w-[200px]"
+          >
+            {data.worksheets.map((w) => (
+              <option key={w.name} value={w.name}>
+                {w.name}（{w.rows}行 × {w.columns}列）
+              </option>
+            ))}
+          </Select>
+        </label>
+
+        <label className="block">
+          <span className="mb-1.5 block text-[12px] text-[var(--ink2)]">ID列（行の識別子）</span>
+          <Select
+            value={String(idColumn)}
+            onChange={(e) => onIdColumn(Number(e.target.value))}
+            className="min-w-[200px]"
+          >
+            <option value={AUTO_ID}>自動採番（IDの列なし）</option>
+            {headerCells.map((h, i) => (
+              <option key={i} value={i}>
+                {colLetter(i)}: {h || '（見出しなし）'}
+              </option>
+            ))}
+          </Select>
+        </label>
+
+        <div className="text-[11.5px] text-[var(--ink3)]">
+          見出し行：{data.header_row} 行目
+          {data.header_row === data.suggested_header_row && '（自動判定）'}
+          <br />
+          左の行番号をクリックすると見出し行を変更できます。
+        </div>
+      </div>
+
+      <div className="mt-3 max-h-[300px] overflow-auto rounded-[10px] border border-[var(--line)]">
+        <table className="w-max min-w-full border-collapse text-[11.5px]">
+          <tbody>
+            {data.preview.map((r) => {
+              const isHeader = r.row === data.header_row
+              const isAbove = r.row < data.header_row
+              return (
+                <tr
+                  key={r.row}
+                  className={cn(
+                    isHeader && 'bg-[#F2F6F3] font-medium text-[var(--ink)]',
+                    isAbove && 'text-[var(--ink3)]',
+                  )}
+                >
+                  <td className="sticky left-0 z-10 border-b border-r border-[var(--line)] bg-[var(--surface)] p-0">
+                    <button
+                      type="button"
+                      onClick={() => onHeaderRow(r.row)}
+                      title="この行を見出しにする"
+                      className={cn(
+                        'w-full px-2 py-1 text-right tabular-nums',
+                        isHeader
+                          ? 'bg-[var(--green)] text-white'
+                          : 'text-[var(--ink3)] hover:bg-[var(--line2)]',
+                      )}
+                    >
+                      {r.row}
+                    </button>
+                  </td>
+                  {r.cells.map((c, i) => (
+                    <td
+                      key={i}
+                      className={cn(
+                        'max-w-[180px] truncate border-b border-[var(--line)] px-2 py-1',
+                        i === idColumn && 'bg-[#FBF6EC]',
+                      )}
+                      title={c}
+                    >
+                      {c}
+                    </td>
+                  ))}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-2 text-[11.5px] text-[var(--ink3)]">
+        先頭 {data.preview.length} 行のみ表示しています。ID列（薄い黄色）が既存の行と一致する場合は上書きされます。
+      </div>
+    </div>
+  )
+}
+
+function colLetter(i: number): string {
+  let n = i
+  let s = ''
+  do {
+    s = String.fromCharCode(65 + (n % 26)) + s
+    n = Math.floor(n / 26) - 1
+  } while (n >= 0)
+  return s
+}
+
+// --------------------------------------------------------------------------- //
+// Step 2 — which columns to take
+// --------------------------------------------------------------------------- //
+function StepColumns({
+  picks,
+  info,
+  idColumn,
+  onPick,
+  onAll,
+}: {
+  picks: Pick[]
+  info: Map<number, ImportColumnInfo>
+  idColumn: number
+  onPick: (index: number, patch: Partial<Pick>) => void
+  onAll: (selected: boolean) => void
+}) {
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-[12px] text-[var(--ink2)]">
+          取り込む列にチェックを入れてください。列名と型はここで変更できます。
+        </span>
+        <span className="flex gap-2">
+          <Button type="button" variant="ghost" size="sm" onClick={() => onAll(true)}>
+            すべて選択
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={() => onAll(false)}>
+            すべて解除
+          </Button>
+        </span>
+      </div>
+
+      <div className="max-h-[380px] overflow-auto rounded-[10px] border border-[var(--line)]">
+        <table className="w-full border-collapse text-[11.5px]">
+          <thead className="sticky top-0 bg-[var(--line2)] text-[var(--ink2)]">
+            <tr>
+              <th className="w-9 border-b border-[var(--line)] px-2 py-1.5" />
+              <th className="border-b border-[var(--line)] px-2 py-1.5 text-left">Excelの見出し</th>
+              <th className="border-b border-[var(--line)] px-2 py-1.5 text-left">列名</th>
+              <th className="border-b border-[var(--line)] px-2 py-1.5 text-left">型</th>
+              <th className="border-b border-[var(--line)] px-2 py-1.5 text-left">値の例</th>
+            </tr>
+          </thead>
+          <tbody>
+            {picks.map((p) => {
+              const c = info.get(p.index)
+              const role = c?.role ?? 'attr'
+              const isId = p.index === idColumn
+              const reserved = role === 'week' || role === 'progress' || role === 'deps'
+              return (
+                <tr key={p.index} className={cn(isId && 'bg-[#FBF6EC]')}>
+                  <td className="border-b border-[var(--line)] px-2 py-1.5 text-center align-top">
+                    <input
+                      type="checkbox"
+                      checked={p.selected && !isId}
+                      disabled={isId || !c?.header}
+                      onChange={(e) => onPick(p.index, { selected: e.target.checked })}
+                      className="accent-[var(--green)]"
+                    />
+                  </td>
+                  <td className="border-b border-[var(--line)] px-2 py-1.5 align-top">
+                    <span className="text-[var(--ink3)]">{colLetter(p.index)}: </span>
+                    {c?.header || <span className="text-[var(--ink3)]">（見出しなし）</span>}
+                    {isId && <span className="ml-1 text-[var(--ink3)]">→ ID列</span>}
+                    {ROLE_LABEL[role] && !isId && (
+                      <span className="ml-1 rounded-[6px] bg-[#EEF2F5] px-1.5 py-0.5 text-[10.5px] text-[var(--ink2)]">
+                        {ROLE_LABEL[role]}
+                      </span>
+                    )}
+                  </td>
+                  <td className="border-b border-[var(--line)] px-2 py-1.5 align-top">
+                    {isId || reserved ? (
+                      <span className="text-[var(--ink3)]">—</span>
+                    ) : (
+                      <Input
+                        value={p.name}
+                        onChange={(e) => onPick(p.index, { name: e.target.value })}
+                        className="h-7 w-[150px] px-2 py-1 text-[11.5px]"
+                      />
+                    )}
+                  </td>
+                  <td className="border-b border-[var(--line)] px-2 py-1.5 align-top">
+                    {isId ? (
+                      <span className="text-[var(--ink3)]">—</span>
+                    ) : reserved ? (
+                      <span className="text-[var(--ink3)]">{ROLE_LABEL[role]}として取り込み</span>
+                    ) : (
+                      <Select
+                        value={p.type || 'text'}
+                        onChange={(e) =>
+                          onPick(p.index, { type: e.target.value as ColumnType })
+                        }
+                        className="h-7 px-2 py-0 text-[11.5px]"
+                      >
+                        {TYPE_OPTIONS.map((t) => (
+                          <option key={t} value={t}>
+                            {TYPE_LABEL[t]}
+                          </option>
+                        ))}
+                      </Select>
+                    )}
+                  </td>
+                  <td className="border-b border-[var(--line)] px-2 py-1.5 align-top text-[var(--ink2)]">
+                    <span className="line-clamp-2 block max-w-[280px]">
+                      {c?.samples.join(' / ') || '（空）'}
+                    </span>
+                    {c && c.filled === 0 && (
+                      <span className="text-[var(--ink3)]">値が入っていません</span>
+                    )}
+                    {role === 'milestone' && (
+                      <span className="block text-[var(--ink3)]">
+                        マイルストン列。取り込むと通常の列になります
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+// --------------------------------------------------------------------------- //
+// Step 3 — preview + warnings
+// --------------------------------------------------------------------------- //
+function StepPreview({
+  data,
+  check,
+  checking,
+  chosen,
+  idColumn,
+  dataPreview,
+  name,
+  onName,
+  hasWeekGrid,
+}: {
+  data: api.ImportInspection
+  check: api.ImportInspection | undefined
+  checking: boolean
+  chosen: { index: number; name: string; type: ColumnType | '' }[]
+  idColumn: number
+  dataPreview: { row: number; cells: string[] }[]
+  name: string
+  onName: (v: string) => void
+  hasWeekGrid: boolean
+}) {
+  const src = check ?? data
+  const warnings: string[] = []
+  if (idColumn === AUTO_ID) {
+    warnings.push('ID列を指定していないため、行のIDは自動採番されます。')
+  } else {
+    if (src.blank_ids > 0)
+      warnings.push(`IDが空の行が ${src.blank_ids} 行あります（自動採番されます）。`)
+    if (src.duplicate_ids > 0)
+      warnings.push(
+        `同じIDの行が ${src.duplicate_ids} 行あります（後の行で上書きされ、1行にまとまります）。`,
+      )
+  }
+  const byIndex = new Map(src.columns.map((c) => [c.index, c]))
+  chosen.forEach((c) => {
+    const info = byIndex.get(c.index)
+    if (info && info.invalid > 0) {
+      warnings.push(
+        `「${c.name}」に${TYPE_LABEL[c.type || 'text'] ?? ''}として読めない値が ${info.invalid} 件あります（空欄で取り込まれます）：${info.invalid_samples.join('、')}`,
+      )
+    }
+  })
+  const dupNames = chosen
+    .map((c) => c.name)
+    .filter((n, i, all) => all.indexOf(n) !== i)
+  if (dupNames.length) warnings.push(`列名が重複しています：${[...new Set(dupNames)].join('、')}`)
+  if (chosen.some((c) => c.name === 'ID')) {
+    warnings.push('列名「ID」はID列の予約名です。別の名前に変えないとその列は取り込まれません。')
+  }
+
+  const rows = dataPreview.slice(0, 8)
+
+  return (
+    <div>
+      <label className="block">
+        <span className="mb-1.5 block text-[12px] text-[var(--ink2)]">シート名</span>
+        <Input
+          value={name}
+          placeholder={data.sheet_name}
+          onChange={(e) => onName(e.target.value)}
+          className="w-[260px]"
+        />
+      </label>
+
+      <div className="mt-3 text-[11.5px] text-[var(--ink2)]">
+        {hasWeekGrid ? 'スケジュール（週次グリッド）' : 'テーブル（集計・参照）'}／ワークシート「
+        {data.sheet_name}」／見出し {data.header_row} 行目／取り込む列 {chosen.length} 列／
+        {data.total_rows} 行
+      </div>
+
+      <div className="mt-3 max-h-[260px] overflow-auto rounded-[10px] border border-[var(--line)]">
+        <table className="w-max min-w-full border-collapse text-[11.5px]">
+          <thead className="sticky top-0 bg-[var(--line2)] text-[var(--ink2)]">
+            <tr>
+              <th className="border-b border-r border-[var(--line)] px-2 py-1.5 text-left">
+                {idColumn === AUTO_ID ? 'ID（自動）' : 'ID'}
+              </th>
+              {chosen.map((c) => (
+                <th key={c.index} className="border-b border-[var(--line)] px-2 py-1.5 text-left">
+                  {c.name}
+                  <span className="ml-1 font-normal text-[var(--ink3)]">
+                    {byIndex.get(c.index)?.role && ROLE_LABEL[byIndex.get(c.index)!.role]
+                      ? ROLE_LABEL[byIndex.get(c.index)!.role]
+                      : TYPE_LABEL[c.type || 'text']}
+                  </span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.row}>
+                <td className="border-b border-r border-[var(--line)] px-2 py-1 text-[var(--ink2)]">
+                  {idColumn === AUTO_ID ? '—' : (r.cells[idColumn] ?? '')}
+                </td>
+                {chosen.map((c) => (
+                  <td
+                    key={c.index}
+                    className="max-w-[180px] truncate border-b border-[var(--line)] px-2 py-1"
+                    title={r.cells[c.index] ?? ''}
+                  >
+                    {r.cells[c.index] ?? ''}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-2 text-[11.5px] text-[var(--ink3)]">
+        先頭 {rows.length} 行のプレビューです（実際には {data.total_rows} 行取り込みます）。
+      </div>
+
+      {checking && (
+        <div className="mt-3 text-[11.5px] text-[var(--ink3)]">値を確認しています…</div>
+      )}
+      {!checking && warnings.length > 0 && (
+        <ul className="mt-3 space-y-1 rounded-[10px] bg-[#FBF3EE] px-3 py-2 text-[11.5px] text-[#A8442B]">
+          {warnings.map((w) => (
+            <li key={w}>・{w}</li>
+          ))}
+        </ul>
+      )}
+      {!checking && warnings.length === 0 && (
+        <div className="mt-3 text-[11.5px] text-[var(--green-d)]">
+          そのまま取り込める内容です。
+        </div>
+      )}
+    </div>
+  )
+}

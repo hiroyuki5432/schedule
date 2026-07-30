@@ -18,6 +18,7 @@ Layout (one worksheet), schedule sheets:
 from __future__ import annotations
 
 import io
+import json
 from datetime import date, datetime, timedelta
 from uuid import uuid4
 
@@ -587,6 +588,99 @@ _SWATCHES = [
 ]
 
 
+_PREVIEW_ROWS = 30          # raw rows returned for the 見出し行 picker
+_HEADER_SCAN_ROWS = 10      # how far down we look for the header row
+_SAMPLE_LIMIT = 4           # sample values shown per column
+_INFER_ROWS = 200           # rows sampled for type inference
+_MAX_DROPDOWN_FORCED = 50   # cap when the user forces a dropdown by hand
+_IMPORTABLE_TYPES = {"text", "number", "date", "dropdown", "member"}
+
+
+def _open_workbook(file: UploadFile):
+    from openpyxl import load_workbook
+
+    try:
+        return load_workbook(io.BytesIO(file.file.read()), data_only=True, read_only=True)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Excelファイルを読み込めませんでした（.xlsx 形式をご確認ください）",
+        )
+
+
+def _pick_worksheet(wb, sheet_name: str):
+    nm = (sheet_name or "").strip()
+    if not nm:
+        return wb.active
+    if nm not in wb.sheetnames:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"ワークシート「{nm}」が見つかりません",
+        )
+    return wb[nm]
+
+
+def _grid(ws) -> list[tuple]:
+    return list(ws.iter_rows(values_only=True))
+
+
+def _is_blank(v) -> bool:
+    return v is None or (isinstance(v, str) and v.strip() == "")
+
+
+def _auto_header_row(grid: list[tuple]) -> int:
+    """1-based guess at the header row: the topmost of the first rows with the most
+    filled cells — files often open with a title line or a blank row or two."""
+    best_i, best_n = 1, -1
+    for i, row in enumerate(grid[:_HEADER_SCAN_ROWS], start=1):
+        n = sum(0 if _is_blank(v) else 1 for v in row)
+        if n > best_n:
+            best_i, best_n = i, n
+    return best_i
+
+
+def _split_grid(grid: list[tuple], header_row: int) -> tuple[tuple, list[tuple]]:
+    """(header tuple, data rows below it) — fully empty data lines dropped."""
+    header = grid[header_row - 1] if 0 < header_row <= len(grid) else ()
+    body = [r for r in grid[header_row:] if r is not None and any(not _is_blank(v) for v in r)]
+    return header, body
+
+
+def _cell_text(v) -> str:
+    """Display text for a preview cell."""
+    if v is None:
+        return ""
+    if isinstance(v, datetime):
+        return v.date().isoformat() if (v.hour, v.minute, v.second) == (0, 0, 0) else v.isoformat(sep=" ")
+    if isinstance(v, date):
+        return v.isoformat()
+    if isinstance(v, float) and v == int(v):
+        return str(int(v))
+    return str(v).strip() if isinstance(v, str) else str(v)
+
+
+def _header_role(raw_name, has_week_grid: bool) -> str:
+    """What a header means on a schedule sheet: attr / week / progress / deps /
+    milestone. Only 'attr' (and an explicitly selected 'milestone') becomes a column;
+    the rest are handled by the row importer under their reserved names."""
+    if not has_week_grid:
+        return "attr"
+    nm = str(raw_name).strip()
+    if nm == PROGRESS_HEADER:
+        return "progress"
+    if nm == DEPS_HEADER:
+        return "deps"
+    if _parse_week_header(raw_name) is not None:
+        return "week"
+    if nm.endswith("（予定）") or nm.endswith("（実績）"):
+        return "milestone"
+    return "attr"
+
+
+def _column_values(data_rows: list[tuple], idx: int, limit: int = _INFER_ROWS) -> list:
+    return [r[idx] if idx < len(r) else None for r in data_rows[:limit]]
+
+
 def _looks_numeric(v) -> bool:
     if isinstance(v, bool):
         return False
@@ -627,31 +721,241 @@ def _infer_type(values: list, member_names: set[str]) -> tuple[str, dict]:
     return "text", {}
 
 
+def _dropdown_config(values: list) -> dict:
+    """Options for a column the user explicitly typed as プルダウン."""
+    distinct = sorted({str(v).strip() for v in values if not _is_blank(v)})[:_MAX_DROPDOWN_FORCED]
+    return {
+        "options": [
+            {"id": uuid4().hex, "value": v, "color": _SWATCHES[i % len(_SWATCHES)]}
+            for i, v in enumerate(distinct)
+        ]
+    }
+
+
+def _parse_selection(raw: str) -> list[dict] | None:
+    """`columns` form field → [{index, name, type}] (None when not supplied)."""
+    if not (raw or "").strip():
+        return None
+    try:
+        items = json.loads(raw)
+    except ValueError:
+        items = None
+    if not isinstance(items, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="取り込む列の指定を読み取れませんでした"
+        )
+    out: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        try:
+            idx = int(it.get("index"))
+        except (TypeError, ValueError):
+            continue
+        out.append(
+            {
+                "index": idx,
+                "name": str(it.get("name") or "").strip(),
+                "type": str(it.get("type") or "").strip(),
+            }
+        )
+    return out
+
+
+def _default_selection(
+    header: tuple, data_rows: list[tuple], id_column: int, has_week_grid: bool, member_names: set[str]
+) -> list[dict]:
+    """What the wizard proposes (and what an unattended import uses): every named
+    column except the ID one, with its type inferred. ◇予定/◇実績 are left out —
+    a brand-new sheet has no milestone template to hang them on."""
+    sel: list[dict] = []
+    for idx, raw_name in enumerate(header):
+        if idx == id_column or _is_blank(raw_name):
+            continue
+        nm = str(raw_name).strip()
+        role = _header_role(raw_name, has_week_grid)
+        if role == "milestone":
+            continue
+        ctype = ""
+        if role == "attr":
+            ctype, _cfg = _infer_type(_column_values(data_rows, idx), member_names)
+        sel.append({"index": idx, "name": nm, "type": ctype})
+    return sel
+
+
+def _invalid_values(values: list, role: str, ctype: str, member_names: set[str]) -> list[str]:
+    """Cells that would be dropped or blanked on import, given the effective type."""
+    bad: list[str] = []
+    for v in values:
+        if _is_blank(v):
+            continue
+        ok = True
+        if role in ("week", "progress"):
+            ok = _looks_numeric(v)
+        elif role == "attr" or role == "milestone":
+            if ctype == "date":
+                ok = _coerce_date_obj(v) is not None
+            elif ctype == "number":
+                ok = _looks_numeric(v)
+            elif ctype == "member":
+                ok = str(v).strip() in member_names
+        if not ok:
+            bad.append(_cell_text(v))
+    return bad
+
+
+@router.post("/import.xlsx/inspect")
+def inspect_import_xlsx(
+    file: UploadFile,
+    sheet_name: str = Form(default=""),
+    header_row: int = Form(default=0),
+    id_column: int = Form(default=0),
+    has_week_grid: bool = Form(default=True),
+    columns: str = Form(default=""),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Analyse an .xlsx without writing anything — the 取り込みウィザード's data source.
+
+    Returns the workbook's worksheets, a raw preview of the chosen one (for picking
+    the 見出し行 / ID列), and one entry per header column: its role on a schedule
+    sheet, the guessed type, sample values and how many cells would NOT survive the
+    conversion. Pass `columns` (the same JSON the import takes) to re-check the
+    counts against the user's own choices before committing.
+    """
+    wb = _open_workbook(file)
+    ws = _pick_worksheet(wb, sheet_name)
+    grid = _grid(ws)
+    if not grid:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="空のファイルです")
+
+    suggested = _auto_header_row(grid)
+    hr = header_row if header_row > 0 else suggested
+    hr = min(hr, len(grid))
+    header, data_rows = _split_grid(grid, hr)
+
+    member_names = set(_members_by_name(db, user.org_id).keys())
+    chosen = _parse_selection(columns)
+    by_index = {it["index"]: it for it in (chosen or [])}
+
+    cols: list[dict] = []
+    for idx, raw_name in enumerate(header):
+        nm = _cell_text(raw_name)
+        role = _header_role(raw_name, has_week_grid) if nm else "attr"
+        values = _column_values(data_rows, idx)
+        picked = by_index.get(idx)
+        if role == "attr" or (picked and role == "milestone"):
+            inferred, cfg = _infer_type(values, member_names)
+        else:
+            inferred, cfg = "", {}
+        ctype = (picked or {}).get("type") or inferred
+        if ctype not in _IMPORTABLE_TYPES:
+            ctype = inferred
+        filled = [v for v in values if not _is_blank(v)]
+        bad = _invalid_values(values, role, ctype, member_names)
+        selected = (
+            idx in by_index
+            if chosen is not None
+            else (idx != id_column and bool(nm) and role != "milestone")
+        )
+        cols.append(
+            {
+                "index": idx,
+                "header": nm,
+                "role": role,
+                "type": ctype,
+                "selected": selected and idx != id_column,
+                "filled": len(filled),
+                "samples": [_cell_text(v) for v in filled[:_SAMPLE_LIMIT]],
+                "options": [o["value"] for o in (cfg.get("options") or [])],
+                "invalid": len(bad),
+                "invalid_samples": bad[:_SAMPLE_LIMIT],
+            }
+        )
+
+    ids = [
+        _cell_text(r[id_column]) if 0 <= id_column < len(r) else "" for r in data_rows
+    ] if id_column >= 0 else []
+    seen: set[str] = set()
+    duplicate_ids = 0
+    for k in ids:
+        if not k:
+            continue
+        if k in seen:
+            duplicate_ids += 1
+        seen.add(k)
+
+    return {
+        "worksheets": [
+            {"name": s.title, "rows": s.max_row or 0, "columns": s.max_column or 0}
+            for s in wb.worksheets
+        ],
+        "sheet_name": ws.title,
+        "header_row": hr,
+        "suggested_header_row": suggested,
+        "id_column": id_column,
+        "total_rows": len(data_rows),
+        "preview": [
+            {"row": i, "cells": [_cell_text(v) for v in row]}
+            for i, row in enumerate(grid[:_PREVIEW_ROWS], start=1)
+        ],
+        "columns": cols,
+        "blank_ids": sum(1 for k in ids if not k),
+        "duplicate_ids": duplicate_ids,
+    }
+
+
 @router.post("/import.xlsx", status_code=status.HTTP_201_CREATED)
 def import_new_sheet_xlsx(
     file: UploadFile,
     name: str = Form(default=""),
     has_week_grid: bool = Form(default=True),
+    sheet_name: str = Form(default=""),
+    header_row: int = Form(default=0),
+    id_column: int = Form(default=0),
+    columns: str = Form(default=""),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     """Create a NEW sheet from an .xlsx and fill it (要望: シートもexcelから取り込める).
 
-    The first row is the header. Column A is the row ID (key_value); every other
-    header becomes a column whose type is guessed from its values (日付 / 数値 /
-    メンバー / プルダウン / 自由入力). On a schedule sheet the reserved headers —
-    進捗(%), 先行タスク(ID), ◇予定/◇実績 and ISO-date week columns — keep their
-    normal meaning and do NOT become attribute columns.
-    """
-    ws, header, rows_iter = _load_active_sheet(file)
+    `sheet_name` picks the worksheet (default: the active one), `header_row` the
+    1-based 見出し行 (default: auto-detected), `id_column` the 0-based ID column
+    (-1 → auto-numbered keys) and `columns` the JSON list of columns to take:
+    ``[{"index": 1, "name": "件名", "type": "text"}]``. With `columns` omitted every
+    named column is taken with its type guessed from the values (日付 / 数値 /
+    メンバー / プルダウン / 自由入力).
 
-    sheet_name = (name or "").strip() or str(ws.title or "").strip() or "取り込みシート"
+    On a schedule sheet the reserved headers — 進捗(%), 先行タスク(ID) and ISO-date
+    week columns — keep their normal meaning and do NOT become attribute columns;
+    ◇予定/◇実績 are skipped unless explicitly selected (then they land as ordinary
+    date columns, since a new sheet has no milestone template yet).
+    """
+    wb = _open_workbook(file)
+    ws = _pick_worksheet(wb, sheet_name)
+    grid = _grid(ws)
+    if not grid:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="空のファイルです")
+    hr = min(header_row if header_row > 0 else _auto_header_row(grid), len(grid))
+    header, data_rows = _split_grid(grid, hr)
+    if not any(not _is_blank(v) for v in header):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="見出し行が空です（見出し行の指定をご確認ください）"
+        )
+
+    member_names = set(_members_by_name(db, user.org_id).keys())
+    selection = _parse_selection(columns)
+    if selection is None:
+        selection = _default_selection(header, data_rows, id_column, has_week_grid, member_names)
+    selection = [it for it in selection if it["index"] != id_column and 0 <= it["index"] < len(header)]
+
+    new_name = (name or "").strip() or str(ws.title or "").strip() or "取り込みシート"
     max_order = db.execute(
         select(func.coalesce(func.max(Sheet.order), -1)).where(Sheet.org_id == user.org_id)
     ).scalar_one()
     sheet = Sheet(
         org_id=user.org_id,
-        name=sheet_name[:80],
+        name=new_name[:80],
         has_week_grid=has_week_grid,
         order=max_order + 1,
         numbering_rule={"prefix": "", "digits": 3, "next_seq": 1},
@@ -662,37 +966,36 @@ def import_new_sheet_xlsx(
     # headers bind to the real columns instead of creating duplicates.
     ensure_schedule_columns(db, sheet)
 
-    # Buffer the data rows: type inference needs a look at the values, and the
-    # worksheet iterator is single-pass (read_only mode).
-    data_rows = [r for r in rows_iter if r is not None and any(v not in (None, "") for v in r)]
-
     existing_names = {
         c.name
         for c in db.execute(select(Column).where(Column.sheet_id == sheet.id)).scalars()
     }
-    member_names = set(_members_by_name(db, user.org_id).keys())
+    # Resolve each pick to its final column name once — the created columns and the
+    # synthesized header the row importer sees must line up exactly.
+    kept = [
+        {**it, "label": ((it["name"] or _cell_text(header[it["index"]])).strip())[:80].strip()}
+        for it in selection
+    ]
+    kept = [it for it in kept if it["label"]]
 
-    reserved = {PROGRESS_HEADER, DEPS_HEADER}
     created_cols = 0
     order = len(existing_names)
-    for idx, raw_name in enumerate(header):
-        if idx == 0 or raw_name is None:
-            continue  # column A is the ID
-        nm = str(raw_name).strip()
-        if not nm or nm in existing_names:
+    for it in kept:
+        idx, nm = it["index"], it["label"]
+        role = _header_role(header[idx], has_week_grid)
+        # 週次工数 / 進捗 / 先行タスク are imported by name, not as attribute columns.
+        if role in ("week", "progress", "deps") or nm in existing_names:
             continue
-        if has_week_grid:
-            if nm in reserved or _parse_week_header(raw_name) is not None:
-                continue
-            # 「◇名（予定）」/「◇名（実績）」 are handled by the milestone importer.
-            if nm.endswith("（予定）") or nm.endswith("（実績）"):
-                continue
-        sample = [r[idx] if idx < len(r) else None for r in data_rows[:200]]
-        ctype, config = _infer_type(sample, member_names)
+        values = _column_values(data_rows, idx)
+        ctype = it["type"] if it["type"] in _IMPORTABLE_TYPES else ""
+        if not ctype:
+            ctype, config = _infer_type(values, member_names)
+        else:
+            config = _dropdown_config(values) if ctype == "dropdown" else {}
         db.add(
             Column(
                 sheet_id=sheet.id,
-                name=nm[:80],
+                name=nm,
                 type=ctype,
                 order=order,
                 is_key=False,
@@ -704,7 +1007,18 @@ def import_new_sheet_xlsx(
         created_cols += 1
     db.flush()
 
-    result = _import_rows(db, user, sheet, header, iter(data_rows))
+    # Feed the row importer a grid of exactly the chosen columns, ID first.
+    def _cell(row: tuple, i: int):
+        return row[i] if 0 <= i < len(row) else None
+
+    out_header: list = ["ID"] + [it["label"] for it in kept]
+    out_rows = [
+        [_cell(r, id_column) if id_column >= 0 else None]
+        + [_cell(r, it["index"]) for it in kept]
+        for r in data_rows
+    ]
+
+    result = _import_rows(db, user, sheet, out_header, iter(out_rows))
     return {
         "sheet_id": sheet.id,
         "name": sheet.name,

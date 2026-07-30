@@ -222,9 +222,10 @@ class WorkLog(Base):
     """One work-log line (実績入力). Hours roll up into the weekly EffortEntry
     actual_hours for the linked task (row) — see app.worklog_service.
 
-    Categories (cat1=大分類, cat2=中分類) are stored as plain strings (snapshots of
-    the org master at entry time) so renaming/reordering the master never orphans
-    historical logs. row_id is SET NULL on task delete to preserve the record.
+    Categories (cat1/cat2/cat3 — 既定で 大分類/中分類、3段目は任意) are stored as plain
+    strings (snapshots of the org master at entry time) so renaming/reordering the
+    master never orphans historical logs. row_id is SET NULL on task delete to
+    preserve the record.
     """
 
     __tablename__ = "work_logs"
@@ -241,8 +242,11 @@ class WorkLog(Base):
     row_id: Mapped[int | None] = mapped_column(
         ForeignKey("rows.id", ondelete="SET NULL"), nullable=True
     )
+    # Category levels. How many are actually used (and what they are called) is an
+    # org setting: settings.worklog.category_levels (既定は 大分類→中分類の2段).
     cat1: Mapped[str | None] = mapped_column(String(255), nullable=True)  # 大分類
     cat2: Mapped[str | None] = mapped_column(String(255), nullable=True)  # 中分類
+    cat3: Mapped[str | None] = mapped_column(String(255), nullable=True)  # 小分類
     memo: Mapped[str | None] = mapped_column(Text, nullable=True)
     hours: Mapped[float] = mapped_column(Numeric(8, 2), nullable=False)
     created_at: Mapped[datetime] = mapped_column(

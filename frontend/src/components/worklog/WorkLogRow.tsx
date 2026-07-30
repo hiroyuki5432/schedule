@@ -12,8 +12,11 @@ import type { TaskOption, WorkLogMaster } from '@/types/api'
 export interface WorkLogRowValue {
   row_id: string | null
   row_key_value: string | null
+  /** Server-built display text for the linked task (ID＋件名 by default). */
+  row_label?: string | null
   cat1: string | null
   cat2: string | null
+  cat3: string | null
   memo: string | null
   hours: number | null
 }
@@ -71,14 +74,14 @@ export function WorkLogRow({ value, tasks, multiSheet, master, onChange, onDelet
           tasks={tasks}
           multiSheet={multiSheet}
           rowId={value.row_id}
-          fallbackLabel={value.row_key_value}
+          fallbackLabel={value.row_label || value.row_key_value}
           onPick={(rowId) => onChange({ row_id: rowId })}
         />
       </td>
 
       <CategorySelects
         master={master}
-        value={{ cat1: value.cat1, cat2: value.cat2 }}
+        value={{ cat1: value.cat1, cat2: value.cat2, cat3: value.cat3 }}
         onChange={(patch) => onChange(patch)}
       />
 

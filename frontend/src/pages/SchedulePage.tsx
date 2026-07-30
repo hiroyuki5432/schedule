@@ -30,6 +30,7 @@ import { buildColFilterOptions, matchColFilter } from '@/lib/colFilter'
 import type { ColFilter } from '@/lib/colFilter'
 import { addWeeks, fmtISO, fmtMD, parseDate, startOfWeek } from '@/lib/dates'
 import { phaseWeightByName, redistributeMilestones } from '@/lib/milestones'
+import { makeIsRowDone, resolveDisplayValue } from '@/lib/status'
 import { cn } from '@/lib/format'
 import { toast } from '@/lib/toast'
 import type { CellValue, Column, NotificationItem, Row } from '@/types/api'
@@ -202,41 +203,17 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     () => new Map(members.map((m) => [String(m.id), m.name])),
     [members],
   )
+  // Grid display value / 完了判定 — shared with マイタスク so both agree (lib/status).
   const resolveColValue = useCallback(
-    (r: (typeof grid.rows)[number], col: Column): string => {
-      if (col.type === 'member') return memberName.get(String(r.row.data[col.id] ?? '')) ?? ''
-      if (col.type === 'status') {
-        // Match the grid display: auto-status shows the derived badge, otherwise
-        // the stored value wins (falling back to the derived status badge).
-        if (col.config?.auto_from_milestones) return r.status?.label ?? ''
-        const stored = r.row.data[col.id]
-        if (stored != null && stored !== '') return String(stored)
-        return r.status?.label ?? ''
-      }
-      const v = r.row.data[col.id]
-      return v == null ? '' : String(v)
-    },
+    (r: (typeof grid.rows)[number], col: Column): string =>
+      resolveDisplayValue(r, col, memberName),
     [memberName],
   )
 
-  // Status columns — fallback for the 完了を隠す toggle.
-  const statusCols = useMemo(
-    () => grid.columns.filter((c) => c.type === 'status'),
-    [grid.columns],
-  )
-
-  // 完了とみなす条件（任意化）。シート設定の done_filter があればその列値が指定値の
-  // いずれかに一致する行を完了扱い。未設定なら従来どおり status列 === '完了'。
   const doneFilter = sheetSettings?.done_filter
-  const isRowDone = useCallback(
-    (r: (typeof grid.rows)[number]): boolean => {
-      if (doneFilter?.column_id && doneFilter.values?.length) {
-        const col = grid.columns.find((c) => String(c.id) === String(doneFilter.column_id))
-        return col ? doneFilter.values.includes(resolveColValue(r, col)) : false
-      }
-      return statusCols.some((c) => resolveColValue(r, c) === '完了')
-    },
-    [doneFilter, grid.columns, statusCols, resolveColValue],
+  const isRowDone = useMemo(
+    () => makeIsRowDone(grid.columns, memberName, doneFilter),
+    [grid.columns, memberName, doneFilter],
   )
 
   // Per-column filter option metadata (distinct values / month keys / numeric

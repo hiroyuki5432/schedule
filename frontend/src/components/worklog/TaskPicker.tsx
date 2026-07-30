@@ -16,7 +16,9 @@ interface Props {
 }
 
 function label(t: TaskOption, multiSheet: boolean): string {
-  const base = [t.key_value, t.title].filter(Boolean).join(' ') || `#${t.row_id}`
+  // `label` comes from the sheet's configured display columns; ID＋件名 は既定値。
+  const base =
+    t.label?.trim() || [t.key_value, t.title].filter(Boolean).join(' ') || `#${t.row_id}`
   return multiSheet ? `${base}（${t.sheet_name}）` : base
 }
 

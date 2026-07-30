@@ -19,14 +19,17 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { SettingsIcon } from '@/components/ui/icons'
 import { fmtISO, parseDate } from '@/lib/dates'
+import { categoryLevels } from '@/lib/worklogCats'
 import * as api from '@/api/client'
 import type { WorkLog, WorkLogInput } from '@/types/api'
 
 const EMPTY_DRAFT: WorkLogRowValue = {
   row_id: null,
   row_key_value: null,
+  row_label: null,
   cat1: null,
   cat2: null,
+  cat3: null,
   memo: null,
   hours: null,
 }
@@ -35,8 +38,10 @@ function toRowValue(log: WorkLog): WorkLogRowValue {
   return {
     row_id: log.row_id,
     row_key_value: log.row_key_value,
+    row_label: log.row_label,
     cat1: log.cat1,
     cat2: log.cat2,
+    cat3: log.cat3,
     memo: log.memo,
     hours: log.hours,
   }
@@ -48,6 +53,7 @@ function toInput(v: WorkLogRowValue, work_date: string): WorkLogInput {
     row_id: v.row_id,
     cat1: v.cat1,
     cat2: v.cat2,
+    cat3: v.cat3,
     memo: v.memo,
     hours: v.hours ?? 0,
   }
@@ -87,6 +93,8 @@ export function WorkLogPage() {
   const logs = logsQ.data ?? []
   const total = useMemo(() => logs.reduce((s, l) => s + (l.hours ?? 0), 0), [logs])
   const masterEmpty = (master?.categories?.length ?? 0) === 0
+  // 分類の段数・名称は設定で変わる（既定: 大分類・中分類）。
+  const levels = useMemo(() => categoryLevels(master), [master])
 
   function shiftDay(delta: number) {
     const d = parseDate(date)
@@ -114,6 +122,7 @@ export function WorkLogPage() {
             row_id: l.row_id,
             cat1: l.cat1,
             cat2: l.cat2,
+            cat3: l.cat3,
             memo: l.memo,
             hours: l.hours,
           }),
@@ -189,10 +198,10 @@ export function WorkLogPage() {
                 variant={showSettings ? 'primary' : 'outline'}
                 size="sm"
                 onClick={() => setShowSettings((s) => !s)}
-                title="分類・記載ルールの設定"
+                title="分類（段数・項目）と記載ルールの設定"
               >
                 <SettingsIcon className="h-[15px] w-[15px]" />
-                設定
+                分類の設定
               </Button>
             )}
           </div>
@@ -202,10 +211,20 @@ export function WorkLogPage() {
       <div className="flex flex-col gap-3 overflow-auto px-[22px] pb-6">
         {isAdmin && showSettings && <WorklogMasterEditor onClose={() => setShowSettings(false)} />}
 
-        {masterEmpty && (
-          <div className="rounded-[10px] border border-[var(--line)] bg-[#FBFAF5] px-3 py-2 text-[12px] text-[var(--ink3)]">
-            分類は未登録です。{isAdmin ? '右上の「設定」から登録できます。' : '管理者が設定します。'}
-            未登録でもタスク・メモ・時間だけで記録できます。
+        {masterEmpty && !showSettings && (
+          <div className="flex flex-wrap items-center gap-2 rounded-[10px] border border-[var(--line)] bg-[#FBFAF5] px-3 py-2 text-[12px] text-[var(--ink3)]">
+            <span>
+              分類は未登録です。
+              {isAdmin
+                ? '「分類の設定」で段（大分類・中分類…）と項目を自由に作れます。'
+                : '管理者が設定します。'}
+              未登録でもタスク・メモ・時間だけで記録できます。
+            </span>
+            {isAdmin && (
+              <Button size="sm" variant="outline" onClick={() => setShowSettings(true)}>
+                分類を設定する
+              </Button>
+            )}
           </div>
         )}
 
@@ -218,8 +237,11 @@ export function WorkLogPage() {
                   <th className={TH} style={{ width: 300 }}>
                     タスク
                   </th>
-                  <th className={TH}>大分類</th>
-                  <th className={TH}>中分類</th>
+                  {levels.map((l, i) => (
+                    <th key={l + i} className={TH}>
+                      {l}
+                    </th>
+                  ))}
                   <th className={TH}>メモ・詳細</th>
                   <th className={`${TH} text-right`} style={{ width: 90 }}>
                     時間(h)
@@ -230,7 +252,7 @@ export function WorkLogPage() {
               <tbody>
                 {logsQ.isLoading ? (
                   <tr>
-                    <td colSpan={6} className="px-3 py-4 text-[var(--ink3)]">
+                    <td colSpan={4 + levels.length} className="px-3 py-4 text-[var(--ink3)]">
                       読み込み中…
                     </td>
                   </tr>

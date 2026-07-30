@@ -121,14 +121,30 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 |---|---|---|
 | GET | `/api/sheets/{id}/aggregate?group_by={col_id}&from=&to=` | `[{ group, planned_sum, actual_sum, count }]` |
 
+## 日報（実績入力）
+`work_log = { id, user_id, work_date, row_id, row_key_value, row_label, sheet_id, cat1, cat2, cat3, memo, hours }`
+- **分類は段数・名称とも可変**（`org.settings.worklog.category_levels`、既定 `["大分類","中分類"]`、保存枠は `cat1..cat3` の最大3段）。項目そのものは `org.settings.worklog.categories`（段ごとに入れ子のツリー）。
+- `row_label` / `TaskOption.label` は**シートごと**の `settings.worklog_task_columns`（列ID配列、`"__id__"`=タスクID）で組み立てた表示テキスト。未設定なら従来どおり ID＋件名。参照(LOOKUP)列はサーバ側で解決しないため対象外。
+
+| メソッド | パス | 概要 |
+|---|---|---|
+| GET | `/api/worklog?from=&to=&user_id=` | 自分（admin は `user_id` で他人も）の日報。既定は今週 |
+| POST | `/api/worklog` | `{work_date, row_id?, cat1?, cat2?, cat3?, memo?, hours}` → 作成。リンク先タスクの週次実績を再計算 |
+| PATCH | `/api/worklog/{id}` | 部分更新（本人 or admin）。実績を再計算 |
+| DELETE | `/api/worklog/{id}` | 削除。実績を再計算 |
+| GET | `/api/worklog/tasks` | 自分が担当のタスク `[{row_id, key_value, title, label, sheet_id, sheet_name}]` |
+| GET | `/api/worklog/all?date=` | 全員の1日分（みんなの入力一覧）。メンバー別に合計付き |
+
 ## エクスポート / インポート
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET | `/api/sheets/{id}/export.csv` | CSV（属性列＋週次工数）|
 | GET | `/api/sheets/{id}/export.xlsx` | Excel（属性列＋**進捗(%)/先行タスク(ID)**＋**テンプレ◇ごとの「予定/実績」列**＋週次工数）。開始日/完了日は実列なので通常列として出力。担当はメンバー名、先行タスクはID(key_value)で出力 |
 | POST | `/api/sheets/{id}/import.xlsx` | multipart `file`。ID(key_value)で照合し upsert（一致=更新 / 無い=新規）。`{created, updated}` を返す。週次セルは過去=実績・現在以降=予定。**進捗(%)** は行の進捗、**先行タスク(ID)** はID(key_value)で全行取込後に解決。**◇予定/実績**列が非空なら、テンプレ（既定マイルストン）に沿って行のマイルストンを再構築（フェーズ境界は開始日＋◇から復元、実績日があれば達成）。**参照(LOOKUP)列は無視**（出力は空欄）|
-| GET | `/api/worklog/export.xlsx?from=&to=` | 全員の日報を範囲で Excel 出力（みんなの入力一覧）。列: 日付/ユーザー/タスクID/大分類/中分類/メモ/時間 |
-| POST | `/api/worklog/import.xlsx` | **admin**。multipart `file`。各行を新規の日報として追加（ユーザーは名前で照合、タスクはIDで照合）。`{created, skipped}` を返す |
+| POST | `/api/sheets/import.xlsx/inspect` | **書き込みなし**の解析（取り込みウィザード用）。multipart `file` ＋任意の `sheet_name` / `header_row` / `id_column` / `has_week_grid` / `columns`。`{worksheets[], sheet_name, header_row, suggested_header_row, total_rows, preview[], columns[], blank_ids, duplicate_ids}` を返す。`columns[]` は各見出しの `role`（attr/week/progress/deps/milestone）・推定型・値の例・**変換できない値の件数**（`invalid`/`invalid_samples`）|
+| POST | `/api/sheets/import.xlsx` | **新規シート**を作って取り込む。multipart `file` ＋ `name` / `has_week_grid` ／ウィザードの指定 `sheet_name`（ワークシート）・`header_row`（1始まり、既定=自動判定）・`id_column`（0始まり、`-1`=自動採番）・`columns`（JSON `[{index,name,type}]`）。`columns` 省略時は全列を型推定して取込。`{sheet_id, name, columns, created, updated}` を返す |
+| GET | `/api/worklog/export.xlsx?from=&to=` | 全員の日報を範囲で Excel 出力（みんなの入力一覧）。列: 日付/ユーザー/タスクID/**分類の各段**/メモ/時間。分類の見出しは `org.settings.worklog.category_levels`（既定 大分類・中分類、最大3段）|
+| POST | `/api/worklog/import.xlsx` | **admin**。multipart `file`。各行を新規の日報として追加（ユーザーは名前で照合、タスクはIDで照合）。分類列は設定した段の名前で照合し、`大分類/中分類/小分類` もフォールバックで受け付ける。`{created, skipped, duplicates}` を返す |
 
 ## 実装優先度
 1. auth / org / members / sheets / columns / rows / effort / milestones（スケジュール画面が動く中核）

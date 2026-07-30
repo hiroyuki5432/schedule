@@ -6,7 +6,8 @@ import { CommitInput, type WorkLogRowValue } from '@/components/worklog/WorkLogR
 import { TaskSelect } from '@/components/worklog/TaskPicker'
 import { Select } from '@/components/ui/Select'
 import { TrashIcon } from '@/components/ui/icons'
-import type { TaskOption, WorkLogCategoryNode, WorkLogMaster } from '@/types/api'
+import { CAT_FIELDS, categoryLevels, optionsPerLevel, pickPatch } from '@/lib/worklogCats'
+import type { TaskOption, WorkLogMaster } from '@/types/api'
 
 interface Props {
   value: WorkLogRowValue
@@ -17,21 +18,14 @@ interface Props {
   onDelete?: () => void
 }
 
-function childrenOf(
-  nodes: WorkLogCategoryNode[] | undefined,
-  name: string | null,
-): WorkLogCategoryNode[] {
-  if (!nodes || !name) return []
-  return nodes.find((n) => n.name === name)?.children ?? []
-}
-
 const FieldLabel = ({ children }: { children: React.ReactNode }) => (
   <span className="mb-1 block text-[11px] font-medium text-[var(--ink3)]">{children}</span>
 )
 
 export function WorkLogCard({ value, tasks, multiSheet, master, onChange, onDelete }: Props) {
-  const lvl1 = master?.categories ?? []
-  const lvl2 = childrenOf(lvl1, value.cat1)
+  const levels = categoryLevels(master)
+  const values = CAT_FIELDS.map((f) => value[f] ?? null)
+  const options = optionsPerLevel(master, values, levels.length)
 
   return (
     <div className="rounded-[12px] border border-[var(--line)] bg-[var(--surface)] p-3">
@@ -41,43 +35,34 @@ export function WorkLogCard({ value, tasks, multiSheet, master, onChange, onDele
           tasks={tasks}
           multiSheet={multiSheet}
           rowId={value.row_id}
-          fallbackLabel={value.row_key_value}
+          fallbackLabel={value.row_label || value.row_key_value}
           onPick={(rowId) => onChange({ row_id: rowId })}
         />
       </div>
 
       <div className="mt-2 grid grid-cols-2 gap-2">
-        <div>
-          <FieldLabel>大分類</FieldLabel>
-          <Select
-            className="w-full"
-            value={value.cat1 ?? ''}
-            onChange={(e) => onChange({ cat1: e.target.value || null, cat2: null })}
-          >
-            <option value="">（大分類）</option>
-            {lvl1.map((n) => (
-              <option key={n.name} value={n.name}>
-                {n.name}
-              </option>
-            ))}
-          </Select>
-        </div>
-        <div>
-          <FieldLabel>中分類</FieldLabel>
-          <Select
-            className="w-full"
-            value={value.cat2 ?? ''}
-            disabled={lvl2.length === 0}
-            onChange={(e) => onChange({ cat2: e.target.value || null })}
-          >
-            <option value="">（中分類）</option>
-            {lvl2.map((n) => (
-              <option key={n.name} value={n.name}>
-                {n.name}
-              </option>
-            ))}
-          </Select>
-        </div>
+        {levels.map((label, i) => (
+          <div key={label + i}>
+            <FieldLabel>{label}</FieldLabel>
+            <Select
+              className="w-full"
+              value={values[i] ?? ''}
+              disabled={i > 0 && options[i].length === 0}
+              onChange={(e) =>
+                onChange(
+                  pickPatch(i, e.target.value || null, levels.length) as Partial<WorkLogRowValue>,
+                )
+              }
+            >
+              <option value="">（{label}）</option>
+              {options[i].map((n) => (
+                <option key={n.name} value={n.name}>
+                  {n.name}
+                </option>
+              ))}
+            </Select>
+          </div>
+        ))}
       </div>
 
       <div className="mt-2">

@@ -2192,7 +2192,7 @@ function WeekCellView({
       {(cell?.milestoneActual || cell?.milestoneMarker) && (
         <span
           title={cell ? milestoneTip(cell) : undefined}
-          className="absolute left-0 top-1/2 z-[3] h-[9px] w-[9px] border-[1.5px] border-[var(--ink)]"
+          className="absolute left-0 top-1/2 z-[3] h-[5px] w-[5px] border-[1px] border-[var(--ink)]"
           style={{
             transform: 'translate(-50%,-50%) rotate(45deg)',
             background: cell?.milestoneActual ? 'var(--ink)' : 'white',

@@ -1,7 +1,7 @@
 // みんなの入力一覧 — 全員の実績入力（日報）を1日分まとめて表示する読み取り専用ビュー。
 // ユーザー別にグループ化し、各人合計＋全員合計を出す。前日/翌日/今日で日付を移動。
 
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { PageHeader } from '@/components/PageHeader'
@@ -10,9 +10,11 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { TableSkeleton } from '@/components/ui/Skeleton'
 import { Button } from '@/components/ui/Button'
 import { useAuth } from '@/hooks/useAuth'
+import { useOrg } from '@/hooks/useSheets'
 import { toast } from '@/lib/toast'
 import { ApiError } from '@/lib/http'
 import { fmtISO, parseDate } from '@/lib/dates'
+import { CAT_FIELDS, categoryLevels } from '@/lib/worklogCats'
 import type { UserDayWorkLog } from '@/types/api'
 
 const round1 = (x: number) => Math.round(x * 10) / 10
@@ -38,6 +40,12 @@ export function AllUsersWorklogPage() {
     queryKey: ['all-worklog', date],
     queryFn: () => api.getAllUsersWorklog(date),
   })
+  const orgQ = useOrg()
+  // 分類の段数・名称は設定に追従（既定: 大分類・中分類）。
+  const levels = useMemo(
+    () => categoryLevels(orgQ.data?.settings?.worklog),
+    [orgQ.data],
+  )
   const users = q.data ?? []
   const grandTotal = users.reduce((s, u) => s + u.total_hours, 0)
 
@@ -92,18 +100,21 @@ export function AllUsersWorklogPage() {
                 <thead>
                   <tr className="border-b border-[var(--line)] text-left text-[var(--ink3)]">
                     <th className="px-4 py-2.5 font-medium">タスク</th>
-                    <th className="px-4 py-2.5 font-medium">大分類</th>
-                    <th className="px-4 py-2.5 font-medium">中分類</th>
+                    {levels.map((l, i) => (
+                      <th key={l + i} className="px-4 py-2.5 font-medium">
+                        {l}
+                      </th>
+                    ))}
                     <th className="px-4 py-2.5 font-medium">メモ・詳細</th>
                     <th className="px-4 py-2.5 text-right font-medium">時間(h)</th>
                   </tr>
                 </thead>
                 <tbody>
                   {users.map((u) => (
-                    <UserGroup key={u.user_id} user={u} />
+                    <UserGroup key={u.user_id} user={u} levelCount={levels.length} />
                   ))}
                   <tr className="border-t-2 border-[var(--line)] bg-[#F4F1E8]">
-                    <td className="px-4 py-2.5 font-semibold" colSpan={4}>
+                    <td className="px-4 py-2.5 font-semibold" colSpan={2 + levels.length}>
                       全員合計
                     </td>
                     <td className="px-4 py-2.5 text-right font-semibold">{round1(grandTotal)}</td>
@@ -177,23 +188,28 @@ function WorklogExcelToolbar({ date }: { date: string }) {
   )
 }
 
-function UserGroup({ user }: { user: UserDayWorkLog }) {
+function UserGroup({ user, levelCount }: { user: UserDayWorkLog; levelCount: number }) {
   const empty = user.logs.length === 0
+  const span = 2 + levelCount // タスク + 分類 + メモ
   return (
     <>
       <tr className="border-b border-[var(--line2)] bg-[#EEF1F6]">
-        <td className="px-4 py-2 font-bold text-[var(--ink)]" colSpan={empty ? 4 : 1}>
+        <td className="px-4 py-2 font-bold text-[var(--ink)]" colSpan={empty ? span : 1}>
           {user.user_name}
           {empty && <span className="ml-2 font-normal text-[var(--ink3)]">（入力なし）</span>}
         </td>
-        {!empty && <td colSpan={3} />}
+        {!empty && <td colSpan={span - 1} />}
         <td className="px-4 py-2 text-right font-bold">{empty ? '' : round1(user.total_hours)}</td>
       </tr>
       {user.logs.map((l) => (
         <tr key={l.id} className="border-b border-[var(--line2)]">
-          <td className="px-4 py-2 text-[var(--ink3)]">{l.row_key_value ?? ''}</td>
-          <td className="px-4 py-2 text-[var(--ink2)]">{l.cat1 ?? ''}</td>
-          <td className="px-4 py-2 text-[var(--ink2)]">{l.cat2 ?? ''}</td>
+          {/* タスクはシート設定の表示列（既定 ID＋件名）。未設定/未リンクはIDのみ。 */}
+          <td className="px-4 py-2 text-[var(--ink2)]">{l.row_label || l.row_key_value || ''}</td>
+          {CAT_FIELDS.slice(0, levelCount).map((f) => (
+            <td key={f} className="px-4 py-2 text-[var(--ink2)]">
+              {l[f] ?? ''}
+            </td>
+          ))}
           <td className="px-4 py-2">{l.memo ?? ''}</td>
           <td className="px-4 py-2 text-right">{round1(l.hours)}</td>
         </tr>

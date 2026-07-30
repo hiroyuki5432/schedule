@@ -165,6 +165,48 @@ export function statusFromPhases(
   return { label: active.name, bg, color: readableInk(bg) }
 }
 
+/** The minimum a row needs for the display-value / 完了 helpers below (the
+ *  schedule's row model satisfies it). */
+export interface DisplayRow {
+  row: Row
+  status: StatusBadge | null
+}
+
+/** A column's value as SHOWN in the grid: members resolve to names, status uses
+ *  the derived badge when auto (or when nothing is stored). */
+export function resolveDisplayValue(
+  r: DisplayRow,
+  col: Column,
+  memberName: Map<string, string>,
+): string {
+  if (col.type === 'member') return memberName.get(String(r.row.data[col.id] ?? '')) ?? ''
+  if (col.type === 'status') {
+    if (col.config?.auto_from_milestones) return r.status?.label ?? ''
+    const stored = r.row.data[col.id]
+    if (stored != null && stored !== '') return String(stored)
+    return r.status?.label ?? ''
+  }
+  const v = r.row.data[col.id]
+  return v == null ? '' : String(v)
+}
+
+/** 完了とみなす条件。シート設定の done_filter があればその列値で判定し、未設定なら
+ *  status 列が「完了」の行を完了扱い（スケジュールとマイタスクで共通）。 */
+export function makeIsRowDone(
+  columns: Column[],
+  memberName: Map<string, string>,
+  doneFilter?: { column_id: string; values: string[] },
+): (r: DisplayRow) => boolean {
+  const statusCols = columns.filter((c) => c.type === 'status')
+  return (r: DisplayRow) => {
+    if (doneFilter?.column_id && doneFilter.values?.length) {
+      const col = columns.find((c) => String(c.id) === String(doneFilter.column_id))
+      return col ? doneFilter.values.includes(resolveDisplayValue(r, col, memberName)) : false
+    }
+    return statusCols.some((c) => resolveDisplayValue(r, c, memberName) === '完了')
+  }
+}
+
 /** Default status values offered even when not yet present in the data. */
 export const DEFAULT_STATUS_VALUES = ['未着手', '進行中', '完了', '遅延']
 

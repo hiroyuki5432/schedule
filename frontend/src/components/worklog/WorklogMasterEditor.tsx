@@ -1,6 +1,6 @@
 // Admin settings for 実績入力, shown as a panel on the 実績入力 page:
-//  - category master: a 2-level cascading tree (大分類 → 中分類). Each 大分類 has
-//    its OWN 中分類 list (pick a 大分類 on the left to edit its 中分類 on the right).
+//  - category master: cascading levels (既定は 大分類 → 中分類)。段数（1〜3）も
+//    各段の名称も変えられ、各段の項目は上位で選んだ項目にひもづく。
 //  - 記載ルール: free text shown to everyone at the bottom of 実績入力.
 
 import { useState } from 'react'
@@ -12,7 +12,10 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { PlusIcon, TrashIcon } from '@/components/ui/icons'
 import { cn } from '@/lib/format'
+import { CAT_FIELDS, categoryLevels } from '@/lib/worklogCats'
 import type { WorkLogCategoryNode } from '@/types/api'
+
+const MAX_LEVELS = CAT_FIELDS.length
 
 function clone(nodes: WorkLogCategoryNode[]): WorkLogCategoryNode[] {
   return nodes.map((n) => ({ name: n.name, children: n.children ? clone(n.children) : [] }))
@@ -38,27 +41,44 @@ export function WorklogMasterEditor({ onClose }: { onClose: () => void }) {
     )
   }
   const wl = orgQ.data.settings?.worklog
-  return <Editor initialCategories={wl?.categories ?? []} initialNote={wl?.note ?? ''} onClose={onClose} />
+  return (
+    <Editor
+      initialCategories={wl?.categories ?? []}
+      initialLevels={categoryLevels(wl)}
+      initialNote={wl?.note ?? ''}
+      onClose={onClose}
+    />
+  )
 }
 
 function Editor({
   initialCategories,
+  initialLevels,
   initialNote,
   onClose,
 }: {
   initialCategories: WorkLogCategoryNode[]
+  initialLevels: string[]
   initialNote: string
   onClose: () => void
 }) {
   const qc = useQueryClient()
   const [cats, setCats] = useState<WorkLogCategoryNode[]>(() => clone(initialCategories))
+  const [levels, setLevels] = useState<string[]>(() => [...initialLevels])
   const [note, setNote] = useState(initialNote)
-  const [sel1, setSel1] = useState(0)
+  /** Selected item index per level (drives which list the next level shows). */
+  const [path, setPath] = useState<number[]>([0, 0])
 
   const save = useMutation({
     mutationFn: () =>
       api.updateOrg({
-        settings: { worklog: { categories: strip(cats), note: note.trim() } },
+        settings: {
+          worklog: {
+            categories: strip(cats),
+            category_levels: levels.map((l, i) => l.trim() || `分類${i + 1}`),
+            note: note.trim(),
+          },
+        },
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['org'] })
@@ -72,8 +92,26 @@ function Editor({
     mut(next)
     setCats(next)
   }
-  const cur1 = cats[sel1]
-  const cur1Name = cur1?.name?.trim()
+
+  /** The item list shown at `level`, following the current selection path
+   *  (read-only — edits go through listAtIn on a draft copy). */
+  function listAt(level: number, tree: WorkLogCategoryNode[]): WorkLogCategoryNode[] | null {
+    let nodes: WorkLogCategoryNode[] = tree
+    for (let i = 0; i < level; i++) {
+      const node: WorkLogCategoryNode | undefined = nodes[path[i] ?? 0]
+      if (!node) return null
+      nodes = node.children ?? []
+    }
+    return nodes
+  }
+
+  const selectAt = (level: number, index: number) =>
+    setPath((p) => {
+      const next = [...p]
+      next[level] = index
+      for (let i = level + 1; i < next.length; i++) next[i] = 0
+      return next
+    })
 
   return (
     <Card>
@@ -81,33 +119,76 @@ function Editor({
         <div className="text-[13px] font-semibold">実績入力の設定</div>
 
         <div>
-          <div className="mb-1.5 text-[12px] font-medium text-[var(--ink2)]">分類（大分類 → 中分類）</div>
-          <div className="mb-2 text-[11.5px] text-[var(--ink3)]">
-            左で大分類を選ぶと、その大分類にひもづく中分類を右で編集できます。
+          <div className="mb-1.5 flex flex-wrap items-center gap-2">
+            <span className="text-[12px] font-medium text-[var(--ink2)]">
+              分類（{levels.join(' → ')}）
+            </span>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={levels.length >= MAX_LEVELS}
+              onClick={() => setLevels([...levels, `分類${levels.length + 1}`])}
+              title={levels.length >= MAX_LEVELS ? `分類は最大${MAX_LEVELS}段です` : '段を追加'}
+            >
+              ＋段を追加
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={levels.length <= 1}
+              onClick={() => setLevels(levels.slice(0, -1))}
+              title="最後の段を減らす（その段の項目は残りますが、入力欄には出なくなります）"
+            >
+              − 段を減らす
+            </Button>
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <Column
-              title="大分類"
-              items={cats}
-              selected={sel1}
-              onFocusItem={(i) => setSel1(i)}
-              onRename={(i, v) => edit((d) => void (d[i].name = v))}
-              onDelete={(i) =>
-                edit((d) => {
-                  d.splice(i, 1)
-                  if (sel1 >= d.length) setSel1(Math.max(0, d.length - 1))
-                })
-              }
-              onAdd={() => edit((d) => void d.push({ name: '', children: [] }))}
-            />
-            <Column
-              title={cur1Name ? `「${cur1Name}」の中分類` : '中分類（先に大分類を選択）'}
-              disabled={!cur1}
-              items={cur1?.children ?? []}
-              onRename={(j, v) => edit((d) => void (d[sel1].children![j].name = v))}
-              onDelete={(j) => edit((d) => void d[sel1].children!.splice(j, 1))}
-              onAdd={() => edit((d) => void (d[sel1].children ??= []).push({ name: '', children: [] }))}
-            />
+          <div className="mb-2 text-[11.5px] text-[var(--ink3)]">
+            左の段で項目を選ぶと、その項目にひもづく次の段を右で編集できます。段の名前も変更できます
+            （最大{MAX_LEVELS}段）。
+          </div>
+          <div
+            className="grid grid-cols-1 gap-3"
+            style={{ gridTemplateColumns: `repeat(${Math.min(levels.length, 3)}, minmax(0, 1fr))` }}
+          >
+            {levels.map((label, level) => {
+              const items = listAt(level, cats)
+              const parentName =
+                level === 0 ? null : listAt(level - 1, cats)?.[path[level - 1] ?? 0]?.name?.trim()
+              return (
+                <LevelColumn
+                  key={level}
+                  label={label}
+                  onLabel={(v) =>
+                    setLevels((ls) => ls.map((x, i) => (i === level ? v : x)))
+                  }
+                  hint={level === 0 ? undefined : parentName ? `「${parentName}」の中` : '上の段を選択'}
+                  disabled={level > 0 && (items === null || !parentName)}
+                  items={items ?? []}
+                  selected={path[level] ?? 0}
+                  onFocusItem={(i) => selectAt(level, i)}
+                  onRename={(i, v) =>
+                    edit((d) => {
+                      const list = listAtIn(d, path, level)
+                      if (list) list[i].name = v
+                    })
+                  }
+                  onDelete={(i) =>
+                    edit((d) => {
+                      const list = listAtIn(d, path, level)
+                      if (!list) return
+                      list.splice(i, 1)
+                      if ((path[level] ?? 0) >= list.length) selectAt(level, Math.max(0, list.length - 1))
+                    })
+                  }
+                  onAdd={() =>
+                    edit((d) => {
+                      const list = listAtIn(d, path, level)
+                      list?.push({ name: '', children: [] })
+                    })
+                  }
+                />
+              )
+            })}
           </div>
         </div>
 
@@ -135,8 +216,25 @@ function Editor({
   )
 }
 
-function Column({
-  title,
+/** Same walk as listAt, but against a draft tree being mutated. */
+function listAtIn(
+  tree: WorkLogCategoryNode[],
+  path: number[],
+  level: number,
+): WorkLogCategoryNode[] | null {
+  let nodes: WorkLogCategoryNode[] | null = tree
+  for (let i = 0; i < level; i++) {
+    const node: WorkLogCategoryNode | undefined = nodes?.[path[i] ?? 0]
+    if (!node) return null
+    nodes = node.children ??= []
+  }
+  return nodes
+}
+
+function LevelColumn({
+  label,
+  onLabel,
+  hint,
   items,
   selected,
   disabled,
@@ -145,7 +243,9 @@ function Column({
   onDelete,
   onAdd,
 }: {
-  title: string
+  label: string
+  onLabel: (v: string) => void
+  hint?: string
   items: WorkLogCategoryNode[]
   selected?: number
   disabled?: boolean
@@ -156,7 +256,16 @@ function Column({
 }) {
   return (
     <div className={cn('rounded-[10px] border border-[var(--line)] p-2.5', disabled && 'opacity-50')}>
-      <div className="mb-1.5 text-[12px] font-medium text-[var(--ink2)]">{title}</div>
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <Input
+          value={label}
+          placeholder="段の名前"
+          className="h-7 w-[110px] px-2 py-1 text-[12px] font-medium"
+          onChange={(e) => onLabel(e.target.value)}
+          title="この段の名前（例: 大分類）"
+        />
+        {hint && <span className="truncate text-[11px] text-[var(--ink3)]">{hint}</span>}
+      </div>
       <div className="flex flex-col gap-1">
         {items.map((n, i) => (
           <div

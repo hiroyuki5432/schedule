@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 
 from openpyxl import Workbook, load_workbook
 
@@ -318,6 +319,143 @@ def test_import_new_sheet_defaults_name_to_worksheet(auth_client):
     detail = auth_client.get(f"/api/sheets/{sid}").json()
     assert detail["sheet"]["name"] == "作業一覧"
     assert detail["sheet"]["has_week_grid"] is False
+
+
+def _multi_sheet_xlsx() -> io.BytesIO:
+    """A messy but realistic book: a cover sheet + a data sheet whose header is on
+    row 3 (title line, blank line), with the ID in column B."""
+    wb = Workbook()
+    cover = wb.active
+    cover.title = "表紙"
+    cover.append(["社外秘"])
+    ws = wb.create_sheet("作業計画")
+    ws.append(["2026年度 作業計画"])
+    ws.append([])
+    ws.append(["No", "タスクID", "件名", "担当", "区分", "開始予定", "見積"])
+    ws.append([1, "A-1", "設計する", "Admin", "開発", "2026-04-01", 12])
+    ws.append([2, "A-2", "実装する", "Admin", "開発", "2026-04-08", 30])
+    ws.append([3, "A-3", "確認する", "Admin", "検証", "2026-04-15", 4])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def test_inspect_lists_worksheets_and_guesses_header_row(auth_client):
+    """取り込みウィザード step 1/2: worksheets, the guessed 見出し行 and a raw preview."""
+    r = auth_client.post(
+        "/api/sheets/import.xlsx/inspect",
+        files={"file": ("plan.xlsx", _multi_sheet_xlsx(), _MEDIA)},
+        data={"sheet_name": "作業計画", "id_column": "1", "has_week_grid": "true"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [w["name"] for w in body["worksheets"]] == ["表紙", "作業計画"]
+    assert body["sheet_name"] == "作業計画"
+    assert body["suggested_header_row"] == 3  # skips the title line + blank row
+    assert body["header_row"] == 3
+    assert body["total_rows"] == 3
+    assert body["preview"][2]["cells"][:3] == ["No", "タスクID", "件名"]
+
+    by_header = {c["header"]: c for c in body["columns"]}
+    assert by_header["タスクID"]["selected"] is False  # it's the ID column
+    assert by_header["担当"]["type"] == "member"
+    assert by_header["区分"]["type"] == "dropdown"
+    assert sorted(by_header["区分"]["options"]) == ["検証", "開発"]
+    assert by_header["開始予定"]["type"] == "date"
+    assert by_header["見積"]["type"] == "number"
+    assert by_header["件名"]["samples"] == ["設計する", "実装する", "確認する"]
+    assert by_header["件名"]["filled"] == 3
+
+
+def test_inspect_reports_values_that_would_not_convert(auth_client):
+    """The preview step warns before anything is written: cells that don't fit the
+    chosen type are counted (and sampled) instead of silently vanishing."""
+    buf = _xlsx([["ID", "期日"], ["A-1", "2026-04-01"], ["A-2", "未定"]])
+    r = auth_client.post(
+        "/api/sheets/import.xlsx/inspect",
+        files={"file": ("d.xlsx", buf, _MEDIA)},
+        data={"columns": '[{"index": 1, "name": "期日", "type": "date"}]'},
+    )
+    assert r.status_code == 200, r.text
+    col = next(c for c in r.json()["columns"] if c["header"] == "期日")
+    assert col["selected"] is True
+    assert col["invalid"] == 1
+    assert col["invalid_samples"] == ["未定"]
+
+
+def test_inspect_flags_duplicate_and_blank_ids(auth_client):
+    buf = _xlsx([["ID", "件名"], ["A-1", "あ"], ["A-1", "い"], [None, "う"]])
+    r = auth_client.post(
+        "/api/sheets/import.xlsx/inspect",
+        files={"file": ("dup.xlsx", buf, _MEDIA)},
+    )
+    body = r.json()
+    assert body["duplicate_ids"] == 1
+    assert body["blank_ids"] == 1
+
+
+def test_import_honors_worksheet_header_row_and_column_choice(auth_client):
+    """Only the chosen worksheet / 見出し行 / ID列 / 列 are taken, with the user's
+    own column names and types (要望: 確認しながら取り込む)."""
+    r = auth_client.post(
+        "/api/sheets/import.xlsx",
+        files={"file": ("plan.xlsx", _multi_sheet_xlsx(), _MEDIA)},
+        data={
+            "name": "選択取込",
+            "has_week_grid": "true",
+            "sheet_name": "作業計画",
+            "header_row": "3",
+            "id_column": "1",
+            "columns": json.dumps(
+                [
+                    {"index": 2, "name": "作業名", "type": "text"},
+                    {"index": 5, "name": "開始日", "type": "date"},
+                    {"index": 6, "name": "見積", "type": "text"},  # forced to text
+                ]
+            ),
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["created"] == 3
+    sid = body["sheet_id"]
+
+    detail = auth_client.get(f"/api/sheets/{sid}").json()
+    by_name = {c["name"]: c for c in detail["columns"]}
+    assert "No" not in by_name and "担当" not in by_name and "区分" not in by_name
+    assert by_name["作業名"]["type"] == "text"
+    assert by_name["見積"]["type"] == "text"  # user's override beats the number guess
+    # 開始日 binds to the sheet's existing schedule column instead of duplicating it.
+    assert by_name["開始日"]["config"].get("sched_role") == "start"
+    assert body["columns"] == 2
+
+    rows = {x["key_value"]: x for x in detail["rows"]}
+    assert set(rows) == {"A-1", "A-2", "A-3"}
+    assert rows["A-1"]["data"][str(by_name["作業名"]["id"])] == "設計する"
+    assert rows["A-1"]["data"][str(by_name["開始日"]["id"])] == "2026-04-01"
+    assert rows["A-3"]["data"][str(by_name["見積"]["id"])] == "4"
+
+
+def test_import_without_id_column_auto_numbers_rows(auth_client):
+    buf = _xlsx([["件名", "区分"], ["設計", "開発"], ["実装", "開発"]])
+    r = auth_client.post(
+        "/api/sheets/import.xlsx",
+        files={"file": ("noid.xlsx", buf, _MEDIA)},
+        data={
+            "has_week_grid": "false",
+            "id_column": "-1",
+            "columns": json.dumps(
+                [{"index": 0, "name": "件名", "type": "text"}, {"index": 1, "name": "区分", "type": "text"}]
+            ),
+        },
+    )
+    assert r.status_code == 201, r.text
+    detail = auth_client.get(f"/api/sheets/{r.json()['sheet_id']}").json()
+    by_name = {c["name"]: c for c in detail["columns"]}
+    keys = sorted(x["key_value"] for x in detail["rows"])
+    assert keys == ["001", "002"]  # numbering rule filled the missing IDs
+    assert detail["rows"][0]["data"][str(by_name["件名"]["id"])] == "設計"
 
 
 def test_import_weekly_effort_future_planned(auth_client):

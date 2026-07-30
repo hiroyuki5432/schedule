@@ -10,21 +10,21 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { useMembers, useSheets } from '@/hooks/useSheets'
+import { useLookupTargets } from '@/hooks/useLookupTargets'
+import { usePersistentState } from '@/hooks/usePersistentState'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { TableSkeleton } from '@/components/ui/Skeleton'
 import { Select } from '@/components/ui/Select'
-import { parseDate } from '@/lib/dates'
+import { Input } from '@/components/ui/Input'
+import { Button } from '@/components/ui/Button'
+import { fiscalCol, fiscalYearOf, parseDate } from '@/lib/dates'
 import { cn } from '@/lib/format'
 import type { Column, Effort, Member, Row } from '@/types/api'
 
 // Fiscal year: April(4) through next March(3).
 const MONTHS = ['4', '5', '6', '7', '8', '9', '10', '11', '12', '1', '2', '3']
-/** Fiscal year a date belongs to (Apr–Dec → that year; Jan–Mar → prev year). */
-const fiscalYearOf = (d: Date) => (d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1)
-/** Column index 0..11 for a date within the fiscal year (April = 0). */
-const fiscalCol = (d: Date) => (d.getMonth() - 3 + 12) % 12
 const PALETTE = [
   '#A7D0BE', '#CBD9EE', '#F1DBAC', '#E8B6A6',
   '#C7B8DE', '#BFE2D3', '#E0CDA9', '#9FC7D6',
@@ -74,13 +74,21 @@ interface CatNode {
   children: CatNode[]
 }
 
+/** A saved 分類の組み合わせ (大/中/小 の列指定) — per sheet, named by the user. */
+interface Preset {
+  name: string
+  big: string
+  mid: string
+  small: string
+}
+
 export function AnnualPlanPage() {
   const sheetsQ = useSheets()
   const sheets = useMemo(
     () => [...(sheetsQ.data ?? [])].sort((a, b) => a.order - b.order),
     [sheetsQ.data],
   )
-  const [sheetIdState, setSheetIdState] = useState<string>('')
+  const [sheetIdState, setSheetIdState] = usePersistentState('view:annualPlan:sheetId', '')
   const sheetId = sheetIdState || sheets[0]?.id || ''
 
   const membersQ = useMembers()
@@ -99,23 +107,39 @@ export function AnnualPlanPage() {
   const rows = useMemo(() => detailQ.data?.rows ?? [], [detailQ.data])
   const effort: Effort[] = useMemo(() => effortQ.data ?? [], [effortQ.data])
 
-  // Group-by candidates: dropdown / status / member / text (件名 is text, so it
-  // can be chosen as a level to get task-title granularity).
+  // Group-by candidates: dropdown / status / member / text / lookup. 参照(LOOKUP)
+  // 列も選べる（値は他シートから解決した表示値で集約）— 要望: 大分類にLOOKUP列。
   const groupable = useMemo(
-    () => columns.filter((c) => ['dropdown', 'status', 'member', 'text'].includes(c.type)),
+    () =>
+      columns.filter((c) =>
+        ['dropdown', 'status', 'member', 'text', 'lookup'].includes(c.type),
+      ),
     [columns],
   )
+  const { lookupValue } = useLookupTargets(columns, membersQ.data ?? [])
   const defaultBigId = useMemo(() => {
-    const prio = ['dropdown', 'member', 'status', 'text']
+    const prio = ['dropdown', 'member', 'status', 'lookup', 'text']
     return [...groupable].sort((a, b) => prio.indexOf(a.type) - prio.indexOf(b.type))[0]?.id
   }, [groupable])
 
-  const [bigState, setBigState] = useState('')
-  const [midState, setMidState] = useState('')
-  const [smallState, setSmallState] = useState('')
-  const big = bigState || (defaultBigId != null ? String(defaultBigId) : '')
-  const mid = midState
-  const small = smallState
+  // The last-used 大/中/小 per sheet, plus named presets (要望: 分類項目を保存).
+  const [sel, setSel] = usePersistentState<{ big: string; mid: string; small: string }>(
+    sheetId ? `view:annualPlan:sel:${sheetId}` : null,
+    { big: '', mid: '', small: '' },
+  )
+  const [presets, setPresets] = usePersistentState<Preset[]>(
+    sheetId ? `view:annualPlan:presets:${sheetId}` : null,
+    [],
+  )
+  const [naming, setNaming] = useState(false)
+  const [newName, setNewName] = useState('')
+
+  const setBigState = (v: string) => setSel((s) => ({ ...s, big: v }))
+  const setMidState = (v: string) => setSel((s) => ({ ...s, mid: v, small: v ? s.small : '' }))
+  const setSmallState = (v: string) => setSel((s) => ({ ...s, small: v }))
+  const big = sel.big || (defaultBigId != null ? String(defaultBigId) : '')
+  const mid = sel.mid
+  const small = sel.small
 
   const findCol = (id: string) => columns.find((c) => String(c.id) === String(id))
   const bigCol = findCol(big)
@@ -168,6 +192,11 @@ export function AnnualPlanPage() {
   }, [membersQ.data])
 
   function valueOf(row: Row, col: Column): string {
+    // 参照(LOOKUP)列は保存値ではなく解決した表示値で束ねる。
+    if (col.type === 'lookup') {
+      const resolved = lookupValue(col, row)
+      return resolved == null || resolved === '' ? UNSET : resolved
+    }
     const v = row.data[col.id]
     if (v == null || v === '') return UNSET
     if (col.type === 'member') return membersById.get(String(v))?.name ?? UNSET
@@ -238,10 +267,19 @@ export function AnnualPlanPage() {
     sortRec(rootChildren)
     return rootChildren
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, big, mid, small, year, membersById, childrenByParent, effortWeeksByRow])
+  }, [rows, big, mid, small, year, membersById, childrenByParent, effortWeeksByRow, lookupValue])
 
   const currentMonth = year === thisYear ? fiscalCol(new Date()) : -1
   const loading = detailQ.isLoading || effortQ.isLoading
+
+  /** Save the current 大/中/小 under a name (same name = overwrite). */
+  function savePreset() {
+    const name = newName.trim()
+    if (!name) return
+    const entry: Preset = { name, big, mid, small }
+    setPresets((all) => [...all.filter((p) => p.name !== name), entry])
+    setNaming(false)
+  }
 
   const midOptions = groupable.filter((c) => String(c.id) !== String(big))
   const smallOptions = groupable.filter(
@@ -315,6 +353,78 @@ export function AnnualPlanPage() {
               ))}
             </Select>
           </label>
+        </div>
+
+        {/* Saved 分類の組み合わせ (要望: いくつか設定した分類項目を保存できるといい) */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-[12px] text-[var(--ink2)]">
+          <span className="text-[var(--ink3)]">保存した表示</span>
+          {presets.length === 0 && (
+            <span className="text-[var(--ink3)]">（まだありません）</span>
+          )}
+          {presets.map((p) => {
+            const active = p.big === big && p.mid === mid && p.small === small
+            return (
+              <span key={p.name} className="flex items-center">
+                <button
+                  type="button"
+                  onClick={() => setSel({ big: p.big, mid: p.mid, small: p.small })}
+                  className={cn(
+                    'rounded-l-[9px] border py-1 pl-2.5 pr-2',
+                    active
+                      ? 'border-[var(--green)] bg-[#F2F6F3] text-[var(--green-d)]'
+                      : 'border-[var(--line)] bg-[var(--surface)] hover:bg-[var(--line2)]',
+                  )}
+                  title={`${p.name} の分類で表示`}
+                >
+                  {p.name}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPresets((all) => all.filter((x) => x.name !== p.name))}
+                  className={cn(
+                    'rounded-r-[9px] border border-l-0 px-1.5 py-1 text-[var(--ink3)] hover:text-[#A8442B]',
+                    active ? 'border-[var(--green)] bg-[#F2F6F3]' : 'border-[var(--line)] bg-[var(--surface)]',
+                  )}
+                  title="この保存を削除"
+                >
+                  ×
+                </button>
+              </span>
+            )
+          })}
+          {naming ? (
+            <span className="flex items-center gap-1.5">
+              <Input
+                autoFocus
+                value={newName}
+                placeholder="名前（例: 顧客別）"
+                className="h-7 w-[150px] px-2 py-1 text-[12px]"
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') savePreset()
+                  if (e.key === 'Escape') setNaming(false)
+                }}
+              />
+              <Button size="sm" onClick={savePreset} disabled={!newName.trim()}>
+                保存
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setNaming(false)}>
+                やめる
+              </Button>
+            </span>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!big}
+              onClick={() => {
+                setNewName('')
+                setNaming(true)
+              }}
+            >
+              今の分類を保存
+            </Button>
+          )}
         </div>
 
         <Card>

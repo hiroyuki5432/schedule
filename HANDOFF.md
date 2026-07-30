@@ -34,6 +34,9 @@ docker compose up -d --build
 - ログイン画面の「**新しいグループを作成する**」から、組織＋管理者を自分で作成できる（`POST /api/org/signup`、作成後に自動ログイン＋空の週次シート1枚を用意）。
 - メニュー「**グループ管理**」（旧メンバー管理, ルートは `/members`）で、メンバー管理に加え**グループ名**と**アプリ表示名**（`org.settings.app_title`、サイドバー上部・グループごと）を編集。
 - **Excel入出力**（`backend/app/routers/excel.py`、`openpyxl`）: `GET .../export.xlsx` / `POST .../import.xlsx`。インポートは ID で upsert、属性＋週次工数（過去=実績/未来=予定）。フロントは [ExcelToolbar.tsx](frontend/src/components/ExcelToolbar.tsx)。
+- **実績入力の分類（段数可変）**: 段の名称は `org.settings.worklog.category_levels`（既定 `["大分類","中分類"]`、最大3段＝`work_logs.cat1..cat3`）、項目は `worklog.categories` の入れ子ツリー。フロントは [lib/worklogCats.ts](frontend/src/lib/worklogCats.ts) 経由で扱い、編集は [WorklogMasterEditor.tsx](frontend/src/components/worklog/WorklogMasterEditor.tsx)（実績入力の「分類の設定」、管理者のみ）。**cat3 追加のマイグレーションあり（0012）→ backend 再起動で自動適用**。
+- **タスク表示列**: シートの `settings.worklog_task_columns`（列ID配列 / `"__id__"`=ID）。バックエンドが `TaskOption.label` と `WorkLogOut.row_label` を組み立てる（[worklog.py](backend/app/routers/worklog.py) の `_label_keys` / `_task_label`）。設定UIはシート設定の「実績入力でのタスク表示」。
+- **シート新規作成の取り込みウィザード**: 「シート追加」で .xlsx を選ぶと [ImportSheetWizard.tsx](frontend/src/components/ImportSheetWizard.tsx) に遷移し、ワークシート／見出し行／ID列 → 取り込む列（列名・型の変更可）→ プレビューと警告、の順で確認してから作成。解析は書き込みなしの `POST /api/sheets/import.xlsx/inspect`（同じ引数を渡すと選択内容で再検証）、確定は `POST /api/sheets/import.xlsx`（`sheet_name` / `header_row` / `id_column` / `columns` JSON）。
 - **完全オフライン**: フロントの Google Fonts CDN を撤去（端末標準フォントにフォールバック）。運用中の外部アクセスは無し。**openpyxl を追加したので backend は要リビルド**（`up -d --build`）。
 - 初回起動で seed 投入（`SEED_ON_STARTUP=true`、orgが空のときだけ）。
 

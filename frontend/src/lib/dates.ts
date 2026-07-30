@@ -53,6 +53,17 @@ export function addWeeks(weekStart: string, n: number): string {
   return fmtISO(new Date(parseDate(weekStart).getTime() + n * MS_WEEK))
 }
 
+/** Fiscal year a date belongs to (Apr–Dec → that year; Jan–Mar → the previous
+ *  year). 年度 = 4月〜翌3月 — shared by 年間開発計画 and マイタスクの年度絞り込み. */
+export function fiscalYearOf(d: Date): number {
+  return d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1
+}
+
+/** Column index 0..11 of a date within its fiscal year (April = 0). */
+export function fiscalCol(d: Date): number {
+  return (d.getMonth() - 3 + 12) % 12
+}
+
 /** For each week, true when it begins a new calendar month (for the month header). */
 export function monthStarts(weeks: Date[]): boolean[] {
   return weeks.map(

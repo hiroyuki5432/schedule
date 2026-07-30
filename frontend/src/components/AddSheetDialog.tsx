@@ -1,6 +1,7 @@
 // "シート追加" dialog: name + type radio, plus an optional .xlsx to build the
-// sheet from (columns inferred from the header row). Creates the sheet,
-// invalidates the sheet list, and navigates to it.
+// sheet from. With a file, 「次へ」 hands over to the 取り込みウィザード
+// (ImportSheetWizard) so the worksheet / 見出し行 / 列 can be confirmed before
+// anything is written. Without one it just creates the sheet and navigates to it.
 import { useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
@@ -9,7 +10,7 @@ import { ApiError } from '@/lib/http'
 import { Modal } from '@/components/ui/Modal'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
-import { toast } from '@/lib/toast'
+import { ImportSheetWizard } from '@/components/ImportSheetWizard'
 import { cn } from '@/lib/format'
 
 interface Props {
@@ -22,22 +23,12 @@ export function AddSheetDialog({ onClose }: Props) {
   const [name, setName] = useState('')
   const [hasWeekGrid, setHasWeekGrid] = useState(true)
   const [file, setFile] = useState<File | null>(null)
+  const [wizard, setWizard] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const mutation = useMutation({
     mutationFn: async () => {
-      if (file) {
-        const r = await api.importNewSheetXlsx(file, {
-          name: name.trim(),
-          hasWeekGrid,
-        })
-        toast.show(
-          `「${r.name}」を作成しました（列 ${r.columns} / 行 ${r.created}）`,
-          'success',
-        )
-        return { id: String(r.sheet_id) }
-      }
       const s = await api.createSheet({ name: name.trim(), has_week_grid: hasWeekGrid })
       return { id: String(s.id) }
     },
@@ -54,13 +45,27 @@ export function AddSheetDialog({ onClose }: Props) {
   // With a file the name is optional (the worksheet name is used instead).
   const canSubmit = (!!file || name.trim() !== '') && !mutation.isPending
 
+  if (wizard && file) {
+    return (
+      <ImportSheetWizard
+        file={file}
+        defaultName={name.trim()}
+        hasWeekGrid={hasWeekGrid}
+        onBack={() => setWizard(false)}
+        onClose={onClose}
+      />
+    )
+  }
+
   return (
     <Modal title="シートを追加" onClose={onClose}>
       <form
         onSubmit={(e) => {
           e.preventDefault()
           setError(null)
-          if (canSubmit) mutation.mutate()
+          if (!canSubmit) return
+          if (file) setWizard(true)
+          else mutation.mutate()
         }}
       >
         <label className="mb-1.5 block text-[12px] text-[var(--ink2)]">
@@ -114,7 +119,7 @@ export function AddSheetDialog({ onClose }: Props) {
           >
             .xlsx を選ぶ
             <span className="block text-[11.5px] text-[var(--ink3)]">
-              1行目を見出し、A列をIDとして読み込みます。列の型（日付・数値・担当・プルダウン）は中身から判定します。
+              次の画面で、どのワークシート・何行目が見出し・どの列を取り込むかを確認できます。
             </span>
           </button>
         )}
@@ -136,7 +141,7 @@ export function AddSheetDialog({ onClose }: Props) {
             キャンセル
           </Button>
           <Button type="submit" size="sm" disabled={!canSubmit}>
-            {mutation.isPending ? (file ? '取込中…' : '作成中…') : file ? '取り込んで作成' : '作成'}
+            {mutation.isPending ? '作成中…' : file ? '次へ（内容を確認）' : '作成'}
           </Button>
         </div>
       </form>

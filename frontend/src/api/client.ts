@@ -230,27 +230,63 @@ export async function importXlsx(
   return payload
 }
 
-/** Upload an .xlsx as a BRAND NEW sheet: columns are inferred from the header
- *  row, then the rows are imported. Returns the new sheet id + counts. */
-export async function importNewSheetXlsx(
-  file: File,
-  opts: { name?: string; hasWeekGrid: boolean },
-): Promise<{
-  sheet_id: number
-  name: string
-  columns: number
-  created: number
-  updated: number
-}> {
+/** How a header column will be treated on a schedule sheet. */
+export type ImportColumnRole = 'attr' | 'week' | 'progress' | 'deps' | 'milestone'
+
+/** One column the user can pick in the 取り込みウィザード. */
+export interface ImportColumnInfo {
+  index: number
+  header: string
+  role: ImportColumnRole
+  type: ColumnType | ''
+  selected: boolean
+  filled: number
+  samples: string[]
+  options: string[]
+  /** Cells that would NOT convert to `type` (dropped or blanked on import). */
+  invalid: number
+  invalid_samples: string[]
+}
+
+export interface ImportInspection {
+  worksheets: { name: string; rows: number; columns: number }[]
+  sheet_name: string
+  header_row: number
+  suggested_header_row: number
+  id_column: number
+  total_rows: number
+  preview: { row: number; cells: string[] }[]
+  columns: ImportColumnInfo[]
+  blank_ids: number
+  duplicate_ids: number
+}
+
+/** What the wizard sends back: which worksheet / 見出し行 / ID列 / 列 to take. */
+export interface ImportPlan {
+  name?: string
+  hasWeekGrid: boolean
+  sheetName?: string
+  /** 1-based; 0 = auto-detect. */
+  headerRow?: number
+  /** 0-based; -1 = no ID column (keys are auto-numbered). */
+  idColumn?: number
+  columns?: { index: number; name: string; type: ColumnType | '' }[]
+}
+
+function importForm(file: File, plan: Partial<ImportPlan>): FormData {
   const form = new FormData()
   form.append('file', file)
-  if (opts.name) form.append('name', opts.name)
-  form.append('has_week_grid', String(opts.hasWeekGrid))
-  const res = await fetch('/api/sheets/import.xlsx', {
-    method: 'POST',
-    credentials: 'include',
-    body: form,
-  })
+  if (plan.name) form.append('name', plan.name)
+  if (plan.hasWeekGrid !== undefined) form.append('has_week_grid', String(plan.hasWeekGrid))
+  if (plan.sheetName) form.append('sheet_name', plan.sheetName)
+  if (plan.headerRow) form.append('header_row', String(plan.headerRow))
+  if (plan.idColumn !== undefined) form.append('id_column', String(plan.idColumn))
+  if (plan.columns) form.append('columns', JSON.stringify(plan.columns))
+  return form
+}
+
+async function postForm<T>(url: string, form: FormData): Promise<T> {
+  const res = await fetch(url, { method: 'POST', credentials: 'include', body: form })
   const text = await res.text()
   const payload = text ? JSON.parse(text) : {}
   if (!res.ok) {
@@ -258,6 +294,23 @@ export async function importNewSheetXlsx(
   }
   return payload
 }
+
+/** Read an .xlsx WITHOUT importing: worksheets, the guessed 見出し行, a preview and
+ *  per-column types / samples / conversion warnings. Pass `columns` to re-check the
+ *  warnings against the user's own picks before committing. */
+export const inspectImportXlsx = (file: File, plan: Partial<ImportPlan>) =>
+  postForm<ImportInspection>('/api/sheets/import.xlsx/inspect', importForm(file, plan))
+
+/** Upload an .xlsx as a BRAND NEW sheet, following the wizard's plan (or, with no
+ *  plan, the auto-detected header row and inferred types). Returns id + counts. */
+export const importNewSheetXlsx = (file: File, plan: ImportPlan) =>
+  postForm<{
+    sheet_id: number
+    name: string
+    columns: number
+    created: number
+    updated: number
+  }>('/api/sheets/import.xlsx', importForm(file, plan))
 
 export const exportWorklogXlsxUrl = (from: string, to: string) =>
   `/api/worklog/export.xlsx?from=${from}&to=${to}`

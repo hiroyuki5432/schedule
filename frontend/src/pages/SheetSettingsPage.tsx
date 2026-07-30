@@ -703,6 +703,14 @@ function SheetLevelSettings({
           />
             </>
           )}
+
+          <TaskLabelEditor
+            columns={columns}
+            settings={settings}
+            onChange={(worklog_task_columns) =>
+              mutation.mutate({ settings: { ...settings, worklog_task_columns } })
+            }
+          />
           <label className="text-[12px] text-[var(--ink2)]">
             キー列（採番・参照キー）
             <Select
@@ -746,6 +754,73 @@ function SheetLevelSettings({
         </div>
       </CardBody>
     </Card>
+  )
+}
+
+/** Which columns make up a task's display text in 実績入力 / みんなの入力一覧
+ *  (要望: IDと件名だけでなく XX・YY・ZZ で表示したい). Order follows the sheet's
+ *  column order; an empty selection falls back to ID＋件名. 参照(LOOKUP)列はサーバ側
+ *  で値を解決しないため選べない。 */
+function TaskLabelEditor({
+  columns,
+  settings,
+  onChange,
+}: {
+  columns: Column[]
+  settings: SheetSettings
+  onChange: (cols: string[] | undefined) => void
+}) {
+  const ID_KEY = '__id__'
+  const current = Array.isArray(settings.worklog_task_columns)
+    ? settings.worklog_task_columns.map(String)
+    : []
+  const candidates = columns.filter((c) => c.type !== 'lookup')
+  const toggle = (key: string, on: boolean) => {
+    const next = on ? [...current, key] : current.filter((k) => k !== key)
+    // Keep sheet order (ID first) so the label reads consistently.
+    const order = [ID_KEY, ...candidates.map((c) => String(c.id))]
+    const sorted = order.filter((k) => next.includes(k))
+    onChange(sorted.length ? sorted : undefined)
+  }
+  const label =
+    current.length === 0
+      ? 'ID＋件名（既定）'
+      : current
+          .map((k) =>
+            k === ID_KEY ? 'ID' : (columns.find((c) => String(c.id) === k)?.name ?? '?'),
+          )
+          .join(' / ')
+
+  return (
+    <div className="text-[12px] text-[var(--ink2)]">
+      実績入力でのタスク表示
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 rounded-[10px] border border-[var(--line)] px-3 py-2">
+        <label className="flex items-center gap-1.5">
+          <input
+            type="checkbox"
+            className="h-4 w-4 accent-[var(--green)]"
+            checked={current.includes(ID_KEY)}
+            onChange={(e) => toggle(ID_KEY, e.target.checked)}
+          />
+          ID
+        </label>
+        {candidates.map((c) => (
+          <label key={c.id} className="flex items-center gap-1.5">
+            <input
+              type="checkbox"
+              className="h-4 w-4 accent-[var(--green)]"
+              checked={current.includes(String(c.id))}
+              onChange={(e) => toggle(String(c.id), e.target.checked)}
+            />
+            {c.name}
+          </label>
+        ))}
+      </div>
+      <span className="mt-1 block text-[11px] text-[var(--ink3)]">
+        実績入力のタスク選択と、みんなの入力一覧のタスク欄の表示（現在: {label}）。
+        チェックした列を「/」でつないで表示します。未選択なら ID＋件名。
+      </span>
+    </div>
   )
 }
 

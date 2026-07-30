@@ -70,6 +70,37 @@ def test_import_worklog_dedupes_identical_rows(auth_client):
     assert len([l for l in logs if l["memo"] == "実装"]) == 1
 
 
+def test_export_import_follows_configured_category_levels(auth_client):
+    """分類の段数・名称は組織設定で変えられる: 見出しがその名前になり、3段目も往復する。"""
+    r = auth_client.patch(
+        "/api/org",
+        json={"settings": {"worklog": {"category_levels": ["業務", "工程", "詳細"]}}},
+    )
+    assert r.status_code == 200, r.text
+
+    ws = load_workbook(
+        io.BytesIO(auth_client.get("/api/worklog/export.xlsx?from=2026-06-05&to=2026-06-05").content)
+    ).active
+    assert [c.value for c in ws[1]] == ["日付", "ユーザー", "タスクID", "業務", "工程", "詳細", "メモ", "時間"]
+
+    wb = Workbook()
+    out = wb.active
+    out.append(["日付", "ユーザー", "タスクID", "業務", "工程", "詳細", "メモ", "時間"])
+    out.append(["2026-06-05", "Admin", "", "開発", "設計", "画面", "作図", 4])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    r = auth_client.post(
+        "/api/worklog/import.xlsx",
+        files={"file": ("wl.xlsx", buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == 1
+
+    log = auth_client.get("/api/worklog?from=2026-06-05&to=2026-06-05").json()[0]
+    assert (log["cat1"], log["cat2"], log["cat3"]) == ("開発", "設計", "画面")
+
+
 def test_import_worklog_requires_admin(client, org_admin, db):
     """A non-admin member is rejected (403)."""
     from app import models

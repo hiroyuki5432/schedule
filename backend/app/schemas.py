@@ -306,9 +306,13 @@ class WorkLogOut(BaseModel):
     row_id: Optional[int] = None
     # Resolved for display (the linked task); null if unlinked or deleted.
     row_key_value: Optional[str] = None
+    # Display text for the linked task, built from the sheet's configured columns
+    # (settings.worklog_task_columns). Falls back to ID＋件名.
+    row_label: Optional[str] = None
     sheet_id: Optional[int] = None
     cat1: Optional[str] = None
     cat2: Optional[str] = None
+    cat3: Optional[str] = None
     memo: Optional[str] = None
     hours: float
 
@@ -318,6 +322,7 @@ class WorkLogCreate(BaseModel):
     row_id: Optional[int] = None
     cat1: Optional[str] = None
     cat2: Optional[str] = None
+    cat3: Optional[str] = None
     memo: Optional[str] = None
     hours: float
 
@@ -327,6 +332,7 @@ class WorkLogUpdate(BaseModel):
     row_id: Optional[int] = None
     cat1: Optional[str] = None
     cat2: Optional[str] = None
+    cat3: Optional[str] = None
     memo: Optional[str] = None
     hours: Optional[float] = None
 
@@ -336,6 +342,8 @@ class TaskOption(BaseModel):
     row_id: int
     key_value: Optional[str] = None
     title: str
+    # Display text from the sheet's configured columns (ID＋件名 by default).
+    label: str = ""
     sheet_id: int
     sheet_name: str
 

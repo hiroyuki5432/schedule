@@ -10,15 +10,18 @@ export interface User {
   org_id: string
 }
 
-/** A node in the 実績入力 category master (大分類→中分類). */
+/** A node in the 実績入力 category master (段ごとに入れ子). */
 export interface WorkLogCategoryNode {
   name: string
   children?: WorkLogCategoryNode[]
 }
 
-/** Org-level 実績入力 master: 2-level cascading categories (大→中) + a shared note. */
+/** Org-level 実績入力 master: cascading categories + a shared note. */
 export interface WorkLogMaster {
   categories?: WorkLogCategoryNode[]
+  /** Names of the category levels — 段数も名称も変更できる（既定: 大分類・中分類、
+   *  最大3段）。未設定なら既定の2段。 */
+  category_levels?: string[]
   /** Free-text 記載ルール shown at the bottom of 実績入力 for everyone. */
   note?: string
 }
@@ -81,6 +84,9 @@ export interface SheetSettings {
   /** Milestone diamond (◇) visibility for the whole sheet: all (default) / none /
    *  last-only. Set on the sheet settings page. */
   milestone_display?: 'all' | 'none' | 'last'
+  /** Columns that make up a task's display text in 実績入力 / みんなの入力一覧.
+   *  Entries are column ids or '__id__' (the task ID). Unset = ID＋件名. */
+  worklog_task_columns?: string[]
   [k: string]: unknown
 }
 
@@ -273,9 +279,12 @@ export interface WorkLog {
   row_id: string | null
   /** Resolved label of the linked task (read-only, from the server). */
   row_key_value: string | null
+  /** Display text built from the sheet's configured columns (ID＋件名 by default). */
+  row_label: string | null
   sheet_id: string | null
   cat1: string | null
   cat2: string | null
+  cat3: string | null
   memo: string | null
   hours: number
 }
@@ -287,6 +296,7 @@ export type WorkLogInput = {
   row_id?: string | null
   cat1?: string | null
   cat2?: string | null
+  cat3?: string | null
   memo?: string | null
   hours: number
 }
@@ -296,6 +306,8 @@ export interface TaskOption {
   row_id: string
   key_value: string | null
   title: string
+  /** Display text from the sheet's configured columns (ID＋件名 by default). */
+  label: string
   sheet_id: string
   sheet_name: string
 }

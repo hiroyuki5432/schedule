@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { badgeForRule, deriveStatus, firstMatchingRule } from '@/lib/status'
+import {
+  badgeForRule,
+  deriveStatus,
+  firstMatchingRule,
+  makeIsRowDone,
+  resolveDisplayValue,
+} from '@/lib/status'
 import type { Column, Row, StatusRule } from '@/types/api'
 
 function row(data: Record<string, string | number | null>): Row {
@@ -90,5 +96,47 @@ describe('deriveStatus', () => {
   it('returns null for a non-status column', () => {
     const notStatus = { ...column([]), type: 'text' as const }
     expect(deriveStatus(row({}), notStatus)).toBeNull()
+  })
+})
+
+describe('resolveDisplayValue / makeIsRowDone', () => {
+  const col = (over: Partial<Column>): Column => ({
+    id: '10',
+    sheet_id: '1',
+    name: '列',
+    type: 'text',
+    order: 0,
+    is_key: false,
+    config: {},
+    ...over,
+  })
+  const members = new Map([['7', '山田']])
+
+  it('shows member names and falls back to the derived badge for status', () => {
+    const member = col({ id: '20', type: 'member' })
+    expect(resolveDisplayValue({ row: row({ '20': 7 }), status: null }, member, members)).toBe('山田')
+
+    const status = col({ id: '30', type: 'status' })
+    const badge = { label: '進行中', color: '#000', bg: '#fff' }
+    // Stored value wins; with nothing stored the derived badge is used.
+    expect(resolveDisplayValue({ row: row({ '30': '遅延' }), status: badge }, status, members)).toBe('遅延')
+    expect(resolveDisplayValue({ row: row({}), status: badge }, status, members)).toBe('進行中')
+  })
+
+  it('marks 完了 from the status column when no done_filter is configured', () => {
+    const status = col({ id: '30', type: 'status' })
+    const isDone = makeIsRowDone([status], members)
+    expect(isDone({ row: row({ '30': '完了' }), status: null })).toBe(true)
+    expect(isDone({ row: row({ '30': '進行中' }), status: null })).toBe(false)
+  })
+
+  it('uses the sheet done_filter when set', () => {
+    const dropdown = col({ id: '40', type: 'dropdown' })
+    const isDone = makeIsRowDone([dropdown], members, {
+      column_id: '40',
+      values: ['出荷済', 'クローズ'],
+    })
+    expect(isDone({ row: row({ '40': 'クローズ' }), status: null })).toBe(true)
+    expect(isDone({ row: row({ '40': '対応中' }), status: null })).toBe(false)
   })
 })
