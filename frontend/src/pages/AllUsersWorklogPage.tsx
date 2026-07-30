@@ -2,17 +2,16 @@
 // ユーザー別にグループ化し、各人合計＋全員合計を出す。前日/翌日/今日で日付を移動。
 
 import { useMemo, useRef, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { TableSkeleton } from '@/components/ui/Skeleton'
 import { Button } from '@/components/ui/Button'
+import { ImportWorklogWizard } from '@/components/import/ImportWorklogWizard'
 import { useAuth } from '@/hooks/useAuth'
 import { useOrg } from '@/hooks/useSheets'
-import { toast } from '@/lib/toast'
-import { ApiError } from '@/lib/http'
 import { fmtISO, parseDate } from '@/lib/dates'
 import { CAT_FIELDS, categoryLevels } from '@/lib/worklogCats'
 import type { UserDayWorkLog } from '@/types/api'
@@ -130,30 +129,13 @@ export function AllUsersWorklogPage() {
 }
 
 /** Export the viewed day to Excel; admins can also import (bulk-add) logs.
- *  Import matches user by name and task by ID; each Excel row becomes a new log. */
+ *  取り込みはウィザード経由 — 列の対応と、追加/スキップ/重複の件数を確認してから
+ *  書き込む（ユーザーは名前、タスクはIDで照合）。 */
 function WorklogExcelToolbar({ date }: { date: string }) {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
-  const qc = useQueryClient()
   const inputRef = useRef<HTMLInputElement>(null)
-  const [busy, setBusy] = useState(false)
-
-  async function onFile(file: File) {
-    setBusy(true)
-    try {
-      const r = await api.importWorklogXlsx(file)
-      await qc.invalidateQueries({ queryKey: ['all-worklog'] })
-      const parts = [`追加 ${r.created} 件`]
-      if (r.duplicates) parts.push(`重複スキップ ${r.duplicates} 件`)
-      if (r.skipped) parts.push(`無効スキップ ${r.skipped} 件`)
-      toast.show(`取り込み完了：${parts.join(' / ')}`, 'success')
-    } catch (e) {
-      toast.show(e instanceof ApiError ? e.message : '取り込みに失敗しました。', 'error')
-    } finally {
-      setBusy(false)
-      if (inputRef.current) inputRef.current.value = ''
-    }
-  }
+  const [file, setFile] = useState<File | null>(null)
 
   return (
     <div className="flex items-center gap-2">
@@ -164,13 +146,8 @@ function WorklogExcelToolbar({ date }: { date: string }) {
       </a>
       {isAdmin && (
         <>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={() => inputRef.current?.click()}
-          >
-            {busy ? '取込中…' : 'Excel取込'}
+          <Button size="sm" variant="outline" onClick={() => inputRef.current?.click()}>
+            Excel取込
           </Button>
           <input
             ref={inputRef}
@@ -179,9 +156,18 @@ function WorklogExcelToolbar({ date }: { date: string }) {
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0]
-              if (f) void onFile(f)
+              if (f) setFile(f)
             }}
           />
+          {file && (
+            <ImportWorklogWizard
+              file={file}
+              onClose={() => {
+                setFile(null)
+                if (inputRef.current) inputRef.current.value = ''
+              }}
+            />
+          )}
         </>
       )}
     </div>

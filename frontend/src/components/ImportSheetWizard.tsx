@@ -11,10 +11,11 @@ import * as api from '@/api/client'
 import type { ImportColumnInfo, ImportColumnRole } from '@/api/client'
 import type { ColumnType } from '@/types/api'
 import { ApiError } from '@/lib/http'
-import { Modal } from '@/components/ui/Modal'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Button } from '@/components/ui/Button'
+import { WizardShell, colLetter } from '@/components/import/WizardShell'
+import { AUTO_ID, SourceStep } from '@/components/import/SourceStep'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/format'
 
@@ -55,8 +56,6 @@ const TYPE_LABEL: Record<string, string> = {
 }
 
 const TYPE_OPTIONS: ColumnType[] = ['text', 'number', 'date', 'dropdown', 'member']
-
-const AUTO_ID = -1
 
 export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onClose }: Props) {
   const qc = useQueryClient()
@@ -157,48 +156,34 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
   })
 
   const data = insp.data
-  const headerCells = data?.preview.find((r) => r.row === data.header_row)?.cells ?? []
   const dataPreview = (data?.preview ?? []).filter((r) => r.row > (data?.header_row ?? 0))
 
   const setPick = (index: number, patch: Partial<Pick>) =>
     setPicks((prev) => prev.map((p) => (p.index === index ? { ...p, ...patch } : p)))
 
   return (
-    <Modal title="Excelから取り込む" onClose={onClose} widthClass="w-[860px] max-w-[95vw]">
-      <ol className="mb-4 flex items-center gap-2 text-[11.5px]">
-        {STEPS.map((label, i) => (
-          <li key={label} className="flex items-center gap-2">
-            <span
-              className={cn(
-                'flex items-center gap-1.5 rounded-full px-2.5 py-1',
-                i === step
-                  ? 'bg-[var(--green)] text-white'
-                  : i < step
-                    ? 'bg-[#F2F6F3] text-[var(--green-d)]'
-                    : 'text-[var(--ink3)]',
-              )}
-            >
-              <span className="tabular-nums">{i + 1}</span>
-              {label}
-            </span>
-            {i < STEPS.length - 1 && <span className="text-[var(--ink3)]">›</span>}
-          </li>
-        ))}
-      </ol>
-
-      {insp.isPending && (
-        <div className="py-10 text-center text-[12px] text-[var(--ink3)]">読み込み中…</div>
-      )}
-      {insp.isError && (
-        <div className="py-10 text-center text-[12px] text-[#A8442B]">
-          {insp.error instanceof ApiError
-            ? insp.error.message
-            : 'Excelファイルを読み込めませんでした。'}
-        </div>
-      )}
-
+    <WizardShell
+      title="Excelから取り込む（新しいシート）"
+      steps={STEPS}
+      step={step}
+      onStep={setStep}
+      loading={insp.isPending}
+      error={insp.isError ? insp.error : undefined}
+      status={data && `${file.name} ／ データ ${data.total_rows} 行`}
+      notice={error}
+      canNext={!!data}
+      runLabel="取り込んで作成"
+      running={mutation.isPending}
+      canRun={!!data && chosen.length > 0}
+      onRun={() => {
+        setError(null)
+        mutation.mutate()
+      }}
+      onBack={onBack}
+      onClose={onClose}
+    >
       {data && step === 0 && (
-        <StepSource
+        <SourceStep
           data={data}
           sheetName={sheetName}
           onSheet={(v) => {
@@ -209,7 +194,7 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
           onHeaderRow={setHeaderRow}
           idColumn={idColumn}
           onIdColumn={setIdColumn}
-          headerCells={headerCells}
+          note="ID列（薄い黄色）が同じ行は1行にまとまります。"
         />
       )}
 
@@ -242,170 +227,8 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
           hasWeekGrid={hasWeekGrid}
         />
       )}
-
-      {error && <div className="mt-3 text-[12px] text-[#A8442B]">{error}</div>}
-
-      <div className="mt-5 flex items-center justify-between gap-2">
-        <div className="text-[11.5px] text-[var(--ink3)]">
-          {data && `${file.name} ／ データ ${data.total_rows} 行`}
-        </div>
-        <div className="flex gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => (step === 0 ? onBack() : setStep(step - 1))}
-            disabled={mutation.isPending}
-          >
-            {step === 0 ? '戻る' : '前へ'}
-          </Button>
-          {step < 2 ? (
-            <Button type="button" size="sm" disabled={!data} onClick={() => setStep(step + 1)}>
-              次へ
-            </Button>
-          ) : (
-            <Button
-              type="button"
-              size="sm"
-              disabled={!data || chosen.length === 0 || mutation.isPending}
-              onClick={() => {
-                setError(null)
-                mutation.mutate()
-              }}
-            >
-              {mutation.isPending ? '取込中…' : '取り込んで作成'}
-            </Button>
-          )}
-        </div>
-      </div>
-    </Modal>
+    </WizardShell>
   )
-}
-
-// --------------------------------------------------------------------------- //
-// Step 1 — worksheet / header row / ID column
-// --------------------------------------------------------------------------- //
-function StepSource({
-  data,
-  sheetName,
-  onSheet,
-  onHeaderRow,
-  idColumn,
-  onIdColumn,
-  headerCells,
-}: {
-  data: api.ImportInspection
-  sheetName: string
-  onSheet: (v: string) => void
-  onHeaderRow: (n: number) => void
-  idColumn: number
-  onIdColumn: (n: number) => void
-  headerCells: string[]
-}) {
-  return (
-    <div>
-      <div className="flex flex-wrap items-end gap-4">
-        <label className="block">
-          <span className="mb-1.5 block text-[12px] text-[var(--ink2)]">ワークシート</span>
-          <Select
-            value={sheetName || data.sheet_name}
-            onChange={(e) => onSheet(e.target.value)}
-            className="min-w-[200px]"
-          >
-            {data.worksheets.map((w) => (
-              <option key={w.name} value={w.name}>
-                {w.name}（{w.rows}行 × {w.columns}列）
-              </option>
-            ))}
-          </Select>
-        </label>
-
-        <label className="block">
-          <span className="mb-1.5 block text-[12px] text-[var(--ink2)]">ID列（行の識別子）</span>
-          <Select
-            value={String(idColumn)}
-            onChange={(e) => onIdColumn(Number(e.target.value))}
-            className="min-w-[200px]"
-          >
-            <option value={AUTO_ID}>自動採番（IDの列なし）</option>
-            {headerCells.map((h, i) => (
-              <option key={i} value={i}>
-                {colLetter(i)}: {h || '（見出しなし）'}
-              </option>
-            ))}
-          </Select>
-        </label>
-
-        <div className="text-[11.5px] text-[var(--ink3)]">
-          見出し行：{data.header_row} 行目
-          {data.header_row === data.suggested_header_row && '（自動判定）'}
-          <br />
-          左の行番号をクリックすると見出し行を変更できます。
-        </div>
-      </div>
-
-      <div className="mt-3 max-h-[300px] overflow-auto rounded-[10px] border border-[var(--line)]">
-        <table className="w-max min-w-full border-collapse text-[11.5px]">
-          <tbody>
-            {data.preview.map((r) => {
-              const isHeader = r.row === data.header_row
-              const isAbove = r.row < data.header_row
-              return (
-                <tr
-                  key={r.row}
-                  className={cn(
-                    isHeader && 'bg-[#F2F6F3] font-medium text-[var(--ink)]',
-                    isAbove && 'text-[var(--ink3)]',
-                  )}
-                >
-                  <td className="sticky left-0 z-10 border-b border-r border-[var(--line)] bg-[var(--surface)] p-0">
-                    <button
-                      type="button"
-                      onClick={() => onHeaderRow(r.row)}
-                      title="この行を見出しにする"
-                      className={cn(
-                        'w-full px-2 py-1 text-right tabular-nums',
-                        isHeader
-                          ? 'bg-[var(--green)] text-white'
-                          : 'text-[var(--ink3)] hover:bg-[var(--line2)]',
-                      )}
-                    >
-                      {r.row}
-                    </button>
-                  </td>
-                  {r.cells.map((c, i) => (
-                    <td
-                      key={i}
-                      className={cn(
-                        'max-w-[180px] truncate border-b border-[var(--line)] px-2 py-1',
-                        i === idColumn && 'bg-[#FBF6EC]',
-                      )}
-                      title={c}
-                    >
-                      {c}
-                    </td>
-                  ))}
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-      <div className="mt-2 text-[11.5px] text-[var(--ink3)]">
-        先頭 {data.preview.length} 行のみ表示しています。ID列（薄い黄色）が既存の行と一致する場合は上書きされます。
-      </div>
-    </div>
-  )
-}
-
-function colLetter(i: number): string {
-  let n = i
-  let s = ''
-  do {
-    s = String.fromCharCode(65 + (n % 26)) + s
-    n = Math.floor(n / 26) - 1
-  } while (n >= 0)
-  return s
 }
 
 // --------------------------------------------------------------------------- //

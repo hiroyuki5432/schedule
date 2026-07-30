@@ -458,6 +458,78 @@ def test_import_without_id_column_auto_numbers_rows(auth_client):
     assert detail["rows"][0]["data"][str(by_name["件名"]["id"])] == "設計"
 
 
+def test_inspect_existing_sheet_proposes_targets_and_counts(auth_client):
+    """既存シートへの取込も確認しながら: 列の対応先と、新規/更新の件数を先に出す。"""
+    sid = make_sheet(auth_client, "IN")
+    col = _add_text_column(auth_client, sid, "件名")
+    auth_client.post(f"/api/sheets/{sid}/rows", json={"key_value": "A-1", "data": {str(col): "旧"}})
+
+    buf = _xlsx(
+        [
+            ["作業計画"],  # title line — 見出しは2行目
+            ["ID", "件名", "メモ欄"],
+            ["A-1", "更新する", "無視される"],
+            ["B-2", "新しい", ""],
+        ]
+    )
+    r = auth_client.post(
+        f"/api/sheets/{sid}/import.xlsx/inspect",
+        files={"file": ("in.xlsx", buf, _MEDIA)},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["suggested_header_row"] == 2
+    assert body["total_rows"] == 2
+    assert body["updated_rows"] == 1 and body["new_rows"] == 1
+    by_header = {c["header"]: c for c in body["columns"]}
+    assert by_header["件名"]["target"] == "件名"  # same-named column
+    assert by_header["メモ欄"]["target"] == ""  # no such column → 取り込まない
+    assert "件名" in [t["key"] for t in body["targets"]]
+
+
+def test_import_existing_sheet_honors_mapping(auth_client):
+    """ウィザードの指定（ワークシート/見出し行/ID列/列の対応）で upsert する。"""
+    sid = make_sheet(auth_client, "MAP")
+    col = _add_text_column(auth_client, sid, "件名")
+    auth_client.post(f"/api/sheets/{sid}/rows", json={"key_value": "A-1", "data": {str(col): "旧"}})
+
+    buf = _xlsx(
+        [
+            ["2026年度"],
+            ["No", "タスクID", "作業名"],
+            [1, "A-1", "新しい件名"],
+            [2, "B-2", "追加された"],
+        ]
+    )
+    r = auth_client.post(
+        f"/api/sheets/{sid}/import.xlsx",
+        files={"file": ("map.xlsx", buf, _MEDIA)},
+        data={
+            "header_row": "2",
+            "id_column": "1",
+            "columns": json.dumps([{"index": 2, "name": "件名"}]),
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"created": 1, "updated": 1}
+
+    rows = {x["key_value"]: x for x in auth_client.get(f"/api/sheets/{sid}/rows").json()}
+    assert rows["A-1"]["data"][str(col)] == "新しい件名"
+    assert rows["B-2"]["data"][str(col)] == "追加された"
+    assert len(rows) == 2
+
+
+def test_import_existing_sheet_without_wizard_fields_is_unchanged(auth_client):
+    """引数なしの取込は従来どおり（1行目=見出し・A列=ID・同名列に対応）。"""
+    sid = make_sheet(auth_client, "LEGACY")
+    col = _add_text_column(auth_client, sid, "件名")
+    buf = _xlsx([["ID", "件名"], ["L-1", "そのまま"]])
+    r = auth_client.post(f"/api/sheets/{sid}/import.xlsx", files={"file": ("l.xlsx", buf, _MEDIA)})
+    assert r.status_code == 200, r.text
+    rows = auth_client.get(f"/api/sheets/{sid}/rows").json()
+    assert rows[0]["data"][str(col)] == "そのまま"
+
+
 def test_import_weekly_effort_future_planned(auth_client):
     sid = make_sheet(auth_client, "Z")  # week-grid sheet
     _add_text_column(auth_client, sid, "件名")

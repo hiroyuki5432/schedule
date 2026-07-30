@@ -29,6 +29,14 @@ interface Props {
   sheetName: string
 }
 
+/** Header cell: pinned to the top of the scrolling card so 見出し stays visible
+ *  while scrolling down (要望: スケジュールのように見出しは常に表示). Needs its own
+ *  opaque background — rows scroll underneath it. */
+// The bottom rule is an inset shadow, not a border: with border-collapse a
+// border on a stuck cell is painted by the table grid and scrolls away.
+const TH =
+  'sticky top-0 z-20 bg-[var(--surface)] py-2.5 shadow-[inset_0_-1px_0_var(--line)]'
+
 // ---- Client-side sorting (Feature 1) ----------------------------------------
 type SortDir = 'asc' | 'desc'
 const SORT_ID = '__id__'
@@ -237,7 +245,9 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
         }
       />
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-auto px-[22px] pb-6">
+      {/* The CARD is the scroller (not this wrapper) so the header row can stay
+          pinned while scrolling — same behaviour as the schedule grid. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-[22px] pb-6">
         {detailQ.isLoading ? (
           <Card>
             <TableSkeleton rows={7} cols={5} />
@@ -254,7 +264,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
             }
           />
         ) : (
-          <Card className="overflow-auto">
+          <Card className="min-h-0 overflow-auto">
             <table className="table-fixed border-collapse text-[12.5px]">
               <colgroup>
                 <col style={{ width: 56 }} />
@@ -264,10 +274,12 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                 ))}
                 <col style={{ width: 48 }} />
               </colgroup>
+              {/* Sticky header: each cell carries the background + bottom border,
+                  because a <tr>'s own border does not paint while stuck. */}
               <thead>
-                <tr className="border-b border-[var(--line)] text-left text-[var(--ink3)]">
-                  <th className="px-2 py-2.5" />
-                  <th className="px-3 py-2.5 font-medium">
+                <tr className="text-left text-[var(--ink3)]">
+                  <th className={`${TH} px-2`} />
+                  <th className={`${TH} px-3 font-medium`}>
                     <SortHeader
                       label="ID"
                       dir={dirFor(SORT_ID)}
@@ -275,7 +287,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                     />
                   </th>
                   {columns.map((c) => (
-                    <th key={c.id} className="relative px-3 py-2.5 font-medium">
+                    <th key={c.id} className={`relative ${TH} px-3 font-medium`}>
                       <SortHeader
                         label={c.name}
                         dir={dirFor(c.id)}
@@ -289,7 +301,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                       />
                     </th>
                   ))}
-                  <th className="px-3 py-2.5" />
+                  <th className={`${TH} px-3`} />
                 </tr>
               </thead>
               <tbody>

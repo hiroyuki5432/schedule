@@ -140,11 +140,13 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 |---|---|---|
 | GET | `/api/sheets/{id}/export.csv` | CSV（属性列＋週次工数）|
 | GET | `/api/sheets/{id}/export.xlsx` | Excel（属性列＋**進捗(%)/先行タスク(ID)**＋**テンプレ◇ごとの「予定/実績」列**＋週次工数）。開始日/完了日は実列なので通常列として出力。担当はメンバー名、先行タスクはID(key_value)で出力 |
-| POST | `/api/sheets/{id}/import.xlsx` | multipart `file`。ID(key_value)で照合し upsert（一致=更新 / 無い=新規）。`{created, updated}` を返す。週次セルは過去=実績・現在以降=予定。**進捗(%)** は行の進捗、**先行タスク(ID)** はID(key_value)で全行取込後に解決。**◇予定/実績**列が非空なら、テンプレ（既定マイルストン）に沿って行のマイルストンを再構築（フェーズ境界は開始日＋◇から復元、実績日があれば達成）。**参照(LOOKUP)列は無視**（出力は空欄）|
+| POST | `/api/sheets/{id}/import.xlsx/inspect` | **書き込みなし**の解析（既存シート用ウィザード）。multipart `file` ＋任意の `sheet_name` / `header_row` / `id_column` / `columns`。ワークシート一覧・見出し行の自動判定・プレビューに加え、各Excel列の**対応先**（同名の列／予約見出し／空=取り込まない）、選べる対応先一覧 `targets`、**新規/更新の行数**、変換できない値の件数を返す |
+| POST | `/api/sheets/{id}/import.xlsx` | multipart `file`。ID(key_value)で照合し upsert（一致=更新 / 無い=新規）。`{created, updated}` を返す。週次セルは過去=実績・現在以降=予定。**進捗(%)** は行の進捗、**先行タスク(ID)** はID(key_value)で全行取込後に解決。**◇予定/実績**列が非空なら、テンプレ（既定マイルストン）に沿って行のマイルストンを再構築（フェーズ境界は開始日＋◇から復元、実績日があれば達成）。**参照(LOOKUP)列は無視**（出力は空欄）。ウィザードからは `sheet_name` / `header_row` / `id_column` / `columns`（JSON `[{index,name}]`＝Excel列→取り込み先の見出し名）を指定でき、省略時は従来どおり（先頭ワークシート・1行目=見出し・A列=ID・同名列に対応）|
 | POST | `/api/sheets/import.xlsx/inspect` | **書き込みなし**の解析（取り込みウィザード用）。multipart `file` ＋任意の `sheet_name` / `header_row` / `id_column` / `has_week_grid` / `columns`。`{worksheets[], sheet_name, header_row, suggested_header_row, total_rows, preview[], columns[], blank_ids, duplicate_ids}` を返す。`columns[]` は各見出しの `role`（attr/week/progress/deps/milestone）・推定型・値の例・**変換できない値の件数**（`invalid`/`invalid_samples`）|
 | POST | `/api/sheets/import.xlsx` | **新規シート**を作って取り込む。multipart `file` ＋ `name` / `has_week_grid` ／ウィザードの指定 `sheet_name`（ワークシート）・`header_row`（1始まり、既定=自動判定）・`id_column`（0始まり、`-1`=自動採番）・`columns`（JSON `[{index,name,type}]`）。`columns` 省略時は全列を型推定して取込。`{sheet_id, name, columns, created, updated}` を返す |
 | GET | `/api/worklog/export.xlsx?from=&to=` | 全員の日報を範囲で Excel 出力（みんなの入力一覧）。列: 日付/ユーザー/タスクID/**分類の各段**/メモ/時間。分類の見出しは `org.settings.worklog.category_levels`（既定 大分類・中分類、最大3段）|
-| POST | `/api/worklog/import.xlsx` | **admin**。multipart `file`。各行を新規の日報として追加（ユーザーは名前で照合、タスクはIDで照合）。分類列は設定した段の名前で照合し、`大分類/中分類/小分類` もフォールバックで受け付ける。`{created, skipped, duplicates}` を返す |
+| POST | `/api/worklog/import.xlsx/inspect` | **admin・書き込みなし**。取り込み前の空実行。multipart `file` ＋任意の `sheet_name` / `header_row` / `mapping`。ワークシート一覧・見出し行・プレビュー・各項目（日付/ユーザー/タスクID/分類/メモ/時間）が読む列と、**追加/スキップ/重複の件数**と行ごとの理由 `issues` を返す。本番と同じ処理を空実行するのでプレビューの件数＝実際の結果 |
+| POST | `/api/worklog/import.xlsx` | **admin**。multipart `file`（＋ウィザードの `sheet_name` / `header_row` / `mapping` JSON `{"user":1,"hours":6}`＝項目→列番号、0始まり・-1で不使用）。各行を新規の日報として追加（ユーザーは名前で照合、タスクはIDで照合）。分類列は設定した段の名前で照合し、`大分類/中分類/小分類` もフォールバックで受け付ける。`{created, skipped, duplicates}` を返す |
 
 ## 実装優先度
 1. auth / org / members / sheets / columns / rows / effort / milestones（スケジュール画面が動く中核）

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 
 from openpyxl import Workbook, load_workbook
 
@@ -99,6 +100,70 @@ def test_export_import_follows_configured_category_levels(auth_client):
 
     log = auth_client.get("/api/worklog?from=2026-06-05&to=2026-06-05").json()[0]
     assert (log["cat1"], log["cat2"], log["cat3"]) == ("開発", "設計", "画面")
+
+
+def test_inspect_worklog_previews_without_writing(auth_client):
+    """取り込み前に結果を確認できる: 追加/スキップ/重複の件数と理由。DBは変わらない。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["2026年6月の実績"])  # title line
+    ws.append(["日付", "ユーザー", "タスクID", "大分類", "中分類", "メモ", "時間"])
+    ws.append(["2026-06-10", "Admin", "", "開発", "", "実装", 3])
+    ws.append(["2026-06-10", "Admin", "", "開発", "", "実装", 3])  # in-file duplicate
+    ws.append(["2026-06-10", "居ない人", "", "", "", "", 2])  # skipped
+    ws.append(["2026-06-10", "Admin", "", "", "", "会議", "abc"])  # hours not numeric
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    r = auth_client.post(
+        "/api/worklog/import.xlsx/inspect",
+        files={"file": ("wl.xlsx", buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["suggested_header_row"] == 2
+    assert (body["created"], body["duplicates"], body["skipped"]) == (1, 1, 2)
+    assert any("居ない人" in i["reason"] for i in body["issues"])
+    fields = {f["key"]: f for f in body["fields"]}
+    assert fields["user"]["index"] == 1 and fields["hours"]["index"] == 6
+    assert fields["cat1"]["label"] == "大分類"
+    # Nothing was written by the dry run.
+    assert auth_client.get("/api/worklog?from=2026-06-10&to=2026-06-10").json() == []
+
+
+def test_import_worklog_honors_mapping(auth_client):
+    """見出し名が違うファイルでも、列の対応を指定すれば取り込める。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["実施日", "担当者", "作業内容", "工数(h)"])
+    ws.append(["2026-06-11", "Admin", "打合せ", 1.5])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    r = auth_client.post(
+        "/api/worklog/import.xlsx",
+        files={"file": ("wl.xlsx", buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        data={"mapping": json.dumps({"date": 0, "user": 1, "memo": 2, "hours": 3})},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == 1
+    log = auth_client.get("/api/worklog?from=2026-06-11&to=2026-06-11").json()[0]
+    assert log["memo"] == "打合せ" and float(log["hours"]) == 1.5
+
+
+def test_import_worklog_requires_user_and_hours_columns(auth_client):
+    buf = io.BytesIO()
+    wb = Workbook()
+    wb.active.append(["日付", "メモ"])
+    wb.save(buf)
+    buf.seek(0)
+    r = auth_client.post(
+        "/api/worklog/import.xlsx",
+        files={"file": ("wl.xlsx", buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert r.status_code == 400, r.text
 
 
 def test_import_worklog_requires_admin(client, org_admin, db):

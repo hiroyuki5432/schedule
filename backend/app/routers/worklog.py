@@ -5,11 +5,21 @@ from __future__ import annotations
 import io
 from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import xlsx_import as xlsx
 from app.db import get_db
 from app.deps import get_row_for_user
 from app.models import Column, Organization, Row, Sheet, User, WorkLog
@@ -309,61 +319,60 @@ def export_worklog_xlsx(
     )
 
 
-@router.post("/import.xlsx")
-def import_worklog_xlsx(
-    file: UploadFile,
-    admin: User = Depends(require_admin),
-    db: Session = Depends(get_db),
+#: The fields one 日報 row is built from. `key` is what the wizard's mapping uses.
+def _import_fields(levels: list[str]) -> list[dict]:
+    fields = [
+        {"key": "date", "label": "日付", "headers": ["日付"], "required": False},
+        {"key": "user", "label": "ユーザー", "headers": ["ユーザー"], "required": True},
+        {"key": "task", "label": "タスクID", "headers": ["タスクID"], "required": False},
+    ]
+    fallback = DEFAULT_CATEGORY_LEVELS + ["小分類"]
+    for i, name in enumerate(levels):
+        fields.append(
+            {
+                "key": CAT_FIELDS[i],
+                "label": name,
+                # A file exported before the levels were renamed still matches.
+                "headers": [name, fallback[i]],
+                "required": False,
+            }
+        )
+    fields.append({"key": "memo", "label": "メモ", "headers": ["メモ"], "required": False})
+    fields.append({"key": "hours", "label": "時間", "headers": ["時間"], "required": True})
+    return fields
+
+
+def _auto_mapping(fields: list[dict], header: tuple) -> dict[str, int]:
+    """field key → column index, matched by header name (-1 = 未対応)."""
+    pos = {xlsx.cell_text(h): i for i, h in enumerate(header) if not xlsx.is_blank(h)}
+    out: dict[str, int] = {}
+    for f in fields:
+        idx = next((pos[h] for h in f["headers"] if h in pos), -1)
+        out[f["key"]] = idx
+    return out
+
+
+def _plan_worklog_import(
+    db: Session, org_id: int, data_rows: list[tuple], fields: list[dict], mapping: dict[str, int]
 ) -> dict:
-    """Admin-only. Bulk-add work logs from .xlsx (みんなの入力一覧 取込). Columns are
-    matched by header name (日付/ユーザー/タスクID/<分類の各段>/メモ/時間). The category
-    headers follow the org's configured level names, with 大分類/中分類/小分類 accepted
-    as fallbacks. Each row becomes a NEW log (no upsert — worklogs have no natural
-    key); user is matched by name, task by ID (first match). Linked tasks' weekly
-    実績 are recomputed."""
-    from openpyxl import load_workbook
+    """Dry-run the 日報 import: what each row would become, and why rows are skipped.
 
-    try:
-        wb = load_workbook(io.BytesIO(file.file.read()), data_only=True, read_only=True)
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Excelファイルを読み込めませんでした（.xlsx 形式をご確認ください）",
-        )
-    ws = wb.active
-    it = ws.iter_rows(values_only=True)
-    try:
-        header = next(it)
-    except StopIteration:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="空のファイルです")
-
-    pos = {str(h).strip(): i for i, h in enumerate(header) if h is not None}
-    if "ユーザー" not in pos or "時間" not in pos:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="ヘッダーに『ユーザー』と『時間』の列が必要です",
-        )
-
+    Returns {entries, created, skipped, duplicates, issues}. `entries` are ready-to-add
+    kwargs; nothing is written here, so the wizard's preview and the real import
+    always agree.
+    """
     users_by_name: dict[str, int] = {}
-    for u in db.execute(select(User).where(User.org_id == admin.org_id)).scalars():
+    for u in db.execute(select(User).where(User.org_id == org_id)).scalars():
         users_by_name.setdefault(u.name, u.id)
     # Task key_value -> row_id (first match) within this org.
     rows_by_key: dict[str, int] = {}
     for r in db.execute(
-        select(Row).join(Sheet, Row.sheet_id == Sheet.id).where(Sheet.org_id == admin.org_id)
+        select(Row).join(Sheet, Row.sheet_id == Sheet.id).where(Sheet.org_id == org_id)
     ).scalars():
         if r.key_value:
             rows_by_key.setdefault(r.key_value, r.id)
 
-    # Category columns: the org's own level names, falling back to the built-in
-    # ones so a file exported before the levels were renamed still imports.
-    levels = category_levels(db, admin.org_id)
-    fallback = DEFAULT_CATEGORY_LEVELS + ["小分類"]
-    cat_headers: list[str | None] = []
-    for i in range(len(levels)):
-        cat_headers.append(
-            levels[i] if levels[i] in pos else (fallback[i] if fallback[i] in pos else None)
-        )
+    cat_keys = [f["key"] for f in fields if f["key"] in CAT_FIELDS]
 
     # Duplicate guard: signature of an existing log. Re-importing the same file (or
     # a row identical to one already stored) is skipped rather than duplicated.
@@ -378,90 +387,210 @@ def import_worklog_xlsx(
         )
 
     seen: set[tuple] = set()
-    for wl in db.execute(select(WorkLog).where(WorkLog.org_id == admin.org_id)).scalars():
+    for wl in db.execute(select(WorkLog).where(WorkLog.org_id == org_id)).scalars():
         seen.add(
             _sig(
                 wl.user_id,
                 wl.work_date,
                 wl.row_id,
-                [getattr(wl, f) for f in CAT_FIELDS[: len(levels)]],
+                [getattr(wl, k) for k in cat_keys],
                 wl.memo,
                 wl.hours,
             )
         )
 
-    def cell(row, name):
-        i = pos.get(name)
-        return row[i] if i is not None and i < len(row) else None
+    def cell(row, key):
+        return xlsx.cell_at(row, mapping.get(key, -1))
 
-    created = skipped = duplicates = 0
-    affected: set[tuple[int, date]] = set()
+    entries: list[dict] = []
+    issues: list[dict] = []
+    skipped = duplicates = 0
 
-    for raw in it:
-        if raw is None or not any(v not in (None, "") for v in raw):
-            continue
-        uname = cell(raw, "ユーザー")
-        hours_raw = cell(raw, "時間")
+    def note(row_no: int, reason: str) -> None:
+        if len(issues) < 20:
+            issues.append({"row": row_no, "reason": reason})
+
+    for offset, raw in enumerate(data_rows):
+        row_no = offset + 1
+        uname = cell(raw, "user")
+        hours_raw = cell(raw, "hours")
         uid = users_by_name.get(str(uname).strip()) if uname is not None else None
-        if uid is None or hours_raw in (None, ""):
+        if uid is None:
             skipped += 1
+            note(row_no, f"ユーザー「{xlsx.cell_text(uname) or '(空)'}」が見つかりません")
+            continue
+        if hours_raw in (None, ""):
+            skipped += 1
+            note(row_no, "時間が空です")
             continue
         try:
             hours = float(hours_raw)
         except (TypeError, ValueError):
             skipped += 1
+            note(row_no, f"時間「{xlsx.cell_text(hours_raw)}」が数値ではありません")
             continue
 
-        d_raw = cell(raw, "日付")
-        if isinstance(d_raw, datetime):
-            work_date = d_raw.date()
-        elif isinstance(d_raw, date):
-            work_date = d_raw
-        elif isinstance(d_raw, str) and d_raw.strip():
-            try:
-                work_date = date.fromisoformat(d_raw.strip())
-            except ValueError:
-                work_date = date.today()
-        else:
+        d_raw = cell(raw, "date")
+        work_date = xlsx.coerce_date(d_raw)
+        if work_date is None:
             work_date = date.today()
+            if not xlsx.is_blank(d_raw):
+                note(row_no, f"日付「{xlsx.cell_text(d_raw)}」が読めないので今日で取り込みます")
 
-        key = cell(raw, "タスクID")
+        key = cell(raw, "task")
         row_id = rows_by_key.get(str(key).strip()) if key not in (None, "") else None
+        if key not in (None, "") and row_id is None:
+            note(row_no, f"タスクID「{xlsx.cell_text(key)}」が見つからないのでタスク未リンクで取り込みます")
 
-        def _s(name):
-            if name is None:
-                return None
-            v = cell(raw, name)
+        def _s(k):
+            v = cell(raw, k)
             return None if v in (None, "") else str(v)
 
-        cats = [_s(h) for h in cat_headers]
-        memo = _s("メモ")
+        cats = [_s(k) for k in cat_keys]
+        memo = _s("memo")
         sig = _sig(uid, work_date, row_id, cats, memo, hours)
         if sig in seen:
             duplicates += 1
+            note(row_no, "同じ内容の記録が既にあります（重複としてスキップ）")
             continue
         seen.add(sig)
 
-        db.add(
-            WorkLog(
-                org_id=admin.org_id,
-                user_id=uid,
-                work_date=work_date,
-                row_id=row_id,
-                memo=memo,
-                hours=hours,
-                **{f: c for f, c in zip(CAT_FIELDS, cats)},
-            )
+        entries.append(
+            {
+                "user_id": uid,
+                "work_date": work_date,
+                "row_id": row_id,
+                "memo": memo,
+                "hours": hours,
+                **{k: c for k, c in zip(cat_keys, cats)},
+            }
         )
-        created += 1
-        if row_id is not None:
-            affected.add((row_id, week_start_for(db, admin.org_id, work_date)))
+
+    return {
+        "entries": entries,
+        "created": len(entries),
+        "skipped": skipped,
+        "duplicates": duplicates,
+        "issues": issues,
+    }
+
+
+def _worklog_source(
+    file: UploadFile, sheet_name: str, header_row: int, mapping_raw: str, db: Session, org_id: int
+):
+    """Shared setup for the 日報 inspect/import: workbook slice + field mapping."""
+    wb, ws, grid, hr, header, data_rows = xlsx.read_source(file, sheet_name, header_row)
+    fields = _import_fields(category_levels(db, org_id))
+    mapping = _auto_mapping(fields, header)
+    given = xlsx.parse_json_field(mapping_raw, "列の対応")
+    if isinstance(given, dict):
+        for f in fields:
+            if f["key"] in given:
+                try:
+                    mapping[f["key"]] = int(given[f["key"]])
+                except (TypeError, ValueError):
+                    mapping[f["key"]] = -1
+    return wb, ws, grid, hr, header, data_rows, fields, mapping
+
+
+@router.post("/import.xlsx/inspect")
+def inspect_worklog_xlsx(
+    file: UploadFile,
+    sheet_name: str = Form(default=""),
+    header_row: int = Form(default=0),
+    mapping: str = Form(default=""),
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Admin-only, **writes nothing**: the 日報取り込みウィザード's data source.
+
+    Returns the worksheets, the guessed 見出し行, a raw preview, which Excel column
+    each field is mapped to (auto-matched by header name, overridable via
+    `mapping`), and the exact outcome the import would produce — 追加/スキップ/重複
+    の件数と、行ごとの理由。
+    """
+    wb, ws, grid, hr, header, data_rows, fields, colmap = _worklog_source(
+        file, sheet_name, header_row, mapping, db, admin.org_id
+    )
+    plan = _plan_worklog_import(db, admin.org_id, data_rows, fields, colmap)
+    # The dry run must not leave anything behind (it only read).
+    db.rollback()
+
+    return {
+        "worksheets": xlsx.worksheets_of(wb),
+        "sheet_name": ws.title,
+        "header_row": hr,
+        "suggested_header_row": xlsx.auto_header_row(grid),
+        "total_rows": len(data_rows),
+        "preview": xlsx.preview_of(grid),
+        "headers": [xlsx.cell_text(h) for h in header],
+        "fields": [
+            {
+                "key": f["key"],
+                "label": f["label"],
+                "required": f["required"],
+                "index": colmap.get(f["key"], -1),
+                "samples": [
+                    xlsx.cell_text(v)
+                    for v in xlsx.column_values(data_rows, colmap.get(f["key"], -1))
+                    if not xlsx.is_blank(v)
+                ][:4],
+            }
+            for f in fields
+        ],
+        "created": plan["created"],
+        "skipped": plan["skipped"],
+        "duplicates": plan["duplicates"],
+        "issues": plan["issues"],
+    }
+
+
+@router.post("/import.xlsx")
+def import_worklog_xlsx(
+    file: UploadFile,
+    sheet_name: str = Form(default=""),
+    header_row: int = Form(default=0),
+    mapping: str = Form(default=""),
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Admin-only. Bulk-add work logs from .xlsx (みんなの入力一覧 取込).
+
+    Columns are matched by header name (日付/ユーザー/タスクID/<分類の各段>/メモ/時間);
+    the category headers follow the org's configured level names, with
+    大分類/中分類/小分類 accepted as fallbacks. The 取り込みウィザード can override the
+    worksheet (`sheet_name`), the 見出し行 (`header_row`) and the column of each field
+    (`mapping`, JSON `{"user": 1, "hours": 6}` — 0-based, -1 = 使わない).
+
+    Each row becomes a NEW log (no upsert — worklogs have no natural key); user is
+    matched by name, task by ID (first match). Identical rows are skipped as
+    duplicates. Linked tasks' weekly 実績 are recomputed.
+    """
+    _wb, _ws, _grid, _hr, _header, data_rows, fields, colmap = _worklog_source(
+        file, sheet_name, header_row, mapping, db, admin.org_id
+    )
+    if colmap.get("user", -1) < 0 or colmap.get("hours", -1) < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="『ユーザー』と『時間』の列が必要です",
+        )
+
+    plan = _plan_worklog_import(db, admin.org_id, data_rows, fields, colmap)
+    affected: set[tuple[int, date]] = set()
+    for e in plan["entries"]:
+        db.add(WorkLog(org_id=admin.org_id, **e))
+        if e["row_id"] is not None:
+            affected.add((e["row_id"], week_start_for(db, admin.org_id, e["work_date"])))
 
     db.flush()
     for rid, week in affected:
         recompute_actual(db, rid, week)
     db.commit()
-    return {"created": created, "skipped": skipped, "duplicates": duplicates}
+    return {
+        "created": plan["created"],
+        "skipped": plan["skipped"],
+        "duplicates": plan["duplicates"],
+    }
 
 
 def _owned(db: Session, worklog_id: int, user: User) -> WorkLog:

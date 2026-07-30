@@ -210,25 +210,58 @@ export const getAggregate = (
 export const exportCsvUrl = (sheetId: string) => `/api/sheets/${sheetId}/export.csv`
 export const exportXlsxUrl = (sheetId: string) => `/api/sheets/${sheetId}/export.xlsx`
 
-/** Upload an .xlsx to upsert rows (matched by ID). Returns counts. */
-export async function importXlsx(
+/** Upload an .xlsx to upsert rows (matched by ID). With no plan this behaves as
+ *  before (active worksheet, row 1 = header, column A = ID). Returns counts. */
+export const importXlsx = (sheetId: string, file: File, plan: Partial<ImportPlan> = {}) =>
+  postForm<{ created: number; updated: number }>(
+    `/api/sheets/${sheetId}/import.xlsx`,
+    importForm(file, plan),
+  )
+
+/** One Excel column as seen by the EXISTING-sheet wizard. `target` is the sheet
+ *  column (or reserved header) it will be written into; '' = 取り込まない. */
+export interface ImportRowsColumn {
+  index: number
+  header: string
+  target: string
+  role: '' | 'attr' | 'week' | 'progress' | 'deps' | 'milestone'
+  type: string
+  /** Set when the header is an ISO week date (週次工数の列). */
+  week_start: string | null
+  filled: number
+  samples: string[]
+  invalid: number
+  invalid_samples: string[]
+}
+
+export interface ImportRowsInspection {
+  worksheets: { name: string; rows: number; columns: number }[]
+  sheet_name: string
+  header_row: number
+  suggested_header_row: number
+  id_column: number
+  total_rows: number
+  preview: { row: number; cells: string[] }[]
+  columns: ImportRowsColumn[]
+  /** What an Excel column may be mapped onto (this sheet's columns + reserved). */
+  targets: { key: string; label: string; type: string; role: string }[]
+  new_rows: number
+  updated_rows: number
+  blank_ids: number
+  duplicate_ids: number
+}
+
+/** Read an .xlsx against an EXISTING sheet without importing: proposed column
+ *  mapping, 新規/更新の件数, and values that would not convert. */
+export const inspectImportRowsXlsx = (
   sheetId: string,
   file: File,
-): Promise<{ created: number; updated: number }> {
-  const form = new FormData()
-  form.append('file', file)
-  const res = await fetch(`/api/sheets/${sheetId}/import.xlsx`, {
-    method: 'POST',
-    credentials: 'include',
-    body: form,
-  })
-  const text = await res.text()
-  const payload = text ? JSON.parse(text) : {}
-  if (!res.ok) {
-    throw new ApiError(res.status, payload?.detail ?? `HTTP ${res.status}`)
-  }
-  return payload
-}
+  plan: Partial<ImportPlan> = {},
+) =>
+  postForm<ImportRowsInspection>(
+    `/api/sheets/${sheetId}/import.xlsx/inspect`,
+    importForm(file, plan),
+  )
 
 /** How a header column will be treated on a schedule sheet. */
 export type ImportColumnRole = 'attr' | 'week' | 'progress' | 'deps' | 'milestone'
@@ -315,22 +348,57 @@ export const importNewSheetXlsx = (file: File, plan: ImportPlan) =>
 export const exportWorklogXlsxUrl = (from: string, to: string) =>
   `/api/worklog/export.xlsx?from=${from}&to=${to}`
 
-/** Admin-only: bulk-add work logs from .xlsx. Returns counts. */
-export async function importWorklogXlsx(
-  file: File,
-): Promise<{ created: number; skipped: number; duplicates: number }> {
+/** How the 日報 wizard describes a file: worksheet, 見出し行, and which column
+ *  feeds each field (0-based; -1 = 使わない). */
+export interface WorklogImportPlan {
+  sheetName?: string
+  headerRow?: number
+  mapping?: Record<string, number>
+}
+
+export interface WorklogImportField {
+  key: string
+  label: string
+  required: boolean
+  /** Column index this field reads from; -1 when unmapped. */
+  index: number
+  samples: string[]
+}
+
+export interface WorklogInspection {
+  worksheets: { name: string; rows: number; columns: number }[]
+  sheet_name: string
+  header_row: number
+  suggested_header_row: number
+  total_rows: number
+  preview: { row: number; cells: string[] }[]
+  headers: string[]
+  fields: WorklogImportField[]
+  created: number
+  skipped: number
+  duplicates: number
+  issues: { row: number; reason: string }[]
+}
+
+function worklogForm(file: File, plan: WorklogImportPlan): FormData {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch('/api/worklog/import.xlsx', {
-    method: 'POST',
-    credentials: 'include',
-    body: form,
-  })
-  const text = await res.text()
-  const payload = text ? JSON.parse(text) : {}
-  if (!res.ok) throw new ApiError(res.status, payload?.detail ?? `HTTP ${res.status}`)
-  return payload
+  if (plan.sheetName) form.append('sheet_name', plan.sheetName)
+  if (plan.headerRow) form.append('header_row', String(plan.headerRow))
+  if (plan.mapping) form.append('mapping', JSON.stringify(plan.mapping))
+  return form
 }
+
+/** Admin-only, writes nothing: what the 日報 import WOULD do (件数・理由つき). */
+export const inspectWorklogXlsx = (file: File, plan: WorklogImportPlan = {}) =>
+  postForm<WorklogInspection>('/api/worklog/import.xlsx/inspect', worklogForm(file, plan))
+
+/** Admin-only: bulk-add work logs from .xlsx. Returns counts. */
+export const importWorklogXlsx = (file: File, plan: WorklogImportPlan = {}) =>
+  postForm<{ created: number; skipped: number; duplicates: number }>(
+    '/api/worklog/import.xlsx',
+    worklogForm(file, plan),
+  )
 
 // ---- Work logs (日報) ----
 export const getWorkLogs = (params?: { from?: string; to?: string; userId?: string }) => {
