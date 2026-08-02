@@ -476,10 +476,21 @@ def _plan_worklog_import(
 
 
 def _worklog_source(
-    file: UploadFile, sheet_name: str, header_row: int, mapping_raw: str, db: Session, org_id: int
+    file: UploadFile,
+    sheet_name: str,
+    header_row: int,
+    last_row: int,
+    mapping_raw: str,
+    db: Session,
+    org_id: int,
 ):
-    """Shared setup for the 日報 inspect/import: workbook slice + field mapping."""
-    wb, ws, grid, hr, header, data_rows = xlsx.read_source(file, sheet_name, header_row)
+    """Shared setup for the 日報 inspect/import: workbook slice + field mapping.
+
+    `last_row` (1-based, inclusive; 0 = 最後まで) cuts off whatever the sheet ends
+    with that is not data — the same 合計行/注記 problem every import has."""
+    wb, ws, grid, hr, header, data_rows = xlsx.read_source(
+        file, sheet_name, header_row, last_row
+    )
     fields = _import_fields(category_levels(db, org_id))
     mapping = _auto_mapping(fields, header)
     given = xlsx.parse_json_field(mapping_raw, "列の対応")
@@ -498,6 +509,8 @@ def inspect_worklog_xlsx(
     file: UploadFile,
     sheet_name: str = Form(default=""),
     header_row: int = Form(default=0),
+    last_row: int = Form(default=0),
+    tail_from: int = Form(default=0),
     mapping: str = Form(default=""),
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -510,7 +523,7 @@ def inspect_worklog_xlsx(
     の件数と、行ごとの理由。
     """
     wb, ws, grid, hr, header, data_rows, fields, colmap = _worklog_source(
-        file, sheet_name, header_row, mapping, db, admin.org_id
+        file, sheet_name, header_row, last_row, mapping, db, admin.org_id
     )
     plan = _plan_worklog_import(db, admin.org_id, data_rows, fields, colmap)
     # The dry run must not leave anything behind (it only read).
@@ -521,8 +534,12 @@ def inspect_worklog_xlsx(
         "sheet_name": ws.title,
         "header_row": hr,
         "suggested_header_row": xlsx.auto_header_row(grid),
+        "last_row": last_row,
+        "sheet_last_row": len(grid),
         "total_rows": len(data_rows),
+        "available_rows": xlsx.data_row_total(grid, hr),
         "preview": xlsx.preview_of(grid),
+        "tail_preview": xlsx.tail_preview_of(grid, hr, tail_from, last_row),
         "headers": [xlsx.cell_text(h) for h in header],
         "fields": [
             {
@@ -550,6 +567,7 @@ def import_worklog_xlsx(
     file: UploadFile,
     sheet_name: str = Form(default=""),
     header_row: int = Form(default=0),
+    last_row: int = Form(default=0),
     mapping: str = Form(default=""),
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -567,7 +585,7 @@ def import_worklog_xlsx(
     duplicates. Linked tasks' weekly 実績 are recomputed.
     """
     _wb, _ws, _grid, _hr, _header, data_rows, fields, colmap = _worklog_source(
-        file, sheet_name, header_row, mapping, db, admin.org_id
+        file, sheet_name, header_row, last_row, mapping, db, admin.org_id
     )
     if colmap.get("user", -1) < 0 or colmap.get("hours", -1) < 0:
         raise HTTPException(

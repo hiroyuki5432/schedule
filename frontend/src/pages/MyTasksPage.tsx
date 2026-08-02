@@ -29,6 +29,21 @@ const ANY = ''
 type SortKey = 'id' | 'title' | 'finish' | 'planned' | 'status'
 type SortDir = 'asc' | 'desc'
 
+/** Header cell pinned to the top of the scrolling card (見出しは常に表示). The rule
+ *  under it is an inset shadow — a border on a stuck cell scrolls away when the
+ *  table uses border-collapse. */
+const TH =
+  'sticky top-0 z-20 bg-[var(--surface)] px-5 py-2.5 shadow-[inset_0_-1px_0_var(--line)]'
+
+/** Column widths: ID / 件名 / 担当 / ステータス / 終了週 / 予定計.
+ *
+ *  Used with `table-fixed` + `w-max`. Without them this table had no width control
+ *  at all: it stretched to fill any monitor (要望: 画面いっぱいでスカスカ) and one
+ *  long 件名 pushed the columns out without limit (要望: 幅が永遠に広がる). 件名 is
+ *  the only one that ever runs long, so it gets the room; past that it is clipped
+ *  with the full text on hover. */
+const COL_W = [140, 420, 180, 120, 120, 110]
+
 const SORT_LABEL: Record<SortKey, string> = {
   id: 'ID',
   title: '件名',
@@ -168,7 +183,7 @@ export function MyTasksPage() {
     }
   }
   const Th = ({ k, className }: { k: SortKey; className?: string }) => (
-    <th className={cn('px-5 py-2.5 font-medium', className)}>
+    <th className={cn(TH, 'font-medium', className)}>
       <button
         type="button"
         onClick={() => sortBy(k)}
@@ -208,7 +223,9 @@ export function MyTasksPage() {
         }
       />
 
-      <div className="flex flex-col gap-4 overflow-auto px-[22px] pb-6">
+      {/* The card is the scroller, so the filters stay put and the table's
+          header row stays pinned while scrolling (スケジュールと同じ挙動). */}
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-[22px] pb-6">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[12px] text-[var(--ink2)]">
           <label className="flex cursor-pointer items-center gap-1.5">
             <input
@@ -264,7 +281,7 @@ export function MyTasksPage() {
           </span>
         </div>
 
-        <Card>
+        <Card className="min-h-0 overflow-auto">
           <CardBody className="px-0 py-0">
             {sheetsLoading || grid.loading ? (
               <TableSkeleton rows={5} cols={5} />
@@ -291,12 +308,17 @@ export function MyTasksPage() {
                 }
               />
             ) : (
-              <table className="w-full border-collapse text-[12.5px]">
+              <table className="w-max table-fixed border-collapse text-[12.5px]">
+                <colgroup>
+                  {COL_W.map((w, i) => (
+                    <col key={i} style={{ width: w }} />
+                  ))}
+                </colgroup>
                 <thead>
-                  <tr className="border-b border-[var(--line)] text-left text-[var(--ink3)]">
+                  <tr className="text-left text-[var(--ink3)]">
                     <Th k="id" />
                     <Th k="title" />
-                    <th className="px-5 py-2.5 font-medium">担当</th>
+                    <th className={`${TH} font-medium`}>担当</th>
                     <Th k="status" />
                     <Th k="finish" />
                     <Th k="planned" className="text-right" />
@@ -321,11 +343,15 @@ export function MyTasksPage() {
                           {r.keyValue}
                         </Link>
                       </td>
-                      <td className="px-5 py-2.5">{r.title}</td>
+                      <td className="truncate px-5 py-2.5" title={r.title}>
+                        {r.title}
+                      </td>
                       <td className="px-5 py-2.5">
                         <div className="flex items-center gap-2">
                           <Avatar name={r.assigneeName} seed={r.assigneeId} />
-                          {r.assigneeName}
+                          <span className="truncate" title={r.assigneeName ?? undefined}>
+                            {r.assigneeName}
+                          </span>
                         </div>
                       </td>
                       <td className="px-5 py-2.5">

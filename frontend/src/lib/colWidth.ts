@@ -12,10 +12,28 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { Column } from '@/types/api'
 
-export const RESIZE_MIN = 48
+// Manual drag limits. The minimum is deliberately far below "the text still
+// fits": squeezing a column down to a sliver is a normal way to park a column you
+// do not need right now without hiding it (要望: 文字が見えるところまでしか縮められない).
+// Values just clip — the full text stays in the cell's tooltip.
+export const RESIZE_MIN = 24
 export const RESIZE_MAX = 640
 
+/** Hard ceiling for any CONTENT-fit width. One very long value must not be able
+ *  to push a column out to the horizon (要望: 幅が永遠に広がる) — past this it is
+ *  clipped, and the full value is on hover / in the record modal. */
+export const FIT_MAX = 320
+
 const COLW_KEY = 'gantt.colWidths'
+
+/** Width-map key for the ID (key_value) column.
+ *
+ *  The ID column is not a `Column` row in the DB, so it used to be a hard-coded
+ *  constant with no drag handle — which is why *some* columns could be squeezed
+ *  and this one could not (要望: 縮められない列がある). Giving it a key in the same
+ *  map makes it behave like every other column, and the width persists and is
+ *  shared between the schedule and the table just like the rest. */
+export const ID_COL_KEY = '__id__'
 
 /** Fallback width by type, used before content is measured. */
 export function defaultColWidth(c: Column): number {
@@ -71,12 +89,18 @@ export function widthPad(t: Column['type']): number {
   return 24
 }
 
-/** Content-fit width for one column from its header + every rendered value. */
+/** Content-fit width for one column from its header + every rendered value.
+ *
+ *  Multi-line values are measured by their LONGEST LINE, not the whole string:
+ *  an imported 備考 with three lines wraps in the cell, so sizing it to the joined
+ *  length would make the column absurdly wide for no reason. */
 export function fitWidth(c: Column, values: Iterable<string>): number {
   let maxPx = textPx(c.name)
-  for (const v of values) maxPx = Math.max(maxPx, textPx(v))
+  for (const v of values) {
+    for (const line of v.split('\n')) maxPx = Math.max(maxPx, textPx(line))
+  }
   const [min, max] = widthRange(c.type)
-  return Math.round(Math.max(min, Math.min(max, widthPad(c.type) + maxPx)))
+  return Math.round(Math.max(min, Math.min(max, FIT_MAX, widthPad(c.type) + maxPx)))
 }
 
 function loadColWidths(): Record<string, number> {

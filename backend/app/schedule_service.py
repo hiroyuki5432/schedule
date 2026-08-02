@@ -34,9 +34,14 @@ def sched_columns(db: Session, sheet_id: int) -> tuple[Column | None, Column | N
     return start, end
 
 
-def ensure_schedule_columns(db: Session, sheet: Sheet) -> None:
+def ensure_schedule_columns(db: Session, sheet: Sheet, commit: bool = True) -> None:
     """Make sure a week-grid sheet has its 開始日 / 完了日 columns; create them (and
-    migrate legacy span values) the first time. Idempotent and commits on change."""
+    migrate legacy span values) the first time. Idempotent and commits on change.
+
+    Pass ``commit=False`` from anything that owns a larger transaction — the 一括
+    取り込み writes a whole workbook all-or-nothing, and a commit in here would
+    quietly make the worksheets processed so far permanent.
+    """
     if not sheet.has_week_grid:
         return
     cols = db.execute(select(Column).where(Column.sheet_id == sheet.id)).scalars().all()
@@ -76,4 +81,7 @@ def ensure_schedule_columns(db: Session, sheet: Sheet) -> None:
             changed = True
         if changed:
             r.data = data
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()

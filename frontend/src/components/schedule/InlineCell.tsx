@@ -155,7 +155,15 @@ export function InlineCell({
   }
 
   // --- Editable: multi-line free text (large input mode) → modal textarea ---
-  if (column.type === 'text' && column.config?.multiline) {
+  //
+  // Also taken when the VALUE itself has line breaks, whatever the column is
+  // configured as. The plain <input> below cannot hold a newline — the browser
+  // strips them — so an Excel cell filled in with Alt+Enter used to be flattened
+  // to one line the first time anyone clicked it (要望: セル内の改行が1行に).
+  if (
+    column.type === 'text' &&
+    (column.config?.multiline || String(value ?? '').includes('\n'))
+  ) {
     return (
       <MultilineCell
         value={value == null ? '' : String(value)}
@@ -370,7 +378,7 @@ function SelectCell({
       ref={ref}
       defaultValue={value}
       className={cn(
-        'box-border h-full w-full rounded border border-[var(--green-l)] bg-[var(--surface)] text-[12.5px] outline-none',
+        'box-border h-full w-full min-w-0 rounded border border-[var(--green-l)] bg-[var(--surface)] text-[12.5px] outline-none',
         pad,
         className,
       )}
@@ -427,7 +435,7 @@ function TextCellInput({
         if (e.key === 'Escape') onCancel()
       }}
       className={cn(
-        'box-border h-full w-full rounded border border-[var(--green-l)] bg-[var(--surface)] text-[12.5px] outline-none',
+        'box-border h-full w-full min-w-0 rounded border border-[var(--green-l)] bg-[var(--surface)] text-[12.5px] outline-none',
         pad,
         className,
       )}

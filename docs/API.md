@@ -140,13 +140,51 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 |---|---|---|
 | GET | `/api/sheets/{id}/export.csv` | CSV（属性列＋週次工数）|
 | GET | `/api/sheets/{id}/export.xlsx` | Excel（属性列＋**進捗(%)/先行タスク(ID)**＋**テンプレ◇ごとの「予定/実績」列**＋週次工数）。開始日/完了日は実列なので通常列として出力。担当はメンバー名、先行タスクはID(key_value)で出力 |
-| POST | `/api/sheets/{id}/import.xlsx/inspect` | **書き込みなし**の解析（既存シート用ウィザード）。multipart `file` ＋任意の `sheet_name` / `header_row` / `id_column` / `columns`。ワークシート一覧・見出し行の自動判定・プレビューに加え、各Excel列の**対応先**（同名の列／予約見出し／空=取り込まない）、選べる対応先一覧 `targets`、**新規/更新の行数**、変換できない値の件数を返す |
-| POST | `/api/sheets/{id}/import.xlsx` | multipart `file`。ID(key_value)で照合し upsert（一致=更新 / 無い=新規）。`{created, updated}` を返す。週次セルは過去=実績・現在以降=予定。**進捗(%)** は行の進捗、**先行タスク(ID)** はID(key_value)で全行取込後に解決。**◇予定/実績**列が非空なら、テンプレ（既定マイルストン）に沿って行のマイルストンを再構築（フェーズ境界は開始日＋◇から復元、実績日があれば達成）。**参照(LOOKUP)列は無視**（出力は空欄）。ウィザードからは `sheet_name` / `header_row` / `id_column` / `columns`（JSON `[{index,name}]`＝Excel列→取り込み先の見出し名）を指定でき、省略時は従来どおり（先頭ワークシート・1行目=見出し・A列=ID・同名列に対応）|
-| POST | `/api/sheets/import.xlsx/inspect` | **書き込みなし**の解析（取り込みウィザード用）。multipart `file` ＋任意の `sheet_name` / `header_row` / `id_column` / `has_week_grid` / `columns`。`{worksheets[], sheet_name, header_row, suggested_header_row, total_rows, preview[], columns[], blank_ids, duplicate_ids}` を返す。`columns[]` は各見出しの `role`（attr/week/progress/deps/milestone）・推定型・値の例・**変換できない値の件数**（`invalid`/`invalid_samples`）|
-| POST | `/api/sheets/import.xlsx` | **新規シート**を作って取り込む。multipart `file` ＋ `name` / `has_week_grid` ／ウィザードの指定 `sheet_name`（ワークシート）・`header_row`（1始まり、既定=自動判定）・`id_column`（0始まり、`-1`=自動採番）・`columns`（JSON `[{index,name,type}]`）。`columns` 省略時は全列を型推定して取込。`{sheet_id, name, columns, created, updated}` を返す |
+| POST | `/api/sheets/{id}/import.xlsx/inspect` | **書き込みなし**の解析（既存シート用ウィザード）。multipart `file` ＋任意の `sheet_name` / `header_row` / **`last_row`** / **`tail_from`** / `id_column` / `columns`。ワークシート一覧・見出し行の自動判定・**先頭プレビュー(`preview`)と末尾プレビュー(`tail_preview`)**・`last_row` / `sheet_last_row` / `available_rows`（切らなかった場合の行数）に加え、各Excel列の**対応先**（同名の列／予約見出し／空=取り込まない）、選べる対応先一覧 `targets`、**新規/更新の行数**、変換できない値の件数を返す。取り込み先に指定されていても**実際には書けない**列（改名/削除された、または参照(LOOKUP)列になった）は `target` を空にしたうえで `lost_target` / `lost_reason`(`lookup`\|`missing`) で理由を返す — 件数が黙って合わなくなるのを防ぐため |
+| POST | `/api/sheets/{id}/import.xlsx` | multipart `file`。ID(key_value)で照合し upsert（一致=更新 / 無い=新規）。`{created, updated}` を返す。週次セルは過去=実績・現在以降=予定。**進捗(%)** は行の進捗、**先行タスク(ID)** はID(key_value)で全行取込後に解決。**◇予定/実績**列が非空なら、テンプレ（既定マイルストン）に沿って行のマイルストンを再構築（フェーズ境界は開始日＋◇から復元、実績日があれば達成）。**参照(LOOKUP)列は無視**（出力は空欄）。ウィザードからは `sheet_name` / `header_row` / **`last_row`** / `id_column` / `columns`（JSON `[{index,name}]`＝Excel列→取り込み先の見出し名）を指定でき、省略時は従来どおり（先頭ワークシート・1行目=見出し・A列=ID・同名列に対応）。`last_row` は**取り込む最終行**（1始まり・その行を含む、`0`=最後まで）。末尾の合計行・注記・別表を切り落とすための指定で、空行を詰める前の**物理行番号**に対して効く（プレビューでクリックした行番号がそのまま効く）|
+| POST | `/api/sheets/import.xlsx/inspect` | **書き込みなし**の解析（取り込みウィザード用）。multipart `file` ＋任意の `sheet_name` / `header_row` / **`last_row`** / **`tail_from`** / `id_column` / `has_week_grid` / `columns`。`{worksheets[], sheet_name, header_row, suggested_header_row, last_row, sheet_last_row, total_rows, available_rows, preview[], tail_preview[], columns[], blank_ids, duplicate_ids}` を返す。`tail_preview` は**末尾側の窓**（見出し行より上には出ない・1回最大300行）で、「これ以降を取り込まない」を選ぶためのもの。既定は末尾15行だが、`tail_from`（1始まり）でその行から開くことができ（「さらに上を表示」）、`last_row` が指定されていれば**その手前まで窓が自動で広がる**ので、数値入力した最終行も必ず目視できる。`columns[]` は各見出しの `role`（attr/week/progress/deps/milestone）・推定型・値の例・**変換できない値の件数**（`invalid`/`invalid_samples`）|
+| POST | `/api/sheets/import.xlsx` | **新規シート**を作って取り込む。multipart `file` ＋ `name` / `has_week_grid` ／ウィザードの指定 `sheet_name`（ワークシート）・`header_row`（1始まり、既定=自動判定）・**`last_row`**（取り込む最終行、1始まり・その行を含む、`0`=最後まで）・`id_column`（0始まり、`-1`=自動採番）・`columns`（JSON `[{index,name,type}]`）。`columns` 省略時は全列を型推定して取込。`{sheet_id, name, columns, created, updated}` を返す |
 | GET | `/api/worklog/export.xlsx?from=&to=` | 全員の日報を範囲で Excel 出力（みんなの入力一覧）。列: 日付/ユーザー/タスクID/**分類の各段**/メモ/時間。分類の見出しは `org.settings.worklog.category_levels`（既定 大分類・中分類、最大3段）|
-| POST | `/api/worklog/import.xlsx/inspect` | **admin・書き込みなし**。取り込み前の空実行。multipart `file` ＋任意の `sheet_name` / `header_row` / `mapping`。ワークシート一覧・見出し行・プレビュー・各項目（日付/ユーザー/タスクID/分類/メモ/時間）が読む列と、**追加/スキップ/重複の件数**と行ごとの理由 `issues` を返す。本番と同じ処理を空実行するのでプレビューの件数＝実際の結果 |
-| POST | `/api/worklog/import.xlsx` | **admin**。multipart `file`（＋ウィザードの `sheet_name` / `header_row` / `mapping` JSON `{"user":1,"hours":6}`＝項目→列番号、0始まり・-1で不使用）。各行を新規の日報として追加（ユーザーは名前で照合、タスクはIDで照合）。分類列は設定した段の名前で照合し、`大分類/中分類/小分類` もフォールバックで受け付ける。`{created, skipped, duplicates}` を返す |
+| POST | `/api/worklog/import.xlsx/inspect` | **admin・書き込みなし**。取り込み前の空実行。multipart `file` ＋任意の `sheet_name` / `header_row` / **`last_row`** / **`tail_from`** / `mapping`。ワークシート一覧・見出し行・先頭/末尾プレビュー・各項目（日付/ユーザー/タスクID/分類/メモ/時間）が読む列と、**追加/スキップ/重複の件数**と行ごとの理由 `issues` を返す。本番と同じ処理を空実行するのでプレビューの件数＝実際の結果 |
+| POST | `/api/worklog/import.xlsx` | **admin**。multipart `file`（＋ウィザードの `sheet_name` / `header_row` / **`last_row`** / `mapping` JSON `{"user":1,"hours":6}`＝項目→列番号、0始まり・-1で不使用）。各行を新規の日報として追加（ユーザーは名前で照合、タスクはIDで照合）。分類列は設定した段の名前で照合し、`大分類/中分類/小分類` もフォールバックで受け付ける。`{created, skipped, duplicates}` を返す |
+
+## 取り込み設定（プリセット）と一括取り込み
+シートの多いブックを毎回設定し直さずに済むように、取り込みが成功するとその設定が
+**ワークシート名をキーに**保存される（組織で共有）。2回目以降は同じファイルを選んで
+一括実行するだけで更新できる。
+
+| メソッド | パス | 概要 |
+|---|---|---|
+| GET | `/api/import/presets` | 保存済みの取り込み設定一覧（組織単位）|
+| POST | `/api/import/presets` | 設定の保存（`worksheet_name` で upsert）。`{worksheet_name, name, workbook_name, target_sheet_id, target_sheet_name, has_week_grid, header_row, last_row, id_column, mapping}`（`last_row`＝取り込む最終行、`0`=最後まで）。`target_sheet_id` が `null` なら取り込み時に新規シートを作る。取り込み先シートを削除しても設定は残り（`target_sheet_id` が `null` になる）「新規作成」に降格する |
+| DELETE | `/api/import/presets/{id}` | 設定を削除（204）|
+| POST | `/api/import/workbook/inspect` | **書き込みなし**。multipart `file` ＋任意 `plan`（JSON）。ブック内の全ワークシートを設定に突き合わせ、`{workbook_name, worksheets[]}` を返す。各要素は `action`（existing/new/skip）・`target_sheet_id` ・`header_row` ・`last_row` ・`total_rows` ・`available_rows` ・`column_count` ・**新規/更新の行数**・`invalid`・`warnings[]`・`error`。**設定の無いワークシートは既定で `skip`**（ブックを投げただけでシートが量産されない）|
+| POST | `/api/import/workbook` | ブックを**1トランザクション**で一括取り込み。multipart `file` ＋ `plan`（JSON `[{worksheet, action, target_sheet_id, target_sheet_name, has_week_grid, header_row, last_row, id_column, columns}]`）＋ `save_presets`（既定 true）。どれか1つでも失敗したら**全部ロールバック**。成功時は各ワークシートの設定を「実際に入ったシート」を指す形で保存し直すので、初回=新規作成→次回=更新 になる。`{results[], created, updated}` を返す |
+
+## バックアップ / 復元（管理者のみ）
+グループ丸ごとの論理バックアップ。**主キーを含めてそのまま保存し、復元時も同じIDで書き戻す**。
+理由: `rows.data` は列IDがキー、参照(LOOKUP)列の `config` はシート/列ID、`sheets.settings`
+の `worklog_task_columns`・`key_column_id`・ステータスルールの `col_id`・完了条件 なども
+すべてIDを持つため、採番し直すと JSONB 内の参照を全部書き換える必要があり、漏れると
+「シートは開くが別の列を見ている」という壊れ方を静かに起こす。IDを保つことでこれを回避する。
+
+- 対象: `users` / `sheets` / `columns` / `rows` / `effort_entries` / `row_milestones` /
+  `sheet_snapshots` / `work_logs` / `row_events` / `import_presets`、および組織の `name` / `settings`。
+- 対象外: `notifications`（派生データ。開き直すと再生成）、`backups` 自身（復元で消えると戻せなくなるため）。
+- **同じグループにしか復元できない**（IDをそのまま書き戻すため、他グループと衝突する）。
+- 復元は1トランザクション。実行前に「復元前の自動バックアップ」を自動取得する。
+- 復元後は各テーブルの id シーケンスを `max(id)+1` に再設定する（しないと次の INSERT が重複キーで落ちる）。
+
+| メソッド | パス | 概要 |
+|---|---|---|
+| GET | `/api/backups` | 一覧（新しい順）。`{id,label,format_version,summary,size_bytes,created_at,created_by_name}`。payload は返さない |
+| POST | `/api/backups` | `{label?}` → 現在の状態を保存 |
+| GET | `/api/backups/{id}/download` | .json としてダウンロード（DB ごと失った場合の戻し口）|
+| DELETE | `/api/backups/{id}` | 削除（204）|
+| POST | `/api/backups/{id}/restore` | この時点に完全復元。`{restored_from, counts, safety_backup_id, signed_out}` を返す。`signed_out` は「復元後のデータに自分のアカウントが無い」= このセッションが無効になったことを示す |
+| POST | `/api/backups/restore-file` | multipart `file`（ダウンロードした .json）から復元。同上 |
+
+復元は次を拒否する: 形式バージョン不一致 / 別グループのバックアップ / 管理者アカウントを含まないバックアップ（復元後にグループを管理できなくなるため）。
 
 ## 実装優先度
 1. auth / org / members / sheets / columns / rows / effort / milestones（スケジュール画面が動く中核）

@@ -308,6 +308,106 @@ class RowEvent(Base):
     )
 
 
+class ImportPreset(Base):
+    """A saved Excel 取り込み設定 (要望: 一度決めた設定を記憶して一括で取り込みたい).
+
+    Written automatically whenever an import wizard finishes, keyed by the SOURCE
+    worksheet's name — so setting a sheet up carefully the first time *is* the
+    setup. The 一括取り込み screen then matches every worksheet of a dropped
+    workbook against these presets and can re-run the whole book in one action,
+    which is what makes the second, third… data load cheap.
+
+    `target_sheet_id` NULL means "create a new sheet named `target_sheet_name`".
+    It is SET NULL on sheet delete, so a preset for a deleted sheet degrades into
+    "make a new one" instead of disappearing.
+
+    Org-scoped on purpose: whoever set the import up, everyone can re-run it.
+    """
+
+    __tablename__ = "import_presets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    # Display name (既定はワークシート名).
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # The Excel worksheet this setting belongs to — the 一括取り込み matching key.
+    worksheet_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # File name it was last saved from. Display only — renaming the file must not
+    # break the match, so it is deliberately NOT part of the key.
+    workbook_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    target_sheet_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sheets.id", ondelete="SET NULL"), nullable=True
+    )
+    # Name to give the sheet when target_sheet_id is NULL (新規作成).
+    target_sheet_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    has_week_grid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # 1-based 見出し行 (0 = 自動判定), 0-based ID列 (-1 = 自動採番).
+    header_row: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    id_column: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Last worksheet row to take, 1-based inclusive (0 = 最後まで). Sheets routinely
+    # end in a 合計行 or notes that must not become tasks, and where that line falls
+    # is a property of the source sheet — so it is remembered with everything else.
+    last_row: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # [{index, name, type}] — the same JSON the wizards post as `columns`.
+    mapping: Mapped[list] = mapped_column("mapping", JSONB, nullable=False, default=list)
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        # One setting per source worksheet: re-running the wizard on the same
+        # worksheet updates it rather than piling up near-duplicates.
+        UniqueConstraint("org_id", "worksheet_name", name="uq_import_preset_org_ws"),
+    )
+
+
+class Backup(Base):
+    """A full point-in-time snapshot of one group's data (バックアップ / リストア).
+
+    `payload` holds every org-scoped table verbatim — **including primary keys**.
+    Restoring re-inserts those original ids rather than allocating new ones,
+    because ids are referenced from inside JSONB all over the app (`row.data` is
+    keyed by column id; lookup columns point at a sheet/column id; a sheet's
+    `worklog_task_columns` and status rules hold column ids). Re-numbering would
+    mean rewriting every one of those by hand, and anything missed would corrupt
+    a setting silently. Keeping the ids makes the restore exact.
+
+    This table is deliberately NOT part of the payload: a restore must not wipe
+    the very list of backups you would need to undo it.
+    """
+
+    __tablename__ = "backups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    label: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    # Payload layout version — a restore refuses a version it does not understand
+    # rather than half-applying it.
+    format_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Row counts per table, so the list can describe a backup without loading the
+    # (potentially large) payload.
+    summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Display name of who took it, snapshotted so it survives that account going.
+    created_by_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+
+    __table_args__ = (Index("ix_backup_org_at", "org_id", "created_at"),)
+
+
 class Notification(Base):
     """An in-app notification (ベル). Created lazily on access — no cron:
 

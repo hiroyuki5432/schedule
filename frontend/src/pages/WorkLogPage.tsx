@@ -59,7 +59,9 @@ function toInput(v: WorkLogRowValue, work_date: string): WorkLogInput {
   }
 }
 
-const TH = 'px-2 py-2.5 font-medium'
+/** Header cell pinned to the top of the scrolling table body (見出しは常に表示). */
+const TH =
+  'sticky top-0 z-20 bg-[var(--surface)] px-2 py-2.5 font-medium shadow-[inset_0_-1px_0_var(--line)]'
 
 export function WorkLogPage() {
   // Deep-link from a 未入力 notification: ?date=YYYY-MM-DD opens that day.
@@ -228,12 +230,15 @@ export function WorkLogPage() {
           </div>
         )}
 
-        {/* Desktop: dense table. Mobile: stacked cards (see below). */}
+        {/* Desktop: dense table. Mobile: stacked cards (see below).
+            The body scrolls inside the card so the header row (and the 合計 line)
+            stay visible on long days — the page itself keeps scrolling for the
+            notes underneath. */}
         <Card className="hidden md:block">
-          <CardBody className="overflow-x-auto px-0 py-0">
+          <CardBody className="max-h-[62vh] overflow-auto px-0 py-0">
             <table className="w-full min-w-[720px] border-collapse text-[12.5px]">
               <thead>
-                <tr className="border-b border-[var(--line)] text-left text-[var(--ink3)]">
+                <tr className="text-left text-[var(--ink3)]">
                   <th className={TH} style={{ width: 300 }}>
                     タスク
                   </th>
@@ -280,7 +285,7 @@ export function WorkLogPage() {
               </tbody>
             </table>
 
-            <div className="flex items-center justify-between border-t border-[var(--line2)] px-3 py-2.5">
+            <div className="sticky bottom-0 flex items-center justify-between border-t border-[var(--line2)] bg-[var(--surface)] px-3 py-2.5">
               <span className="text-[12px] text-[var(--ink3)]">
                 一番下の空行に入力すると自動で追加されます（時間を入れると確定）。
               </span>

@@ -3,6 +3,9 @@
 //   2. Excelの各列をシートのどの列に入れるか（対応の変更・除外）
 //   3. 新規/更新の件数と警告をプレビュー
 // を確認してから取り込む。書き込みは最後の「取り込む」だけ。
+//
+// 2回目以降は前回の設定（プリセット）を自動で読み込むので、そのまま「取り込む」
+// まで進めば同じ取り込みを再現できる。取り込みに成功したら設定は保存し直される。
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
@@ -19,6 +22,9 @@ interface Props {
   file: File
   onClose: () => void
 }
+
+/** One entry of the column mapping as the inspect/import endpoints take it. */
+type ImportRowsColumnPick = { index: number; name: string; type: '' }
 
 const STEPS = ['シートと見出し行', '列の対応', 'プレビュー']
 
@@ -44,19 +50,81 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
   const [step, setStep] = useState(0)
   const [sheetName, setSheetName] = useState('')
   const [headerRow, setHeaderRow] = useState(0) // 0 = 自動判定
+  const [lastRow, setLastRow] = useState(0) // 0 = 最後まで
+  const [tailFrom, setTailFrom] = useState(0) // 0 = 末尾から自動
   const [idColumn, setIdColumn] = useState(0)
   /** Excel column index → target (sheet column name / reserved header). '' = 除外 */
   const [mapping, setMapping] = useState<Record<number, string>>({})
+  /** The saved mapping, once applied — sent to inspect so the server proposes it. */
+  const [presetCols, setPresetCols] = useState<ImportRowsColumnPick[] | undefined>(undefined)
+  const [applied, setApplied] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const fileKey = `${file.name}:${file.size}:${file.lastModified}`
 
+  // 前回この シート に取り込んだときの設定。複数あれば直近に使ったものを採用する。
+  const presetsQ = useQuery({
+    queryKey: ['import-presets'],
+    queryFn: api.getImportPresets,
+    staleTime: 60_000,
+    retry: false,
+  })
+  const preset = useMemo(() => {
+    const mine = (presetsQ.data ?? []).filter((p) => p.target_sheet_id === Number(sheetId))
+    return (
+      [...mine].sort((a, b) =>
+        (b.last_used_at ?? b.updated_at).localeCompare(a.last_used_at ?? a.updated_at),
+      )[0] ?? null
+    )
+  }, [presetsQ.data, sheetId])
+
   const insp = useQuery({
-    queryKey: ['xlsx-rows-inspect', sheetId, fileKey, sheetName, headerRow, idColumn],
-    queryFn: () => api.inspectImportRowsXlsx(sheetId, file, { sheetName, headerRow, idColumn }),
+    queryKey: [
+      'xlsx-rows-inspect',
+      sheetId,
+      fileKey,
+      sheetName,
+      headerRow,
+      lastRow,
+      tailFrom,
+      idColumn,
+      JSON.stringify(presetCols ?? null),
+    ],
+    queryFn: () =>
+      api.inspectImportRowsXlsx(sheetId, file, {
+        sheetName,
+        headerRow,
+        lastRow,
+        tailFrom,
+        idColumn,
+        columns: presetCols,
+      }),
+    // Wait for the presets so the first analysis is already the saved one — no
+    // flash of the auto-guessed mapping before it is replaced.
+    enabled: !presetsQ.isPending,
     staleTime: Infinity,
     retry: false,
   })
+
+  // Apply the saved setting once, and only when its worksheet is actually in this
+  // file — the mapping is by column POSITION, so replaying it on a different
+  // worksheet would silently write values into the wrong columns.
+  const [usingPreset, setUsingPreset] = useState(false)
+  useEffect(() => {
+    if (applied || !preset || !insp.data) return
+    setApplied(true)
+    if (!insp.data.worksheets.some((w) => w.name === preset.worksheet_name)) return
+    setUsingPreset(true)
+    setSheetName(preset.worksheet_name)
+    setHeaderRow(preset.header_row)
+    setLastRow(preset.last_row)
+    setIdColumn(preset.id_column)
+    // An empty saved mapping means "never recorded" — leave it to the by-name
+    // defaults rather than asking for a mapping that takes no columns.
+    if (preset.mapping.length) {
+      setPresetCols(preset.mapping.map((m) => ({ index: m.index, name: m.name, type: '' })))
+    }
+  }, [applied, preset, insp.data])
 
   // Re-seed the proposed mapping whenever the worksheet / 見出し行 / ID列 changes.
   useEffect(() => {
@@ -88,6 +156,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
       fileKey,
       sheetName,
       headerRow,
+      lastRow,
       idColumn,
       JSON.stringify(chosen),
     ],
@@ -95,6 +164,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
       api.inspectImportRowsXlsx(sheetId, file, {
         sheetName,
         headerRow,
+        lastRow,
         idColumn,
         columns: chosen,
       }),
@@ -108,9 +178,27 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
       const r = await api.importXlsx(sheetId, file, {
         sheetName: insp.data?.sheet_name,
         headerRow: insp.data?.header_row,
+        lastRow,
         idColumn,
         columns: chosen,
       })
+      // Remember what just worked, so the next round (and the 一括取り込み) can
+      // replay it. Best effort: the rows are already committed, and failing to
+      // save a convenience setting must not be reported as a failed import.
+      if (insp.data) {
+        await api
+          .saveImportPreset({
+            worksheet_name: insp.data.sheet_name,
+            workbook_name: file.name,
+            target_sheet_id: Number(sheetId),
+            header_row: insp.data.header_row,
+            last_row: lastRow,
+            id_column: idColumn,
+            mapping: chosen,
+          })
+          .then(() => qc.invalidateQueries({ queryKey: ['import-presets'] }))
+          .catch(() => {})
+      }
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['sheet', sheetId] }),
         qc.invalidateQueries({ queryKey: ['columns', sheetId] }),
@@ -128,7 +216,10 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
 
   const data = insp.data
   const src = check.data ?? data
-  const dataPreview = (data?.preview ?? []).filter((r) => r.row > (data?.header_row ?? 0))
+  const dataPreview = (data?.preview ?? []).filter(
+    (r) =>
+      r.row > (data?.header_row ?? 0) && (!data?.last_row || r.row <= data.last_row),
+  )
 
   return (
     <WizardShell
@@ -136,7 +227,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
       steps={STEPS}
       step={step}
       onStep={setStep}
-      loading={insp.isPending}
+      loading={insp.isPending || presetsQ.isPending}
       error={insp.isError ? insp.error : undefined}
       status={data && `${file.name} ／ データ ${data.total_rows} 行`}
       notice={error}
@@ -151,6 +242,30 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
       onBack={onClose}
       onClose={onClose}
     >
+      {usingPreset && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-[10px] bg-[#F2F6F3] px-3 py-2 text-[11.5px] text-[var(--green-d)]">
+          <span>
+            前回の設定を読み込みました（ワークシート「{preset?.worksheet_name}」／見出し{' '}
+            {preset?.header_row} 行目）。このまま進めば同じ取り込みになります。
+          </span>
+          <button
+            type="button"
+            className="ml-auto text-[var(--ink3)] underline hover:text-[var(--ink)]"
+            onClick={() => {
+              setUsingPreset(false)
+              setPresetCols(undefined)
+              setSheetName('')
+              setHeaderRow(0)
+              setLastRow(0)
+            setTailFrom(0)
+              setIdColumn(0)
+            }}
+          >
+            設定を使わず最初から
+          </button>
+        </div>
+      )}
+
       {data && step === 0 && (
         <SourceStep
           data={data}
@@ -158,9 +273,17 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
           onSheet={(v) => {
             setSheetName(v)
             setHeaderRow(0)
+            setLastRow(0)
+            setTailFrom(0)
             setIdColumn(0)
+            // The saved mapping is by column position — it means nothing on
+            // another worksheet, so switching drops it.
+            setPresetCols(undefined)
+            setUsingPreset(false)
           }}
           onHeaderRow={setHeaderRow}
+          onLastRow={setLastRow}
+          onTailFrom={setTailFrom}
           idColumn={idColumn}
           onIdColumn={setIdColumn}
           note="ID列（薄い黄色）が既存のタスクと一致する行は上書き、無い行は新規追加になります。"
@@ -287,7 +410,22 @@ function PreviewStep({
       )
     }
   })
-  const skipped = src.columns.filter((c) => !c.target && c.index !== idColumn && c.header)
+  // 前回の設定が指していた列が、その後で改名・削除されたり参照(LOOKUP)列に
+  // 変わっていることがある。取り込みでは元々無視されるが、黙って減るのは困る。
+  src.columns.forEach((c) => {
+    if (c.lost_reason === 'lookup') {
+      warnings.push(
+        `「${c.header}」→「${c.lost_target}」は参照(LOOKUP)列のため取り込みません（値は自動計算されます）。`,
+      )
+    } else if (c.lost_reason === 'missing') {
+      warnings.push(
+        `「${c.header}」の取り込み先「${c.lost_target}」が見つかりません（列名が変わった可能性があります）。この列は取り込まれません。`,
+      )
+    }
+  })
+  const skipped = src.columns.filter(
+    (c) => !c.target && !c.lost_reason && c.index !== idColumn && c.header,
+  )
   if (skipped.length) {
     warnings.push(`取り込まない列：${skipped.map((c) => c.header).join('、')}`)
   }

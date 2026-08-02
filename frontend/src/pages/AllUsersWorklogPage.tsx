@@ -18,6 +18,10 @@ import type { UserDayWorkLog } from '@/types/api'
 
 const round1 = (x: number) => Math.round(x * 10) / 10
 
+/** Header cell pinned to the top of the scrolling card (見出しは常に表示). */
+const TH =
+  'sticky top-0 z-20 bg-[var(--surface)] px-4 py-2.5 font-medium shadow-[inset_0_-1px_0_var(--line)]'
+
 function todayIso(): string {
   return fmtISO(new Date())
 }
@@ -56,7 +60,9 @@ export function AllUsersWorklogPage() {
         actions={<WorklogExcelToolbar date={date} />}
       />
 
-      <div className="flex flex-col gap-3 overflow-auto px-[22px] pb-6">
+      {/* The card scrolls (not the page), so the date nav stays put and the
+          table header stays pinned while scrolling. */}
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden px-[22px] pb-6">
         {/* date nav */}
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => setDate(shiftIso(date, -1))}>
@@ -84,7 +90,7 @@ export function AllUsersWorklogPage() {
           </span>
         </div>
 
-        <Card>
+        <Card className="min-h-0 overflow-auto">
           <CardBody className="px-0 py-0">
             {q.isLoading ? (
               <TableSkeleton rows={6} cols={5} />
@@ -97,15 +103,15 @@ export function AllUsersWorklogPage() {
             ) : (
               <table className="w-full border-collapse text-[12.5px]">
                 <thead>
-                  <tr className="border-b border-[var(--line)] text-left text-[var(--ink3)]">
-                    <th className="px-4 py-2.5 font-medium">タスク</th>
+                  <tr className="text-left text-[var(--ink3)]">
+                    <th className={TH}>タスク</th>
                     {levels.map((l, i) => (
-                      <th key={l + i} className="px-4 py-2.5 font-medium">
+                      <th key={l + i} className={TH}>
                         {l}
                       </th>
                     ))}
-                    <th className="px-4 py-2.5 font-medium">メモ・詳細</th>
-                    <th className="px-4 py-2.5 text-right font-medium">時間(h)</th>
+                    <th className={TH}>メモ・詳細</th>
+                    <th className={`${TH} text-right`}>時間(h)</th>
                   </tr>
                 </thead>
                 <tbody>

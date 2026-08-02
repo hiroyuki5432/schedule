@@ -226,6 +226,11 @@ export interface ImportRowsColumn {
   target: string
   role: '' | 'attr' | 'week' | 'progress' | 'deps' | 'milestone'
   type: string
+  /** A target that was asked for but cannot be written — the column was renamed,
+   *  deleted, or turned into a 参照(LOOKUP) column (computed, never imported).
+   *  `target` is cleared in that case so the counts stay honest. */
+  lost_target: string
+  lost_reason: '' | 'lookup' | 'missing'
   /** Set when the header is an ISO week date (週次工数の列). */
   week_start: string | null
   filled: number
@@ -239,9 +244,15 @@ export interface ImportRowsInspection {
   sheet_name: string
   header_row: number
   suggested_header_row: number
+  /** Last worksheet row to take, 1-based inclusive; 0 = 最後まで. */
+  last_row: number
+  sheet_last_row: number
   id_column: number
   total_rows: number
+  /** Data rows below the header with NO cut applied. */
+  available_rows: number
   preview: { row: number; cells: string[] }[]
+  tail_preview: { row: number; cells: string[] }[]
   columns: ImportRowsColumn[]
   /** What an Excel column may be mapped onto (this sheet's columns + reserved). */
   targets: { key: string; label: string; type: string; role: string }[]
@@ -286,9 +297,15 @@ export interface ImportInspection {
   sheet_name: string
   header_row: number
   suggested_header_row: number
+  /** Last worksheet row to take, 1-based inclusive; 0 = 最後まで. */
+  last_row: number
+  sheet_last_row: number
   id_column: number
   total_rows: number
+  /** Data rows below the header with NO cut applied. */
+  available_rows: number
   preview: { row: number; cells: string[] }[]
+  tail_preview: { row: number; cells: string[] }[]
   columns: ImportColumnInfo[]
   blank_ids: number
   duplicate_ids: number
@@ -301,6 +318,10 @@ export interface ImportPlan {
   sheetName?: string
   /** 1-based; 0 = auto-detect. */
   headerRow?: number
+  /** Last worksheet row to take, 1-based inclusive; 0 = 最後まで（末尾の合計行・注記を切る）。 */
+  lastRow?: number
+  /** Open the tail preview at this row (1-based); 0 = auto (末尾). Inspect only. */
+  tailFrom?: number
   /** 0-based; -1 = no ID column (keys are auto-numbered). */
   idColumn?: number
   columns?: { index: number; name: string; type: ColumnType | '' }[]
@@ -313,6 +334,8 @@ function importForm(file: File, plan: Partial<ImportPlan>): FormData {
   if (plan.hasWeekGrid !== undefined) form.append('has_week_grid', String(plan.hasWeekGrid))
   if (plan.sheetName) form.append('sheet_name', plan.sheetName)
   if (plan.headerRow) form.append('header_row', String(plan.headerRow))
+  if (plan.lastRow) form.append('last_row', String(plan.lastRow))
+  if (plan.tailFrom) form.append('tail_from', String(plan.tailFrom))
   if (plan.idColumn !== undefined) form.append('id_column', String(plan.idColumn))
   if (plan.columns) form.append('columns', JSON.stringify(plan.columns))
   return form
@@ -353,6 +376,10 @@ export const exportWorklogXlsxUrl = (from: string, to: string) =>
 export interface WorklogImportPlan {
   sheetName?: string
   headerRow?: number
+  /** Last worksheet row to take, 1-based inclusive; 0 = 最後まで. */
+  lastRow?: number
+  /** Open the tail preview at this row (1-based); 0 = auto (末尾). Inspect only. */
+  tailFrom?: number
   mapping?: Record<string, number>
 }
 
@@ -370,8 +397,14 @@ export interface WorklogInspection {
   sheet_name: string
   header_row: number
   suggested_header_row: number
+  /** Last worksheet row to take, 1-based inclusive; 0 = 最後まで. */
+  last_row: number
+  sheet_last_row: number
   total_rows: number
+  /** Data rows below the header with NO cut applied. */
+  available_rows: number
   preview: { row: number; cells: string[] }[]
+  tail_preview: { row: number; cells: string[] }[]
   headers: string[]
   fields: WorklogImportField[]
   created: number
@@ -385,6 +418,8 @@ function worklogForm(file: File, plan: WorklogImportPlan): FormData {
   form.append('file', file)
   if (plan.sheetName) form.append('sheet_name', plan.sheetName)
   if (plan.headerRow) form.append('header_row', String(plan.headerRow))
+  if (plan.lastRow) form.append('last_row', String(plan.lastRow))
+  if (plan.tailFrom) form.append('tail_from', String(plan.tailFrom))
   if (plan.mapping) form.append('mapping', JSON.stringify(plan.mapping))
   return form
 }
@@ -423,6 +458,172 @@ export const updateWorkLog = (id: string, body: Partial<WorkLogInput>) =>
   http.patch<WorkLog>(`/api/worklog/${id}`, body)
 
 export const deleteWorkLog = (id: string) => http.del<void>(`/api/worklog/${id}`)
+
+// ---- Excel 取り込み設定（プリセット）と一括取り込み ----
+
+/** One saved 取り込み設定, keyed by the SOURCE worksheet's name. Written
+ *  automatically when a wizard finishes, so the careful first pass is the setup. */
+export interface ImportPreset {
+  id: number
+  name: string
+  worksheet_name: string
+  workbook_name: string
+  /** null = 取り込み時に新しいシートを作る（名前は target_sheet_name）。 */
+  target_sheet_id: number | null
+  target_sheet_name: string
+  has_week_grid: boolean
+  header_row: number
+  /** Last worksheet row to take, 1-based inclusive; 0 = 最後まで. */
+  last_row: number
+  id_column: number
+  mapping: { index: number; name: string; type: string }[]
+  updated_at: string
+  last_used_at: string | null
+}
+
+export interface ImportPresetSave {
+  worksheet_name: string
+  name?: string
+  workbook_name?: string
+  target_sheet_id?: number | null
+  target_sheet_name?: string
+  has_week_grid?: boolean
+  header_row?: number
+  last_row?: number
+  id_column?: number
+  mapping?: { index: number; name: string; type: ColumnType | '' }[]
+}
+
+export const getImportPresets = () => http.get<ImportPreset[]>('/api/import/presets')
+
+/** Create or refresh the setting for a worksheet (upsert by worksheet name). */
+export const saveImportPreset = (body: ImportPresetSave) =>
+  http.post<ImportPreset>('/api/import/presets', body as unknown as Record<string, unknown>)
+
+export const deleteImportPreset = (id: number) => http.del<void>(`/api/import/presets/${id}`)
+
+/** What one worksheet of a dropped workbook will do. `action` is 'skip' unless a
+ *  preset matched — dropping a book never silently creates a pile of sheets. */
+export interface WorkbookSheetPlan {
+  worksheet: string
+  sheet_rows: number
+  sheet_columns: number
+  preset_id: number | null
+  preset_updated_at: string | null
+  action: 'existing' | 'new' | 'skip'
+  target_sheet_id: number | null
+  target_sheet_name: string
+  has_week_grid: boolean
+  header_row: number
+  suggested_header_row: number
+  last_row: number
+  sheet_last_row: number
+  id_column: number
+  mapping: { index: number; name: string; type: string }[] | null
+  total_rows: number
+  available_rows: number
+  column_count: number
+  new_rows: number
+  updated_rows: number
+  blank_ids: number
+  duplicate_ids: number
+  invalid: number
+  warnings: string[]
+  /** Set when this worksheet could not be analysed at all (空シート等). */
+  error: string | null
+}
+
+export interface WorkbookInspection {
+  workbook_name: string
+  worksheets: WorkbookSheetPlan[]
+}
+
+/** What the 一括取り込み screen sends back — only the fields it changed. */
+export interface WorkbookPlanItem {
+  worksheet: string
+  action?: 'existing' | 'new' | 'skip'
+  target_sheet_id?: number | null
+  target_sheet_name?: string
+  has_week_grid?: boolean
+  header_row?: number
+  last_row?: number
+  id_column?: number
+  columns?: { index: number; name: string; type: ColumnType | '' }[]
+}
+
+function workbookForm(file: File, plan?: WorkbookPlanItem[], savePresets?: boolean): FormData {
+  const form = new FormData()
+  form.append('file', file)
+  if (plan) form.append('plan', JSON.stringify(plan))
+  if (savePresets !== undefined) form.append('save_presets', String(savePresets))
+  return form
+}
+
+/** Dry-run a whole workbook: every worksheet matched to its saved setting, with
+ *  新規/更新の件数 and warnings. Writes nothing. */
+export const inspectWorkbook = (file: File, plan?: WorkbookPlanItem[]) =>
+  postForm<WorkbookInspection>('/api/import/workbook/inspect', workbookForm(file, plan))
+
+/** Import every non-skipped worksheet in ONE transaction (どれか失敗したら全部取消). */
+export const importWorkbook = (file: File, plan: WorkbookPlanItem[], savePresets = true) =>
+  postForm<{
+    results: {
+      worksheet: string
+      sheet_id: number
+      name: string
+      header_row: number
+      columns: number
+      created: number
+      updated: number
+    }[]
+    created: number
+    updated: number
+  }>('/api/import/workbook', workbookForm(file, plan, savePresets))
+
+// ---- バックアップ / リストア (グループ管理・管理者のみ) ----
+
+/** One stored snapshot. The payload itself is not sent here (it is the whole
+ *  group and can be many MB) — use the download URL for that. */
+export interface Backup {
+  id: number
+  label: string
+  format_version: number
+  /** Row counts per table: sheets / rows / work_logs / members … */
+  summary: Record<string, number>
+  size_bytes: number
+  created_at: string
+  created_by_name: string
+}
+
+export interface RestoreResult {
+  restored_from: string
+  counts: Record<string, number>
+  /** Backup taken automatically just before the restore — the way back. */
+  safety_backup_id: number
+  /** True when the restored data has no account for the current user, i.e. this
+   *  session is now invalid and the next request will bounce to the login page. */
+  signed_out: boolean
+}
+
+export const getBackups = () => http.get<Backup[]>('/api/backups')
+
+export const createBackup = (label?: string) =>
+  http.post<Backup>('/api/backups', { label: label ?? '' })
+
+export const deleteBackup = (id: number) => http.del<void>(`/api/backups/${id}`)
+
+export const backupDownloadUrl = (id: number) => `/api/backups/${id}/download`
+
+/** Put the group back to this backup's state — everything, settings included. */
+export const restoreBackup = (id: number) =>
+  http.post<RestoreResult>(`/api/backups/${id}/restore`)
+
+/** Restore from a previously downloaded .json (the path back after losing the DB). */
+export const restoreBackupFile = (file: File) => {
+  const form = new FormData()
+  form.append('file', file)
+  return postForm<RestoreResult>('/api/backups/restore-file', form)
+}
 
 // ---- Notifications (アプリ内通知・ベル) ----
 export const getNotifications = () => http.get<Notification[]>('/api/notifications')

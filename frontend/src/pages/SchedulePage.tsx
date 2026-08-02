@@ -9,6 +9,7 @@ import { useEffortMutation } from '@/hooks/useEffortMutation'
 import { useEffortBulkMutation } from '@/hooks/useEffortBulkMutation'
 import type { BulkEffortEdit } from '@/hooks/useEffortBulkMutation'
 import { useRowMutation } from '@/hooks/useRowMutation'
+import { useLookupTargets } from '@/hooks/useLookupTargets'
 import { useUndo, useUndoHotkeys } from '@/hooks/useUndo'
 import type { UndoDirection } from '@/hooks/useUndo'
 import * as api from '@/api/client'
@@ -18,13 +19,15 @@ import { Legend } from '@/components/schedule/Legend'
 import { MilestoneEditor } from '@/components/schedule/MilestoneEditor'
 import { DependencyEditor } from '@/components/schedule/DependencyEditor'
 import { HistoryPanel } from '@/components/schedule/HistoryPanel'
+import { RecordModal } from '@/components/RecordModal'
+import { DefaultViewButton, SearchBox } from '@/components/ViewControls'
 import { GridSkeleton } from '@/components/ui/Skeleton'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { SaveStatus } from '@/components/SaveStatus'
 import { Button } from '@/components/ui/Button'
 import { Avatar } from '@/components/ui/Avatar'
 import { Input } from '@/components/ui/Input'
-import { PlusIcon, SearchIcon, XIcon } from '@/components/ui/icons'
+import { PlusIcon, XIcon } from '@/components/ui/icons'
 import { useAuth } from '@/hooks/useAuth'
 import { buildColFilterOptions, matchColFilter } from '@/lib/colFilter'
 import type { ColFilter } from '@/lib/colFilter'
@@ -102,6 +105,9 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   // Not persisted — always resume at today.
   const [asOfOffset, setAsOfOffset] = useState(0)
   const [milestoneRow, setMilestoneRow] = useState<Row | null>(null)
+  // Full-record view opened from a row's 開く (全項目の編集＋そのタスクの変更履歴).
+  // Held by id so the modal keeps showing fresh data across refetches.
+  const [recordRowId, setRecordRowId] = useState<string | null>(null)
   const [depRow, setDepRow] = useState<Row | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [showDepLines, setShowDepLines] = usePersistentState(k('showDepLines'), false)
@@ -230,12 +236,22 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   const filtersActive =
     search.trim() !== '' || hideDone || thisWeekOnly || anyColFilter
 
+  // Rows added in this session. A brand-new row is empty, so it matches almost no
+  // filter and vanishes the instant it is created — you press 新規行 and nothing
+  // happens (要望). Keeping just these visible lets you fill the row in and have
+  // it settle into the filter naturally; a reload or clearing the filter drops the
+  // exemption.
+  const [newRowIds, setNewRowIds] = useState<string[]>([])
+  useEffect(() => setNewRowIds([]), [sheetId])
+  const keptNew = useMemo(() => new Set(newRowIds), [newRowIds])
+
   const visibleRows = useMemo(() => {
     if (!filtersActive) return grid.rows
     const q = search.trim().toLowerCase()
     const colById = new Map(grid.columns.map((c) => [String(c.id), c]))
     const colEntries = Object.entries(colFilters)
     const match = (r: (typeof grid.rows)[number]) => {
+      if (keptNew.has(String(r.row.id))) return true
       for (const [colId, f] of colEntries) {
         const col = colById.get(String(colId))
         // Row passes only if its resolved value satisfies the column filter.
@@ -270,6 +286,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     currentWeekIdx,
     resolveColValue,
     isRowDone,
+    keptNew,
   ])
 
   // True when the viewed past week has no recorded snapshot and we're showing the
@@ -474,6 +491,12 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     }
   }
 
+  // Raw rows + the lookup resolver the record modal needs (the grid keeps its own
+  // copies internally, but the modal is rendered by this page).
+  const rawRows = useMemo(() => grid.rows.map((m) => m.row), [grid.rows])
+  const recordRow = rawRows.find((r) => String(r.id) === recordRowId) ?? null
+  const { lookupValue } = useLookupTargets(grid.columns, members)
+
   // Candidate predecessor tasks for the dependency picker.
   const depCandidates = useMemo(
     () => grid.rows.map((r) => ({ id: r.row.id, key_value: r.keyValue, title: r.title })),
@@ -483,7 +506,11 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   function newRow() {
     api
       .createRow(sheetId, { data: {} })
-      .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
+      .then((r) => {
+        // Exempt it from the active filters so it does not disappear on creation.
+        setNewRowIds((prev) => [...prev, String(r.id)])
+        return qc.invalidateQueries({ queryKey: ['sheet', sheetId] })
+      })
       .catch(() => {
         /* surfaced via grid reload; TODO: toast on failure */
       })
@@ -498,7 +525,10 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
       data[memberCol.id] = parentRow.data[memberCol.id]
     api
       .createChildRow(parentRow.id, { data })
-      .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
+      .then((r) => {
+        setNewRowIds((prev) => [...prev, String(r.id)])
+        return qc.invalidateQueries({ queryKey: ['sheet', sheetId] })
+      })
       .catch(() => {
         /* TODO: toast on failure */
       })
@@ -754,24 +784,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           </button>
 
           {/* full-text search (all columns) */}
-          <div className="flex items-center gap-1 rounded-[9px] border border-[var(--line)] bg-[var(--surface)] px-2">
-            <SearchIcon className="h-[14px] w-[14px] flex-shrink-0 text-[var(--ink3)]" />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="検索（全列）"
-              className="w-[150px] bg-transparent py-1.5 text-[12px] outline-none"
-            />
-            {search && (
-              <button
-                onClick={() => setSearch('')}
-                className="flex-shrink-0 text-[var(--ink3)] hover:text-[var(--ink)]"
-                title="検索クリア"
-              >
-                <XIcon className="h-[14px] w-[14px]" />
-              </button>
-            )}
-          </div>
+          <SearchBox value={search} onChange={setSearch} />
 
           {/* Active-filter indicator + clear-all (絞り込みは各列の見出しから) */}
           {anyColFilter && (
@@ -782,6 +795,17 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             >
               絞り込み {visibleRows.length}/{grid.rows.length}
               <XIcon className="h-[13px] w-[13px]" />
+            </button>
+          )}
+          {/* Say WHY a row that does not match is on screen, so the count and the
+              grid never look like they disagree. */}
+          {filtersActive && newRowIds.length > 0 && (
+            <button
+              onClick={() => setNewRowIds([])}
+              title="追加した行の常時表示をやめる（絞り込みに合わない行は隠れます）"
+              className="rounded-[9px] border border-[var(--line)] bg-[var(--surface)] px-2.5 py-1.5 text-[12px] text-[var(--ink2)] hover:bg-[var(--line2)]"
+            >
+              追加した {newRowIds.length} 行を表示中 ×
             </button>
           )}
 
@@ -888,6 +912,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             onEditRowCell={saveRowCell}
             onEditRowKey={saveRowKey}
             onEditMilestones={setMilestoneRow}
+            onOpenRecord={(r) => setRecordRowId(String(r.id))}
             onAddChild={addChild}
             onEditProgress={saveProgress}
             onEditDeps={setDepRow}
@@ -919,6 +944,23 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
         />
       )}
 
+      {recordRow && (
+        <RecordModal
+          row={recordRow}
+          columns={grid.columns}
+          members={members}
+          rows={rawRows}
+          lookupValue={lookupValue}
+          onClose={() => setRecordRowId(null)}
+          onSaveCell={(colId, v) => rowMut.mutate({ row: recordRow, patch: { [colId]: v } })}
+          onSaveKey={(v) => saveRowKey(recordRow, v)}
+          onDelete={() => {
+            setRecordRowId(null)
+            deleteRow(recordRow)
+          }}
+        />
+      )}
+
       {historyOpen && (
         <HistoryPanel
           scope={{ kind: 'sheet', sheetId, name: sheetName }}
@@ -929,84 +971,6 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   )
 }
 
-/** 既定の表示 control: the main button restores the saved filter/sort (or clears
- *  everything when none is saved); the ▾ half saves the current view as the
- *  default or deletes it. Saved per sheet, in this browser. */
-function DefaultViewButton({
-  hasDefault,
-  onReset,
-  onSave,
-  onClear,
-}: {
-  hasDefault: boolean
-  onReset: () => void
-  onSave: () => void
-  onClear: () => void
-}) {
-  const [open, setOpen] = useState(false)
-  const wrapRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const onDown = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [open])
-
-  const item =
-    'block w-full whitespace-nowrap px-3 py-1.5 text-left text-[12px] text-[var(--ink2)] hover:bg-[var(--line2)] disabled:opacity-40 disabled:hover:bg-transparent'
-
-  return (
-    <div ref={wrapRef} className="relative">
-      <div className="flex items-center overflow-hidden rounded-[9px] border border-[var(--line)] bg-[var(--surface)]">
-        <button
-          onClick={onReset}
-          title={
-            hasDefault
-              ? 'この画面の絞り込み・並べ替えを、保存した既定に戻す'
-              : '絞り込み・並べ替えをすべて解除（「今の表示を既定にする」で既定を登録できます）'
-          }
-          className="px-3 py-1.5 text-[12px] text-[var(--ink2)] hover:bg-[var(--line2)]"
-        >
-          既定に戻す
-        </button>
-        <button
-          onClick={() => setOpen((o) => !o)}
-          title="既定の表示を設定"
-          aria-label="既定の表示メニュー"
-          className="border-l border-[var(--line)] px-2 py-1.5 text-[10px] leading-none text-[var(--ink3)] hover:bg-[var(--line2)]"
-        >
-          ▾
-        </button>
-      </div>
-      {open && (
-        <div className="absolute right-0 z-50 mt-1 overflow-hidden rounded-[10px] border border-[var(--line)] bg-[var(--surface)] py-1 shadow-lg">
-          <button
-            className={item}
-            onClick={() => {
-              setOpen(false)
-              onSave()
-            }}
-          >
-            今の表示を既定にする
-          </button>
-          <button
-            className={item}
-            disabled={!hasDefault}
-            onClick={() => {
-              setOpen(false)
-              onClear()
-            }}
-          >
-            既定を削除
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
 
 // (sheet title editor below)
 /** Inline-editable sheet title in the top bar. */

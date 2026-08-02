@@ -25,6 +25,8 @@ export function ImportWorklogWizard({ file, onClose }: Props) {
   const [step, setStep] = useState(0)
   const [sheetName, setSheetName] = useState('')
   const [headerRow, setHeaderRow] = useState(0)
+  const [lastRow, setLastRow] = useState(0) // 0 = 最後まで
+  const [tailFrom, setTailFrom] = useState(0) // 0 = 末尾から自動
   /** field key → Excel column index (-1 = 使わない). Seeded from the auto-match. */
   const [mapping, setMapping] = useState<Record<string, number>>({})
   const [error, setError] = useState<string | null>(null)
@@ -32,8 +34,8 @@ export function ImportWorklogWizard({ file, onClose }: Props) {
   const fileKey = `${file.name}:${file.size}:${file.lastModified}`
 
   const insp = useQuery({
-    queryKey: ['worklog-inspect', fileKey, sheetName, headerRow],
-    queryFn: () => api.inspectWorklogXlsx(file, { sheetName, headerRow }),
+    queryKey: ['worklog-inspect', fileKey, sheetName, headerRow, lastRow, tailFrom],
+    queryFn: () => api.inspectWorklogXlsx(file, { sheetName, headerRow, lastRow, tailFrom }),
     staleTime: Infinity,
     retry: false,
   })
@@ -47,8 +49,8 @@ export function ImportWorklogWizard({ file, onClose }: Props) {
 
   // Dry run with the user's own mapping — the numbers shown are the real outcome.
   const check = useQuery({
-    queryKey: ['worklog-check', fileKey, sheetName, headerRow, JSON.stringify(mapping)],
-    queryFn: () => api.inspectWorklogXlsx(file, { sheetName, headerRow, mapping }),
+    queryKey: ['worklog-check', fileKey, sheetName, headerRow, lastRow, JSON.stringify(mapping)],
+    queryFn: () => api.inspectWorklogXlsx(file, { sheetName, headerRow, lastRow, mapping }),
     enabled: step === 2 && Object.keys(mapping).length > 0,
     staleTime: Infinity,
     retry: false,
@@ -59,6 +61,7 @@ export function ImportWorklogWizard({ file, onClose }: Props) {
       const r = await api.importWorklogXlsx(file, {
         sheetName: insp.data?.sheet_name,
         headerRow: insp.data?.header_row,
+        lastRow,
         mapping,
       })
       await Promise.all([
@@ -85,7 +88,10 @@ export function ImportWorklogWizard({ file, onClose }: Props) {
   const missingRequired = (data?.fields ?? []).filter(
     (f) => f.required && (mapping[f.key] ?? -1) < 0,
   )
-  const dataPreview = (data?.preview ?? []).filter((r) => r.row > (data?.header_row ?? 0))
+  const dataPreview = (data?.preview ?? []).filter(
+    (r) =>
+      r.row > (data?.header_row ?? 0) && (!data?.last_row || r.row <= data.last_row),
+  )
 
   return (
     <WizardShell
@@ -120,8 +126,12 @@ export function ImportWorklogWizard({ file, onClose }: Props) {
           onSheet={(v) => {
             setSheetName(v)
             setHeaderRow(0)
+            setLastRow(0)
+            setTailFrom(0)
           }}
           onHeaderRow={setHeaderRow}
+          onLastRow={setLastRow}
+          onTailFrom={setTailFrom}
           note="日報は毎行が新規追加です（同じ内容の行は重複として自動でスキップされます）。"
         />
       )}

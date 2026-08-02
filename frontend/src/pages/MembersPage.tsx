@@ -11,6 +11,8 @@ import { Select } from '@/components/ui/Select'
 import { Badge } from '@/components/ui/Badge'
 import { Avatar } from '@/components/ui/Avatar'
 import { TableSkeleton } from '@/components/ui/Skeleton'
+import { ImportWorkbookDialog } from '@/components/import/ImportWorkbookDialog'
+import { BackupCard } from '@/components/BackupCard'
 import { ApiError } from '@/lib/http'
 import { cn } from '@/lib/format'
 import { toast } from '@/lib/toast'
@@ -70,6 +72,10 @@ export function MembersPage() {
 
       <div className="flex flex-col gap-4 overflow-auto px-[22px] pb-6">
         {isAdmin && <GroupSettingsCard />}
+
+        {isAdmin && <BulkImportCard />}
+
+        {isAdmin && <BackupCard />}
 
         {isAdmin && <OrgDataDangerCard />}
 
@@ -324,6 +330,34 @@ function GroupSettingsCard() {
           </Button>
         </div>
       </CardBody>
+    </Card>
+  )
+}
+
+/** Admin-only entry point for the ブック一括取り込み.
+ *
+ *  It lives here rather than in the sidebar on purpose: it is a setup/maintenance
+ *  action run a handful of times, not daily navigation, and it sits next to the
+ *  「全データ削除」 it is usually paired with (消してから入れ直す). */
+function BulkImportCard() {
+  const [open, setOpen] = useState(false)
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Excel一括取り込み</CardTitle>
+      </CardHeader>
+      <CardBody>
+        <p className="mb-3 text-[12.5px] leading-relaxed text-[var(--ink2)]">
+          .xlsx を1つ選ぶと、ブック内のワークシートをまとめて取り込めます。前に取り込んだ
+          ことのあるワークシートは、そのときの設定（見出し行・最終行・列の対応・取り込み先
+          シート）が自動で使われるので、2回目以降はファイルを選んで実行するだけです。
+          取り込みは一括で1回のみ確定し、途中で失敗したときは全部取り消されます。
+        </p>
+        <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
+          Excelブックを取り込む
+        </Button>
+      </CardBody>
+      {open && <ImportWorkbookDialog onClose={() => setOpen(false)} />}
     </Card>
   )
 }

@@ -18,6 +18,10 @@ interface Props {
   sortDir: SortDir | null
   /** ID / summary columns are sort-only (no filter section). */
   filterable: boolean
+  /** Hide the sort buttons. The table view puts sorting on the header TITLE and
+   *  uses this menu for filtering only, so showing them here would be a second,
+   *  redundant control (要望: タイトルクリックはソート、右の点で絞り込み). */
+  sortable?: boolean
   /** The header cell the menu anchors to (for positioning + outside-click). */
   anchorRef: RefObject<HTMLElement>
   onSort: (dir: SortDir | null) => void
@@ -40,6 +44,7 @@ export function ColumnHeaderMenu({
   filter,
   sortDir,
   filterable,
+  sortable = true,
   anchorRef,
   onSort,
   onFilter,
@@ -113,21 +118,23 @@ export function ColumnHeaderMenu({
       </div>
 
       {/* Sort — applied immediately (Excel behaviour). */}
-      <div className="mb-1 flex flex-shrink-0 gap-1">
-        <SortBtn active={sortDir === 'asc'} onClick={() => onSort('asc')}>
-          ▲ 昇順
-        </SortBtn>
-        <SortBtn active={sortDir === 'desc'} onClick={() => onSort('desc')}>
-          ▼ 降順
-        </SortBtn>
-        <SortBtn active={false} disabled={!sortDir} onClick={() => onSort(null)}>
-          解除
-        </SortBtn>
-      </div>
+      {sortable && (
+        <div className="mb-1 flex flex-shrink-0 gap-1">
+          <SortBtn active={sortDir === 'asc'} onClick={() => onSort('asc')}>
+            ▲ 昇順
+          </SortBtn>
+          <SortBtn active={sortDir === 'desc'} onClick={() => onSort('desc')}>
+            ▼ 降順
+          </SortBtn>
+          <SortBtn active={false} disabled={!sortDir} onClick={() => onSort(null)}>
+            解除
+          </SortBtn>
+        </div>
+      )}
 
       {filterable && (
         <>
-          <div className="my-2 flex-shrink-0 border-t border-[var(--line2)]" />
+          {sortable && <div className="my-2 flex-shrink-0 border-t border-[var(--line2)]" />}
           {/* min-h-0 lets this flex child actually shrink so its own overflow
               scrolls instead of pushing the OK row out of the menu. */}
           <div className="min-h-0 flex-1 overflow-y-auto">

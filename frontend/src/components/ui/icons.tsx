@@ -88,6 +88,13 @@ export const TrashIcon = (p: P) => (
   </svg>
 )
 
+/** Open-in-panel: the per-row 「開く」 affordance in the table view. */
+export const ExpandIcon = (p: P) => (
+  <svg {...svg(p)}>
+    <path d="M15 3h6v6M21 3l-8 8M9 21H3v-6M3 21l8-8" />
+  </svg>
+)
+
 export const DiamondIcon = (p: P) => (
   <svg {...svg(p)}>
     <path d="M12 3l9 9-9 9-9-9z" />

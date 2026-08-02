@@ -348,7 +348,9 @@ def _coerce_attr(column: Column, raw, members_by_name: dict[str, int]):
         if isinstance(raw, (datetime, date)):
             return raw.date().isoformat() if isinstance(raw, datetime) else raw.isoformat()
         return str(raw).strip()
-    return str(raw).strip()
+    # Alt+Enter line breaks inside a cell are kept — only the line ENDINGS are
+    # normalised (要望: セル内の改行が1行になってしまう).
+    return xlsx.normalize_text(str(raw)).strip()
 
 
 def _parse_week_header(raw) -> date | None:
@@ -390,6 +392,7 @@ def import_xlsx(
     file: UploadFile,
     sheet_name: str = Form(default=""),
     header_row: int = Form(default=0),
+    last_row: int = Form(default=0),
     id_column: int = Form(default=0),
     columns: str = Form(default=""),
     user: User = Depends(current_user),
@@ -400,18 +403,43 @@ def import_xlsx(
     With no wizard fields this behaves exactly as before: the active worksheet,
     row 1 as the header, column A as the ID, every header matched to a column of
     the same name. The 取り込みウィザード instead passes `sheet_name` /
-    `header_row` / `id_column` and `columns` — a JSON list of
+    `header_row` / `last_row` / `id_column` and `columns` — a JSON list of
     ``[{"index": 2, "name": "件名"}]`` mapping an Excel column to the sheet column
-    (or reserved header) it should be written into.
+    (or reserved header) it should be written into. `last_row` is the last
+    worksheet row to take (0 = 最後まで), for sheets that end in a 合計行 or notes.
     """
     sheet = get_sheet_for_user(db, sheet_id, user)
     ensure_schedule_columns(db, sheet)
     mapping = _parse_selection(columns)
-    if mapping is None and not sheet_name and header_row <= 0 and id_column == 0:
+    if mapping is None and not sheet_name and header_row <= 0 and last_row <= 0 and id_column == 0:
         _ws, header, rows_iter = _load_active_sheet(file)
         return _import_rows(db, user, sheet, header, rows_iter)
 
-    _wb, _ws, _grid, _hr, header, data_rows = xlsx.read_source(file, sheet_name, header_row)
+    _wb, _ws, _grid, _hr, header, data_rows = xlsx.read_source(
+        file, sheet_name, header_row, last_row
+    )
+    result = import_rows_with_mapping(db, user, sheet, header, data_rows, id_column, mapping)
+    result.pop("selection", None)  # internal — only the 一括取り込み needs it
+    return result
+
+
+def import_rows_with_mapping(
+    db: Session,
+    user: User,
+    sheet: Sheet,
+    header: tuple,
+    data_rows: list[tuple],
+    id_column: int,
+    mapping: list[dict] | None,
+    commit: bool = True,
+) -> dict:
+    """Upsert `data_rows` into an existing sheet through the wizard's column mapping.
+
+    `mapping` is [{index, name}] — the Excel column and the sheet column (or
+    reserved header) it goes into. None falls back to "every named column, matched
+    by its own header". Shared with the 一括取り込み, which imports many worksheets
+    inside one transaction (hence `commit`).
+    """
     if mapping is None:
         mapping = [
             {"index": i, "name": _cell_text(h), "type": ""}
@@ -425,7 +453,17 @@ def import_xlsx(
     ]
     kept = [it for it in kept if it["label"]]
     out_header, out_rows = _synthesize(data_rows, kept, id_column)
-    return _import_rows(db, user, sheet, out_header, iter(out_rows))
+    return {
+        **_import_rows(db, user, sheet, out_header, iter(out_rows), commit=commit),
+        # The mapping actually used — with `mapping=None` the defaults were filled
+        # in here, and a preset has to remember those, not the None.
+        "selection": _effective_selection(kept),
+    }
+
+
+def _effective_selection(kept: list[dict]) -> list[dict]:
+    """The resolved picks in the `[{index, name, type}]` shape a preset stores."""
+    return [{"index": it["index"], "name": it["label"], "type": it.get("type") or ""} for it in kept]
 
 
 @router.post("/{sheet_id}/import.xlsx/inspect")
@@ -434,6 +472,8 @@ def inspect_import_rows_xlsx(
     file: UploadFile,
     sheet_name: str = Form(default=""),
     header_row: int = Form(default=0),
+    last_row: int = Form(default=0),
+    tail_from: int = Form(default=0),
     id_column: int = Form(default=0),
     columns: str = Form(default=""),
     user: User = Depends(current_user),
@@ -441,17 +481,56 @@ def inspect_import_rows_xlsx(
 ) -> dict:
     """Analyse an .xlsx against an EXISTING sheet without writing anything.
 
-    Returns the worksheets, the guessed 見出し行, a raw preview, the possible
-    targets (this sheet's columns + the reserved schedule headers) with the
-    proposed mapping per Excel column, how many rows would be 新規/更新, and how
-    many values would not survive the conversion. Pass `columns` to re-check
-    against the user's own mapping before committing.
+    Returns the worksheets, the guessed 見出し行, a head AND tail preview (the rows
+    to cut off are at the bottom), the possible targets (this sheet's columns + the
+    reserved schedule headers) with the proposed mapping per Excel column, how many
+    rows would be 新規/更新, and how many values would not survive the conversion.
+    Pass `columns` to re-check against the user's own mapping before committing.
     """
     sheet = get_sheet_for_user(db, sheet_id, user)
     ensure_schedule_columns(db, sheet)
-    wb, ws, grid, hr, header, data_rows = xlsx.read_source(file, sheet_name, header_row)
-    suggested = _auto_header_row(grid)
+    wb, ws, grid, hr, header, data_rows = xlsx.read_source(
+        file, sheet_name, header_row, last_row
+    )
+    cols, targets = row_target_info(
+        db, user, sheet, header, data_rows, id_column, _parse_selection(columns)
+    )
+    return {
+        "worksheets": xlsx.worksheets_of(wb),
+        "sheet_name": ws.title,
+        "header_row": hr,
+        "suggested_header_row": _auto_header_row(grid),
+        "last_row": last_row,
+        "sheet_last_row": len(grid),
+        "id_column": id_column,
+        "total_rows": len(data_rows),
+        # Rows below the header with NO cut, so the UI can say how many the 最終行
+        # setting is excluding.
+        "available_rows": xlsx.data_row_total(grid, hr),
+        "preview": xlsx.preview_of(grid),
+        "tail_preview": xlsx.tail_preview_of(grid, hr, tail_from, last_row),
+        "columns": cols,
+        "targets": targets,
+        **upsert_counts(db, sheet, data_rows, id_column),
+    }
 
+
+def row_target_info(
+    db: Session,
+    user: User,
+    sheet: Sheet,
+    header: tuple,
+    data_rows: list[tuple],
+    id_column: int,
+    chosen: list[dict] | None,
+) -> tuple[list[dict], list[dict]]:
+    """(per-Excel-column info, the targets it may be mapped onto) for an EXISTING
+    sheet: the proposed/chosen target, the role and type it lands as, sample values
+    and how many cells would not survive the conversion.
+
+    Shared by the 既存シート wizard and the 一括取り込み dry-run, so both agree on
+    what a saved mapping actually does.
+    """
     sheet_columns = list(
         db.execute(
             select(Column).where(Column.sheet_id == sheet.id).order_by(Column.order, Column.id)
@@ -476,7 +555,6 @@ def inspect_import_rows_xlsx(
             {"key": lb, "label": lb, "type": "date", "role": "milestone"} for lb in ms_labels
         ]
 
-    chosen = _parse_selection(columns)
     by_index = {it["index"]: it for it in (chosen or [])}
 
     cols: list[dict] = []
@@ -500,7 +578,24 @@ def inspect_import_rows_xlsx(
         else:
             target = ""
 
+        # A chosen target the importer would NOT actually write has to stop being a
+        # target here, or the dry run promises a column that silently goes nowhere.
+        # Both cases show up after a sheet is edited post-import: the column was
+        # renamed/deleted, or it was turned into a 参照(LOOKUP) column (computed —
+        # `_import_rows` skips those by design, see `attr_at`).
         col = col_by_name.get(target)
+        lost_target, lost_reason = "", ""
+        if target and col is not None and col.type == "lookup":
+            lost_target, lost_reason, target, col = target, "lookup", "", None
+        elif (
+            target
+            and col is None
+            and target not in (PROGRESS_HEADER, DEPS_HEADER)
+            and target not in ms_labels
+            and _parse_week_header(raw_name) is None
+        ):
+            lost_target, lost_reason, target = target, "missing", ""
+
         week = _parse_week_header(raw_name) if sheet.has_week_grid else None
         if col is not None:
             role, ctype = "attr", col.type
@@ -522,6 +617,10 @@ def inspect_import_rows_xlsx(
                 "target": target,
                 "role": role,
                 "type": ctype,
+                # The target that was asked for but cannot be written, and why
+                # ('lookup' | 'missing'). Empty when nothing was lost.
+                "lost_target": lost_target,
+                "lost_reason": lost_reason,
                 # Week columns can only be kept or dropped — the date IS the target.
                 "week_start": week.isoformat() if week is not None else None,
                 "filled": len(filled),
@@ -530,8 +629,12 @@ def inspect_import_rows_xlsx(
                 "invalid_samples": bad[:_SAMPLE_LIMIT] if target else [],
             }
         )
+    return cols, targets
 
-    # How many rows land on an existing task vs create a new one.
+
+def upsert_counts(db: Session, sheet: Sheet, data_rows: list[tuple], id_column: int) -> dict:
+    """How many rows would land on an existing task vs create a new one, plus the
+    blank/duplicate ID counts the preview warns about."""
     existing_keys = {
         k
         for k in db.execute(select(Row.key_value).where(Row.sheet_id == sheet.id)).scalars()
@@ -554,17 +657,7 @@ def inspect_import_rows_xlsx(
             created += 1
     if id_column < 0:
         created = len(data_rows)
-
     return {
-        "worksheets": xlsx.worksheets_of(wb),
-        "sheet_name": ws.title,
-        "header_row": hr,
-        "suggested_header_row": suggested,
-        "id_column": id_column,
-        "total_rows": len(data_rows),
-        "preview": xlsx.preview_of(grid),
-        "columns": cols,
-        "targets": targets,
         "new_rows": created,
         "updated_rows": updated,
         "blank_ids": blank_ids,
@@ -572,8 +665,11 @@ def inspect_import_rows_xlsx(
     }
 
 
-def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter) -> dict:
-    """Upsert rows (by ID) from an already-opened worksheet into `sheet`."""
+def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter, commit: bool = True) -> dict:
+    """Upsert rows (by ID) from an already-opened worksheet into `sheet`.
+
+    `commit=False` leaves the transaction open so the 一括取り込み can write every
+    worksheet of a workbook as one all-or-nothing operation."""
     columns = list(
         db.execute(
             select(Column).where(Column.sheet_id == sheet.id).order_by(Column.order, Column.id)
@@ -748,7 +844,10 @@ def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter) -> di
         for r, keys in deps_to_resolve:
             r.depends_on = [keymap[k] for k in keys if k in keymap]
 
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return {"created": created, "updated": updated}
 
 
@@ -805,6 +904,10 @@ def _infer_type(values: list, member_names: set[str]) -> tuple[str, dict]:
         return "date", {}
     if all(_looks_numeric(v) for v in vals):
         return "number", {}
+    # A cell filled in with Alt+Enter needs the 複数行入力 editor, or the grid's
+    # single-line <input> flattens it on the first click. Never a pick-list either.
+    if any("\n" in s for s in strs):
+        return "text", {"multiline": True}
     # Every value naming an org member → 担当者 column.
     if member_names and all(s in member_names for s in strs):
         return "member", {}
@@ -834,6 +937,11 @@ def _synthesize(
         for r in data_rows
     ]
     return out_header, out_rows
+
+
+def _has_newline(values: list) -> bool:
+    """Any sample value spans more than one line (Excel の Alt+Enter)."""
+    return any("\n" in str(v) for v in values if not _is_blank(v))
 
 
 def _dropdown_config(values: list) -> dict:
@@ -921,6 +1029,8 @@ def inspect_import_xlsx(
     file: UploadFile,
     sheet_name: str = Form(default=""),
     header_row: int = Form(default=0),
+    last_row: int = Form(default=0),
+    tail_from: int = Form(default=0),
     id_column: int = Form(default=0),
     has_week_grid: bool = Form(default=True),
     columns: str = Form(default=""),
@@ -929,17 +1039,47 @@ def inspect_import_xlsx(
 ) -> dict:
     """Analyse an .xlsx without writing anything — the 取り込みウィザード's data source.
 
-    Returns the workbook's worksheets, a raw preview of the chosen one (for picking
-    the 見出し行 / ID列), and one entry per header column: its role on a schedule
-    sheet, the guessed type, sample values and how many cells would NOT survive the
-    conversion. Pass `columns` (the same JSON the import takes) to re-check the
-    counts against the user's own choices before committing.
+    Returns the workbook's worksheets, a head AND tail preview of the chosen one
+    (for picking the 見出し行 / ID列 / 最終行), and one entry per header column: its
+    role on a schedule sheet, the guessed type, sample values and how many cells
+    would NOT survive the conversion. Pass `columns` (the same JSON the import
+    takes) to re-check the counts against the user's own choices before committing.
     """
-    wb, ws, grid, hr, header, data_rows = xlsx.read_source(file, sheet_name, header_row)
-    suggested = _auto_header_row(grid)
+    wb, ws, grid, hr, header, data_rows = xlsx.read_source(
+        file, sheet_name, header_row, last_row
+    )
+    return {
+        "worksheets": xlsx.worksheets_of(wb),
+        "sheet_name": ws.title,
+        "header_row": hr,
+        "suggested_header_row": _auto_header_row(grid),
+        "last_row": last_row,
+        "sheet_last_row": len(grid),
+        "id_column": id_column,
+        "total_rows": len(data_rows),
+        "available_rows": xlsx.data_row_total(grid, hr),
+        "tail_preview": xlsx.tail_preview_of(grid, hr, tail_from, last_row),
+        "preview": xlsx.preview_of(grid),
+        "columns": new_sheet_column_info(
+            db, user, header, data_rows, id_column, has_week_grid, _parse_selection(columns)
+        ),
+        **id_column_counts(data_rows, id_column),
+    }
 
+
+def new_sheet_column_info(
+    db: Session,
+    user: User,
+    header: tuple,
+    data_rows: list[tuple],
+    id_column: int,
+    has_week_grid: bool,
+    chosen: list[dict] | None,
+) -> list[dict]:
+    """Per-Excel-column analysis for a BRAND NEW sheet: the role the header plays,
+    the guessed (or chosen) column type, sample values, inferred dropdown options
+    and how many cells would not convert. Shared with the 一括取り込み dry-run."""
     member_names = set(_members_by_name(db, user.org_id).keys())
-    chosen = _parse_selection(columns)
     by_index = {it["index"]: it for it in (chosen or [])}
 
     cols: list[dict] = []
@@ -976,7 +1116,12 @@ def inspect_import_xlsx(
                 "invalid_samples": bad[:_SAMPLE_LIMIT],
             }
         )
+    return cols
 
+
+def id_column_counts(data_rows: list[tuple], id_column: int) -> dict:
+    """Blank / duplicate ID counts — the warnings a NEW sheet's preview shows (every
+    row is new there, so there is nothing to count as 更新)."""
     ids = [
         _cell_text(r[id_column]) if 0 <= id_column < len(r) else "" for r in data_rows
     ] if id_column >= 0 else []
@@ -988,19 +1133,7 @@ def inspect_import_xlsx(
         if k in seen:
             duplicate_ids += 1
         seen.add(k)
-
-    return {
-        "worksheets": xlsx.worksheets_of(wb),
-        "sheet_name": ws.title,
-        "header_row": hr,
-        "suggested_header_row": suggested,
-        "id_column": id_column,
-        "total_rows": len(data_rows),
-        "preview": xlsx.preview_of(grid),
-        "columns": cols,
-        "blank_ids": sum(1 for k in ids if not k),
-        "duplicate_ids": duplicate_ids,
-    }
+    return {"blank_ids": sum(1 for k in ids if not k), "duplicate_ids": duplicate_ids}
 
 
 @router.post("/import.xlsx", status_code=status.HTTP_201_CREATED)
@@ -1010,6 +1143,7 @@ def import_new_sheet_xlsx(
     has_week_grid: bool = Form(default=True),
     sheet_name: str = Form(default=""),
     header_row: int = Form(default=0),
+    last_row: int = Form(default=0),
     id_column: int = Form(default=0),
     columns: str = Form(default=""),
     user: User = Depends(current_user),
@@ -1018,8 +1152,10 @@ def import_new_sheet_xlsx(
     """Create a NEW sheet from an .xlsx and fill it (要望: シートもexcelから取り込める).
 
     `sheet_name` picks the worksheet (default: the active one), `header_row` the
-    1-based 見出し行 (default: auto-detected), `id_column` the 0-based ID column
-    (-1 → auto-numbered keys) and `columns` the JSON list of columns to take:
+    1-based 見出し行 (default: auto-detected), `last_row` the last worksheet row to
+    take (0 → 最後まで; for sheets that end in a 合計行 or notes), `id_column` the
+    0-based ID column (-1 → auto-numbered keys) and `columns` the JSON list of
+    columns to take:
     ``[{"index": 1, "name": "件名", "type": "text"}]``. With `columns` omitted every
     named column is taken with its type guessed from the values (日付 / 数値 /
     メンバー / プルダウン / 自由入力).
@@ -1029,19 +1165,53 @@ def import_new_sheet_xlsx(
     ◇予定/◇実績 are skipped unless explicitly selected (then they land as ordinary
     date columns, since a new sheet has no milestone template yet).
     """
-    _wb, ws, _grid_rows, _hr, header, data_rows = xlsx.read_source(file, sheet_name, header_row)
+    _wb, ws, _grid_rows, _hr, header, data_rows = xlsx.read_source(
+        file, sheet_name, header_row, last_row
+    )
+    result = create_sheet_with_selection(
+        db,
+        user,
+        name=name,
+        has_week_grid=has_week_grid,
+        worksheet_title=str(ws.title or ""),
+        header=header,
+        data_rows=data_rows,
+        id_column=id_column,
+        selection=_parse_selection(columns),
+    )
+    result.pop("selection", None)  # internal — only the 一括取り込み needs it
+    return result
+
+
+def create_sheet_with_selection(
+    db: Session,
+    user: User,
+    *,
+    name: str,
+    has_week_grid: bool,
+    worksheet_title: str,
+    header: tuple,
+    data_rows: list[tuple],
+    id_column: int,
+    selection: list[dict] | None,
+    commit: bool = True,
+) -> dict:
+    """Create a sheet from an already-sliced worksheet and fill it.
+
+    The body of `import_new_sheet_xlsx`, factored out so the 一括取り込み can create
+    several sheets from one workbook inside a single transaction (`commit=False`).
+    """
     if not any(not _is_blank(v) for v in header):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="見出し行が空です（見出し行の指定をご確認ください）"
         )
 
     member_names = set(_members_by_name(db, user.org_id).keys())
-    selection = _parse_selection(columns)
     if selection is None:
         selection = _default_selection(header, data_rows, id_column, has_week_grid, member_names)
     selection = [it for it in selection if it["index"] != id_column and 0 <= it["index"] < len(header)]
 
-    new_name = (name or "").strip() or str(ws.title or "").strip() or "取り込みシート"
+    new_name = (name or "").strip() or worksheet_title.strip() or "取り込みシート"
     max_order = db.execute(
         select(func.coalesce(func.max(Sheet.order), -1)).where(Sheet.org_id == user.org_id)
     ).scalar_one()
@@ -1056,7 +1226,7 @@ def import_new_sheet_xlsx(
     db.flush()
     # Schedule sheets get their 開始日/完了日 columns before inference, so those
     # headers bind to the real columns instead of creating duplicates.
-    ensure_schedule_columns(db, sheet)
+    ensure_schedule_columns(db, sheet, commit=commit)
 
     existing_names = {
         c.name
@@ -1082,8 +1252,12 @@ def import_new_sheet_xlsx(
         ctype = it["type"] if it["type"] in _IMPORTABLE_TYPES else ""
         if not ctype:
             ctype, config = _infer_type(values, member_names)
+        elif ctype == "dropdown":
+            config = _dropdown_config(values)
+        elif ctype == "text" and _has_newline(values):
+            config = {"multiline": True}   # 複数行入力（セル内改行を保てるように）
         else:
-            config = _dropdown_config(values) if ctype == "dropdown" else {}
+            config = {}
         db.add(
             Column(
                 sheet_id=sheet.id,
@@ -1100,11 +1274,14 @@ def import_new_sheet_xlsx(
     db.flush()
 
     out_header, out_rows = _synthesize(data_rows, kept, id_column)
-    result = _import_rows(db, user, sheet, out_header, iter(out_rows))
+    result = _import_rows(db, user, sheet, out_header, iter(out_rows), commit=commit)
     return {
         "sheet_id": sheet.id,
         "name": sheet.name,
         "columns": created_cols,
+        # With `selection=None` the picks were inferred here; a preset must store
+        # what was inferred so the next run repeats it against the sheet just made.
+        "selection": _effective_selection(kept),
         **result,
     }
 

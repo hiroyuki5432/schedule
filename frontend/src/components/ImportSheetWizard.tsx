@@ -64,6 +64,8 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
   const [name, setName] = useState(defaultName)
   const [sheetName, setSheetName] = useState('')
   const [headerRow, setHeaderRow] = useState(0) // 0 = 自動判定
+  const [lastRow, setLastRow] = useState(0) // 0 = 最後まで
+  const [tailFrom, setTailFrom] = useState(0) // 0 = 末尾から自動
   const [idColumn, setIdColumn] = useState(0)
   const [picks, setPicks] = useState<Pick[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -72,8 +74,25 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
 
   // Structure of the chosen worksheet: worksheets, 見出し行の候補, preview, 列の推定.
   const insp = useQuery({
-    queryKey: ['xlsx-inspect', fileKey, sheetName, headerRow, idColumn, hasWeekGrid],
-    queryFn: () => api.inspectImportXlsx(file, { sheetName, headerRow, idColumn, hasWeekGrid }),
+    queryKey: [
+      'xlsx-inspect',
+      fileKey,
+      sheetName,
+      headerRow,
+      lastRow,
+      tailFrom,
+      idColumn,
+      hasWeekGrid,
+    ],
+    queryFn: () =>
+      api.inspectImportXlsx(file, {
+        sheetName,
+        headerRow,
+        lastRow,
+        tailFrom,
+        idColumn,
+        hasWeekGrid,
+      }),
     staleTime: Infinity,
     retry: false,
   })
@@ -112,6 +131,7 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
       fileKey,
       sheetName,
       headerRow,
+      lastRow,
       idColumn,
       hasWeekGrid,
       JSON.stringify(chosen),
@@ -120,6 +140,7 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
       api.inspectImportXlsx(file, {
         sheetName,
         headerRow,
+        lastRow,
         idColumn,
         hasWeekGrid,
         columns: chosen,
@@ -136,9 +157,30 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
         hasWeekGrid,
         sheetName: insp.data?.sheet_name,
         headerRow: insp.data?.header_row,
+        lastRow,
         idColumn,
         columns: chosen,
       })
+      // Save this as the worksheet's 取り込み設定, pointed at the sheet that was
+      // just created — so the next load UPDATES it instead of making another
+      // sheet, and the 一括取り込み can replay it without asking anything.
+      // Best effort: the sheet exists either way.
+      if (insp.data) {
+        await api
+          .saveImportPreset({
+            worksheet_name: insp.data.sheet_name,
+            name: r.name,
+            workbook_name: file.name,
+            target_sheet_id: r.sheet_id,
+            target_sheet_name: r.name,
+            has_week_grid: hasWeekGrid,
+            header_row: insp.data.header_row,
+            last_row: lastRow,
+            id_column: idColumn,
+            mapping: chosen,
+          })
+          .catch(() => {})
+      }
       toast.show(
         `「${r.name}」を作成しました（列 ${r.columns} / 行 ${r.created}）`,
         'success',
@@ -147,6 +189,7 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
     },
     onSuccess: async (id) => {
       await qc.invalidateQueries({ queryKey: ['sheets'] })
+      await qc.invalidateQueries({ queryKey: ['import-presets'] })
       onClose()
       navigate(`/sheets/${id}`)
     },
@@ -156,7 +199,10 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
   })
 
   const data = insp.data
-  const dataPreview = (data?.preview ?? []).filter((r) => r.row > (data?.header_row ?? 0))
+  const dataPreview = (data?.preview ?? []).filter(
+    (r) =>
+      r.row > (data?.header_row ?? 0) && (!data?.last_row || r.row <= data.last_row),
+  )
 
   const setPick = (index: number, patch: Partial<Pick>) =>
     setPicks((prev) => prev.map((p) => (p.index === index ? { ...p, ...patch } : p)))
@@ -189,9 +235,13 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
           onSheet={(v) => {
             setSheetName(v)
             setHeaderRow(0)
+            setLastRow(0)
+            setTailFrom(0)
             setIdColumn(0)
           }}
           onHeaderRow={setHeaderRow}
+          onLastRow={setLastRow}
+          onTailFrom={setTailFrom}
           idColumn={idColumn}
           onIdColumn={setIdColumn}
           note="ID列（薄い黄色）が同じ行は1行にまとまります。"

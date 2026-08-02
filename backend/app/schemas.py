@@ -404,6 +404,69 @@ class SearchHit(BaseModel):
     matched_field: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Excel 取り込み設定（プリセット）
+# ---------------------------------------------------------------------------
+class ImportPresetOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    worksheet_name: str
+    workbook_name: str
+    # None = 取り込み時に新しいシートを作る（名前は target_sheet_name）。
+    target_sheet_id: Optional[int] = None
+    target_sheet_name: str
+    has_week_grid: bool
+    header_row: int
+    # 1-based, inclusive; 0 = 最後まで（末尾の合計行・注記を切り落とす指定）。
+    last_row: int
+    id_column: int
+    mapping: list[Any] = Field(default_factory=list)
+    updated_at: datetime
+    last_used_at: Optional[datetime] = None
+
+
+class ImportPresetSave(BaseModel):
+    """Upsert a 取り込み設定. Keyed by `worksheet_name` within the org, so finishing
+    the wizard on the same worksheet again refreshes the setting instead of adding
+    a near-duplicate."""
+
+    worksheet_name: str
+    name: str = ""
+    workbook_name: str = ""
+    target_sheet_id: Optional[int] = None
+    target_sheet_name: str = ""
+    has_week_grid: bool = True
+    header_row: int = 0
+    last_row: int = 0
+    id_column: int = 0
+    mapping: list[Any] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# バックアップ / リストア
+# ---------------------------------------------------------------------------
+class BackupOut(BaseModel):
+    """List/detail shape. The payload itself is never returned here — it is the
+    whole group and can be many MB; use the download endpoint for it."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    label: str
+    format_version: int
+    # Row counts per table (sheets / rows / work_logs / members …).
+    summary: dict[str, Any] = Field(default_factory=dict)
+    size_bytes: int
+    created_at: datetime
+    created_by_name: str
+
+
+class BackupCreate(BaseModel):
+    label: str = ""
+
+
 class MarkReadRequest(BaseModel):
     # When omitted/empty, marks ALL of the caller's notifications read.
     ids: Optional[list[int]] = None

@@ -592,12 +592,13 @@ function SheetLevelSettings({
     },
   })
 
-  // Freezable = attribute columns + the 4 summary columns (予定計/実績計/差/進捗),
-  // so the freeze can extend up to 進捗.
+  // Freezable = attribute columns, plus (schedule only) the 5 summary columns
+  // (予定計/実績計/差/進捗/予実差), so the freeze can extend up to 予実差.
   const SUMMARY_LABELS = ['予定計', '実績計', '差', '進捗', '予実差']
-  const pinned = settings.pinned_columns ?? 1
+  const pinned = settings.pinned_columns ?? (hasWeekGrid ? 1 : 0)
   const nCols = columns.length
-  const freezeOptions = Array.from({ length: nCols + 1 + SUMMARY_LABELS.length }, (_, n) => {
+  const freezeMax = nCols + (hasWeekGrid ? SUMMARY_LABELS.length : 0)
+  const freezeOptions = Array.from({ length: freezeMax + 1 }, (_, n) => {
     let label: string
     if (n === 0) label = 'ID のみ固定'
     else if (n <= nCols) label = `ID ＋ 先頭${n}列を固定`
@@ -616,9 +617,8 @@ function SheetLevelSettings({
       </CardHeader>
       <CardBody>
         <div className="flex flex-col gap-3">
-          {/* Frozen columns / filters / progress / color basis are schedule-only. */}
-          {hasWeekGrid && (
-            <>
+          {/* Frozen columns apply to BOTH views: the schedule grid and the table
+              （テーブルでも左端の列を固定できる）. */}
           <label className="text-[12px] text-[var(--ink2)]">
             左端に固定する列
             <Select
@@ -633,7 +633,7 @@ function SheetLevelSettings({
               {freezeOptions}
             </Select>
             <span className="mt-1 block text-[11px] text-[var(--ink3)]">
-              通常時の固定列（IDは常に固定／進捗まで指定可）。
+              通常時の固定列（IDは常に固定{hasWeekGrid ? '／進捗まで指定可' : ''}）。横スクロールしても左端に残ります。
             </span>
           </label>
           <label className="text-[12px] text-[var(--ink2)]">
@@ -654,6 +654,9 @@ function SheetLevelSettings({
             </span>
           </label>
 
+          {/* Filters / progress / color basis are schedule-only. */}
+          {hasWeekGrid && (
+            <>
           <label className="text-[12px] text-[var(--ink2)]">
             マイルストン◇の表示
             <Select
