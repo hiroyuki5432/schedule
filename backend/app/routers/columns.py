@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.date_values import normalize_date_text
 from app.db import get_db
 from app.deps import get_column_for_user, get_sheet_for_user
 from app.models import Column, Row, Sheet, User
@@ -80,8 +81,27 @@ def update_column(
             if oid and old_val is not None and new_val and old_val != new_val:
                 rename_map[old_val] = new_val
 
+    # 数式列は列を NAME で参照する（`[単価] * [数量]`）。名前を変えたら、同じシートの
+    # 数式のほうも書き換える — そうしないと、列名を直した瞬間に数式が「そんな列は
+    # ない」になる（要望: リスト名を変えてもデータが追従、と同じ考え方）。
+    old_name = column.name
+    new_name = str(fields.get("name") or "").strip()
+
     for key, value in fields.items():
         setattr(column, key, value)
+
+    if new_name and new_name != old_name:
+        _rewrite_formula_refs(db, column.sheet_id, old_name, new_name)
+
+    # 日付に変えたら、入っている値も 'YYYY-MM-DD' に直す。要望: 取り込みで
+    # `2025-10-18 00:00:00` になった列を日付に変えても時刻が残ったまま。型だけ変えても
+    # 中身は文字列のままなので、並べ替えも期間計算も効かなかった。
+    #
+    # 既に日付型の列に対して type="date" を投げ直したときも走らせる — 直す手段が
+    # 「一度 自由入力 に戻してから日付に戻す」しかないのは、直し方として不親切なので
+    # （シート設定の「値を日付に揃える」がこれを呼ぶ）。
+    if fields.get("type") == "date":
+        _normalize_date_values(db, column)
 
     if rename_map:
         col_key = str(column.id)
@@ -98,6 +118,49 @@ def update_column(
     db.commit()
     db.refresh(column)
     return column
+
+
+def _normalize_date_values(db: Session, column: Column) -> None:
+    """この列に入っている値を日付の保存形（'YYYY-MM-DD'）に揃える。呼び出し側が commit。
+
+    `2025-10-18 00:00:00` や `2025/10/18` を日付に直す。読めない値（「未定」など）は
+    そのまま残す — 型を変えただけでデータが消えるのは論外なので。
+    """
+    col_key = str(column.id)
+    rows = db.execute(select(Row).where(Row.sheet_id == column.sheet_id)).scalars()
+    for r in rows:
+        current = (r.data or {}).get(col_key)
+        if current is None or current == "":
+            continue
+        fixed = normalize_date_text(current)
+        if fixed == current:
+            continue
+        data = dict(r.data or {})
+        if fixed is None:
+            data.pop(col_key, None)
+        else:
+            data[col_key] = fixed
+        r.data = data
+
+
+def _rewrite_formula_refs(db: Session, sheet_id: int, old_name: str, new_name: str) -> None:
+    """同じシートの数式列の `[旧名]` を `[新名]` に置き換える（呼び出し側が commit する）。
+
+    参照は `[名前]` の形しかないので、単純な置換で足りる。空白を挟んだ `[ 名前 ]` も
+    式としては有効だが、そこまでは追わない（数式エディタが出すのは詰めた形）。
+    """
+    if not old_name or old_name == new_name:
+        return
+    columns = db.execute(
+        select(Column).where(Column.sheet_id == sheet_id, Column.type == "formula")
+    ).scalars()
+    for c in columns:
+        expr = (c.config or {}).get("expr")
+        if not isinstance(expr, str) or f"[{old_name}]" not in expr:
+            continue
+        config = dict(c.config or {})
+        config["expr"] = expr.replace(f"[{old_name}]", f"[{new_name}]")
+        c.config = config
 
 
 @router.delete("/columns/{column_id}", status_code=status.HTTP_204_NO_CONTENT)

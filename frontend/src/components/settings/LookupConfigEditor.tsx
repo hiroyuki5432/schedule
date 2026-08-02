@@ -96,6 +96,7 @@ export function LookupConfigEditor({
               {otherSheets.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name}
+                  {s.is_master ? '（マスタ）' : ''}
                 </option>
               ))}
             </Select>

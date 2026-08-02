@@ -354,7 +354,7 @@ def test_lookup_columns_are_never_overwritten_by_a_reimport(auth_client):
     )
     by_header = {c["header"]: c for c in r.json()["columns"]}
     assert by_header["区分"]["target"] == ""          # 取り込み先から外れる
-    assert by_header["区分"]["lost_reason"] == "lookup"
+    assert by_header["区分"]["lost_reason"] == "computed"
     assert by_header["件名"]["target"] == "件名"
 
 
@@ -418,3 +418,72 @@ def test_preset_survives_its_sheet_being_deleted(auth_client):
     entry = {w["worksheet"]: w for w in r.json()["worksheets"]}["設計スケジュール"]
     assert entry["action"] == "new"
     assert any("見つかりません" in w for w in entry["warnings"])
+
+
+def _table_and_schedule_book() -> io.BytesIO:
+    """A plain master table and an exported-looking schedule, in one book."""
+    wb = Workbook()
+    t = wb.active
+    t.title = "顧客リスト"
+    t.append(["ID", "顧客名", "担当"])
+    t.append(["C-1", "山田工業", "濱崎"])
+
+    s = wb.create_sheet("工程")
+    s.append(["ID", "件名", "進捗(%)", "2026-06-01", "2026-06-08"])
+    s.append(["A-1", "基本設計", 50, 8, 8])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def test_new_sheets_guess_their_format_from_the_headers(auth_client):
+    """要望: 一括取り込みが常にスケジュール形式で作られてしまう。週の列も 進捗(%) も
+    ない普通の表は、テーブル形式で作られること。"""
+    r = auth_client.post(
+        "/api/import/workbook/inspect",
+        files={"file": ("台帳.xlsx", _table_and_schedule_book(), _MEDIA)},
+        data={
+            "plan": json.dumps(
+                [
+                    {"worksheet": "顧客リスト", "action": "new"},
+                    {"worksheet": "工程", "action": "new"},
+                ]
+            )
+        },
+    )
+    assert r.status_code == 200, r.text
+    by_ws = {w["worksheet"]: w for w in r.json()["worksheets"]}
+    assert by_ws["顧客リスト"]["has_week_grid"] is False
+    assert by_ws["工程"]["has_week_grid"] is True
+
+
+def test_the_chosen_format_wins_over_the_guess(auth_client):
+    """画面で選んだ形式で作られ、その選択がプリセットとして残ること。"""
+    plan = json.dumps(
+        [
+            {"worksheet": "顧客リスト", "action": "new", "has_week_grid": True},
+            {"worksheet": "工程", "action": "skip"},
+        ]
+    )
+    r = auth_client.post(
+        "/api/import/workbook",
+        files={"file": ("台帳.xlsx", _table_and_schedule_book(), _MEDIA)},
+        data={"plan": plan},
+    )
+    assert r.status_code == 200, r.text
+    sid = r.json()["results"][0]["sheet_id"]
+    assert auth_client.get(f"/api/sheets/{sid}").json()["sheet"]["has_week_grid"] is True
+    assert _presets(auth_client)["顧客リスト"]["has_week_grid"] is True
+
+
+def test_a_guessed_table_is_created_as_a_table(auth_client):
+    r = auth_client.post(
+        "/api/import/workbook",
+        files={"file": ("台帳.xlsx", _table_and_schedule_book(), _MEDIA)},
+        data={"plan": json.dumps([{"worksheet": "顧客リスト", "action": "new"}])},
+    )
+    assert r.status_code == 200, r.text
+    sid = r.json()["results"][0]["sheet_id"]
+    assert auth_client.get(f"/api/sheets/{sid}").json()["sheet"]["has_week_grid"] is False

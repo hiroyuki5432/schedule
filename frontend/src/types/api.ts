@@ -95,6 +95,9 @@ export interface Sheet {
   name: string
   order: number
   has_week_grid: boolean
+  /** マスタシート: 参照(LOOKUP)や数式の元にする一覧。サイドバーの「シート」や
+   *  ダッシュボード等のシート選択には出さず、「マスタ」からだけ開ける。 */
+  is_master: boolean
   key_column_id: string | null
   color_basis_column_id: string | null
   settings?: SheetSettings
@@ -108,6 +111,7 @@ export type ColumnType =
   | 'status'
   | 'member'
   | 'lookup'
+  | 'formula'
 
 export interface DropdownOption {
   /** Stable id so renaming the value can follow through to stored row data. */
@@ -153,6 +157,11 @@ export interface ColumnConfig {
   /** Which TARGET column to match against. Default "__id__" (target row's key_value). */
   match_key_column_id?: string
   return_column_id?: string
+  // formula. 同じ行の列を名前で参照する式（例: `[単価] * [数量]`）。値は保存されず、
+  // 表示のたびに計算される（lib/formula.ts）。
+  expr?: string
+  /** formula: 小数の桁数。未設定なら計算結果そのまま。 */
+  decimals?: number | null
   [k: string]: unknown
 }
 

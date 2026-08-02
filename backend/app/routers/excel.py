@@ -10,8 +10,8 @@ Layout (one worksheet), schedule sheets:
   get 予定/実績 columns.
 - 進捗 / 先行タスク round-trip too (先行タスク by ID/key_value, resolved after all
   rows are imported, so a clear → re-import fully restores the schedule).
-- Export renders human-readable values (member → name). Lookup columns are
-  computed, so they export blank and are skipped on import.
+- Export renders human-readable values (member → name). 計算列（参照(LOOKUP)／数式）は
+  自動計算なので、書き出しは空欄・取り込みは対象外。
 - Import upserts by ID (key_value). Weekly cells: past weeks write 実績,
   current/future write 予定 (the same display rule as the grid / CSV export).
 """
@@ -31,6 +31,8 @@ from app.db import get_db
 from app.deps import get_sheet_for_user
 from app.models import Column, EffortEntry, Row, RowMilestone, Sheet, User
 from app.schedule_service import ensure_schedule_columns, sched_columns
+from app.date_values import is_date_placeholder, normalize_date_text, parse_date_value
+from app.schemas import COMPUTED_COLUMN_TYPES
 from app.security import current_user
 from app.weeks import current_week_start, week_start_of
 from app.worklog_service import org_week_start_weekday
@@ -66,18 +68,8 @@ def _template_milestone_cols(sheet: Sheet) -> list[tuple[int, str, str, str]]:
     return out
 
 
-def _coerce_date_obj(raw) -> date | None:
-    """Excel cell → date object, or None."""
-    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
-        return None
-    if isinstance(raw, datetime):
-        return raw.date()
-    if isinstance(raw, date):
-        return raw
-    try:
-        return date.fromisoformat(str(raw).strip())
-    except ValueError:
-        return None
+#: Excel cell → date object, or None. 書き方の違いは app.date_values に集約。
+_coerce_date_obj = parse_date_value
 
 
 def _reconstruct_milestones(
@@ -280,8 +272,8 @@ def export_xlsx(
         attr: list = []
         for c in columns:
             v = data.get(str(c.id))
-            if c.type == "lookup":
-                attr.append("")  # computed — round-trips as blank
+            if c.type in COMPUTED_COLUMN_TYPES:
+                attr.append("")  # 計算列 — round-trips as blank
             elif c.type == "member":
                 attr.append(member_names.get(str(v), "") if v not in (None, "") else "")
             elif c.type == "number":
@@ -345,12 +337,13 @@ def _coerce_attr(column: Column, raw, members_by_name: dict[str, int]):
         except (TypeError, ValueError):
             return None
     if column.type == "date":
-        if isinstance(raw, (datetime, date)):
-            return raw.date().isoformat() if isinstance(raw, datetime) else raw.isoformat()
-        return str(raw).strip()
+        # 保存形は常に 'YYYY-MM-DD'（時刻は落とす）。読めない値はそのまま残す。
+        return normalize_date_text(raw)
     # Alt+Enter line breaks inside a cell are kept — only the line ENDINGS are
     # normalised (要望: セル内の改行が1行になってしまう).
-    return xlsx.normalize_text(str(raw)).strip()
+    # 日時セルを str() すると '2025-10-18 00:00:00' になるので _cell_text を通す
+    # （0時ちょうどなら日付だけ）。数値の 3.0 → '3' もここで揃う。
+    return _cell_text(raw)
 
 
 def _parse_week_header(raw) -> date | None:
@@ -364,6 +357,25 @@ def _parse_week_header(raw) -> date | None:
         except ValueError:
             return None
     return None
+
+
+def looks_like_schedule(header: tuple) -> bool:
+    """見出し行から「スケジュール形式（週の列がある）」かどうかを推測する。
+
+    週の列は日付そのものが見出しになる。エクスポートしたブックなら 進捗(%) /
+    先行タスク(ID) / ◇（予定・実績）も並ぶ。どれも無ければ、ただの表＝テーブル形式。
+    一括取り込みは既定が「スケジュール」だったので、顧客リストのような表まで週グリッド
+    付きで作られていた（要望: 取り込み時に形式を選べるように）。
+    """
+    for raw in header:
+        if _parse_week_header(raw) is not None:
+            return True
+        name = str(raw).strip() if raw is not None else ""
+        if name in (PROGRESS_HEADER, DEPS_HEADER):
+            return True
+        if name.endswith("（予定）") or name.endswith("（実績）"):
+            return True
+    return False
 
 
 def _load_active_sheet(file: UploadFile):
@@ -546,7 +558,7 @@ def row_target_info(
     targets: list[dict] = [
         {"key": c.name, "label": c.name, "type": c.type, "role": "attr"}
         for c in sheet_columns
-        if c.type != "lookup"
+        if c.type not in COMPUTED_COLUMN_TYPES
     ]
     if sheet.has_week_grid:
         targets.append({"key": PROGRESS_HEADER, "label": PROGRESS_HEADER, "type": "number", "role": "progress"})
@@ -567,7 +579,7 @@ def row_target_info(
             target = by_index[idx]["name"]
         elif idx == id_column or not nm:
             target = ""
-        elif nm in col_by_name and col_by_name[nm].type != "lookup":
+        elif nm in col_by_name and col_by_name[nm].type not in COMPUTED_COLUMN_TYPES:
             target = nm
         elif sheet.has_week_grid and (
             nm in (PROGRESS_HEADER, DEPS_HEADER)
@@ -581,12 +593,12 @@ def row_target_info(
         # A chosen target the importer would NOT actually write has to stop being a
         # target here, or the dry run promises a column that silently goes nowhere.
         # Both cases show up after a sheet is edited post-import: the column was
-        # renamed/deleted, or it was turned into a 参照(LOOKUP) column (computed —
+        # renamed/deleted, or it was turned into a 計算列（参照(LOOKUP)／数式）—
         # `_import_rows` skips those by design, see `attr_at`).
         col = col_by_name.get(target)
         lost_target, lost_reason = "", ""
-        if target and col is not None and col.type == "lookup":
-            lost_target, lost_reason, target, col = target, "lookup", "", None
+        if target and col is not None and col.type in COMPUTED_COLUMN_TYPES:
+            lost_target, lost_reason, target, col = target, "computed", "", None
         elif (
             target
             and col is None
@@ -618,7 +630,7 @@ def row_target_info(
                 "role": role,
                 "type": ctype,
                 # The target that was asked for but cannot be written, and why
-                # ('lookup' | 'missing'). Empty when nothing was lost.
+                # ('computed' | 'missing'). Empty when nothing was lost.
                 "lost_target": lost_target,
                 "lost_reason": lost_reason,
                 # Week columns can only be kept or dropped — the date IS the target.
@@ -687,7 +699,7 @@ def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter, commi
         ms_label_map[ah] = ("act", ti)
 
     # Map each header position (skipping col 0 = ID) to an attribute column, a
-    # week_start date, or a reserved schedule column. Unknown/lookup are ignored.
+    # week_start date, or a reserved schedule column. Unknown/計算列 are ignored.
     attr_at: dict[int, Column] = {}
     week_at: dict[int, date] = {}
     ms_pred_at: dict[int, int] = {}  # header idx -> template index (予定)
@@ -701,7 +713,7 @@ def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter, commi
         nm = str(name).strip()
         col = col_by_name.get(nm)
         if col is not None:
-            if col.type != "lookup":
+            if col.type not in COMPUTED_COLUMN_TYPES:
                 attr_at[idx] = col
             continue
         if sheet.has_week_grid:
@@ -898,9 +910,12 @@ def _infer_type(values: list, member_names: set[str]) -> tuple[str, dict]:
     vals = [v for v in values if v is not None and str(v).strip() != ""]
     if not vals:
         return "text", {}
-    strs = [str(v).strip() for v in vals]
+    strs = [_cell_text(v).strip() for v in vals]
 
-    if all(_coerce_date_obj(v) is not None for v in vals):
+    # 日付列の判定では「-」だけのセル（＝日付なし）を数に入れない。1個混ざっただけで
+    # 列全体が自由入力に落ち、日時セルが '2025-10-18 00:00:00' で入っていた。
+    dated = [v for v in vals if not is_date_placeholder(v)]
+    if dated and all(_coerce_date_obj(v) is not None for v in dated):
         return "date", {}
     if all(_looks_numeric(v) for v in vals):
         return "number", {}

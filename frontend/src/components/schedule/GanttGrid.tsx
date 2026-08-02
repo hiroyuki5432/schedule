@@ -18,10 +18,11 @@ import { ColumnHeaderMenu } from '@/components/schedule/ColumnHeaderMenu'
 import { filterKindOf } from '@/lib/colFilter'
 import type { ColFilter, ColFilterOptions } from '@/lib/colFilter'
 import { ID_COL_KEY, defaultColWidth, fitWidth, useColumnWidths } from '@/lib/colWidth'
-import { useLookupTargets } from '@/hooks/useLookupTargets'
+import { useComputedValues } from '@/hooks/useComputedValues'
 import { Avatar } from '@/components/ui/Avatar'
 import { Badge } from '@/components/ui/Badge'
 import { DiamondIcon, ExpandIcon, PlusIcon, TrashIcon } from '@/components/ui/icons'
+import { isComputed } from '@/lib/computed'
 import { cn, fmtHours, normalizeDateForSort } from '@/lib/format'
 import { toast } from '@/lib/toast'
 import { fmtISO, fmtMD, parseDate } from '@/lib/dates'
@@ -107,7 +108,7 @@ function sortValueFor(
   key: SortKey,
   column: Column | undefined,
   members: Member[],
-  lookupValue: (column: Column, row: Row) => string | null,
+  computedValue: (column: Column, row: Row) => string | null,
 ): string | number {
   if (key === SORT_ID) return model.keyValue ?? ''
   // Summary columns (予定計/実績計/差/進捗/予実差) are computed, not real columns —
@@ -138,8 +139,8 @@ function sortValueFor(
     const m = members.find((x) => String(x.id) === String(id ?? ''))
     return m?.name ?? ''
   }
-  if (column.type === 'lookup') {
-    return lookupValue(column, model.row) ?? ''
+  if (isComputed(column)) {
+    return computedValue(column, model.row) ?? ''
   }
   const v = model.row.data[column.id]
   if (v == null || v === '') return ''
@@ -173,14 +174,14 @@ function measureValue(
   c: Column,
   r: ScheduleRowModel,
   members: Member[],
-  lookupValue: (column: Column, row: Row) => string | null,
+  computedValue: (column: Column, row: Row) => string | null,
 ): string {
   if (c.type === 'member') {
     const id = r.row.data[c.id]
     return members.find((m) => String(m.id) === String(id ?? ''))?.name ?? ''
   }
   if (c.type === 'status') return r.status?.label ?? ''
-  if (c.type === 'lookup') return lookupValue(c, r.row) ?? ''
+  if (isComputed(c)) return computedValue(c, r.row) ?? ''
   const v = r.row.data[c.id]
   return v == null ? '' : String(v)
 }
@@ -347,7 +348,7 @@ export function GanttGrid({
     () => [...columns].sort((a, b) => a.order - b.order),
     [columns],
   )
-  const { lookupValue } = useLookupTargets(columns, members)
+  const { computedValue } = useComputedValues(columns, members)
 
   // Content-fit column widths: size each attribute column to its longest value
   // (header included), clamped per type so nothing gets too wide or too narrow.
@@ -358,11 +359,11 @@ export function GanttGrid({
         c.id,
         fitWidth(
           c,
-          rows.map((r) => measureValue(c, r, members, lookupValue)),
+          rows.map((r) => measureValue(c, r, members, computedValue)),
         ),
       )
     return m
-  }, [ordered, rows, members, lookupValue])
+  }, [ordered, rows, members, computedValue])
 
   // Manual width overrides (drag the column edge, double-click to reset).
   // Persisted per column id; a column without an override falls back to its
@@ -393,8 +394,8 @@ export function GanttGrid({
       const column = columns.find((c) => c.id === sort.key)
       const dir = sort.dir === 'asc' ? 1 : -1
       sortedTop = [...top].sort((a, b) => {
-        const av = sortValueFor(a, sort.key, column, members, lookupValue)
-        const bv = sortValueFor(b, sort.key, column, members, lookupValue)
+        const av = sortValueFor(a, sort.key, column, members, computedValue)
+        const bv = sortValueFor(b, sort.key, column, members, computedValue)
         const cmp = compareValues(av, bv)
         if (cmp === 0) return 0
         const aEmpty = av === '' || av == null
@@ -418,7 +419,7 @@ export function GanttGrid({
     for (const [pid, kids] of childrenOf)
       if (!emitted.has(pid)) out.push(...kids)
     return out
-  }, [rows, sort, columns, members, lookupValue, collapsed])
+  }, [rows, sort, columns, members, computedValue, collapsed])
 
   // Explicit sort from a header menu (昇順/降順/解除). null clears.
   function setSortDir(key: SortKey, dir: SortDir | null) {
@@ -1389,7 +1390,7 @@ export function GanttGrid({
                         column={c}
                         members={members}
                         rows={plainRows}
-                        lookupValue={lookupValue}
+                        computedValue={computedValue}
                         editable={editable}
                         autoStatusBadge={
                           c.id === autoStatusColId ? model.status : undefined
@@ -1422,7 +1423,7 @@ export function GanttGrid({
                         column={c}
                         members={members}
                         rows={plainRows}
-                        lookupValue={lookupValue}
+                        computedValue={computedValue}
                         editable={editable}
                         autoStatusBadge={
                           c.id === autoStatusColId ? model.status : undefined
@@ -1992,7 +1993,7 @@ function AttrCell({
   column,
   members,
   rows,
-  lookupValue,
+  computedValue,
   editable,
   autoStatusBadge,
   autoStatusDelayWeeks,
@@ -2003,7 +2004,7 @@ function AttrCell({
   column: Column
   members: Member[]
   rows: Row[]
-  lookupValue: (column: Column, row: Row) => string | null
+  computedValue: (column: Column, row: Row) => string | null
   editable: boolean
   autoStatusBadge?: StatusBadge | null
   /** Weeks behind (何週遅延) for the auto-status column; shown next to the badge. */
@@ -2050,13 +2051,13 @@ function AttrCell({
   }
   // Lookup is always read-only resolved; status is editable only in live mode
   // (as-of view shows the computed badge). Everything else edits when editable.
-  if (column.type === 'lookup') {
+  if (isComputed(column)) {
     return (
       <InlineCell
         row={row}
         column={column}
         members={members}
-        lookupValue={lookupValue}
+        computedValue={computedValue}
         compact
         onSave={onSave}
       />
@@ -2069,26 +2070,26 @@ function AttrCell({
         column={column}
         members={members}
         rows={rows}
-        lookupValue={lookupValue}
+        computedValue={computedValue}
         compact
         editable={editable}
         onSave={onSave}
       />
     )
   }
-  return <ReadonlyCell row={effRow} column={column} members={members} lookupValue={lookupValue} />
+  return <ReadonlyCell row={effRow} column={column} members={members} computedValue={computedValue} />
 }
 
 function ReadonlyCell({
   row,
   column,
   members,
-  lookupValue,
+  computedValue,
 }: {
   row: Row
   column: Column
   members: Member[]
-  lookupValue: (column: Column, row: Row) => string | null
+  computedValue: (column: Column, row: Row) => string | null
 }) {
   // Read-only mode (as-of snapshot) must match the editable InlineCell's vertical
   // centering — otherwise text/avatars stick to the cell top ("上寄せ").
@@ -2111,8 +2112,8 @@ function ReadonlyCell({
       </div>
     )
   }
-  if (column.type === 'lookup') {
-    const lv = lookupValue(column, row) ?? ''
+  if (isComputed(column)) {
+    const lv = computedValue(column, row) ?? ''
     return (
       <div
         className="flex h-full items-center overflow-hidden text-ellipsis whitespace-nowrap px-2.5 text-[12.5px] text-[var(--ink3)]"

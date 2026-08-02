@@ -9,7 +9,7 @@ import { useEffortMutation } from '@/hooks/useEffortMutation'
 import { useEffortBulkMutation } from '@/hooks/useEffortBulkMutation'
 import type { BulkEffortEdit } from '@/hooks/useEffortBulkMutation'
 import { useRowMutation } from '@/hooks/useRowMutation'
-import { useLookupTargets } from '@/hooks/useLookupTargets'
+import { useComputedValues } from '@/hooks/useComputedValues'
 import { useUndo, useUndoHotkeys } from '@/hooks/useUndo'
 import type { UndoDirection } from '@/hooks/useUndo'
 import * as api from '@/api/client'
@@ -495,7 +495,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
   // copies internally, but the modal is rendered by this page).
   const rawRows = useMemo(() => grid.rows.map((m) => m.row), [grid.rows])
   const recordRow = rawRows.find((r) => String(r.id) === recordRowId) ?? null
-  const { lookupValue } = useLookupTargets(grid.columns, members)
+  const { computedValue } = useComputedValues(grid.columns, members)
 
   // Candidate predecessor tasks for the dependency picker.
   const depCandidates = useMemo(
@@ -950,7 +950,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           columns={grid.columns}
           members={members}
           rows={rawRows}
-          lookupValue={lookupValue}
+          computedValue={computedValue}
           onClose={() => setRecordRowId(null)}
           onSaveCell={(colId, v) => rowMut.mutate({ row: recordRow, patch: { [colId]: v } })}
           onSaveKey={(v) => saveRowKey(recordRow, v)}

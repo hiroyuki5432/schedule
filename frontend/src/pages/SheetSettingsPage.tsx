@@ -18,7 +18,9 @@ import { ChevronDownIcon, ChevronUpIcon, TrashIcon } from '@/components/ui/icons
 import { DropdownOptionsEditor } from '@/components/settings/DropdownOptionsEditor'
 import { StatusRuleBuilder } from '@/components/settings/StatusRuleBuilder'
 import { LookupConfigEditor } from '@/components/settings/LookupConfigEditor'
+import { FormulaConfigEditor } from '@/components/settings/FormulaConfigEditor'
 import { ExcelToolbar } from '@/components/ExcelToolbar'
+import { isComputed } from '@/lib/computed'
 import { PlusIcon } from '@/components/ui/icons'
 import { cn } from '@/lib/format'
 import { toast } from '@/lib/toast'
@@ -33,6 +35,7 @@ const TYPE_LABEL: Record<ColumnType, string> = {
   status: '条件付きステータス',
   member: 'メンバー',
   lookup: '参照(LOOKUP)',
+  formula: '数式',
 }
 
 export function SheetSettingsPage() {
@@ -168,6 +171,7 @@ export function SheetSettingsPage() {
                 sheetId={sheetId}
                 columns={columns}
                 hasWeekGrid={sheet.has_week_grid}
+                isMaster={sheet.is_master}
                 keyColumnId={sheet.key_column_id}
                 colorBasisColumnId={sheet.color_basis_column_id}
                 settings={sheet.settings ?? {}}
@@ -428,6 +432,12 @@ function AddColumnForm({
           追加すると右側に「選択肢」の編集欄が開きます。そこで値を入れて「保存」してください。
         </div>
       )}
+      {type === 'formula' && !error && (
+        <div className="mt-2 text-[11.5px] text-[var(--ink3)]">
+          追加すると右側で式を入力できます（例: <code>[単価] * [数量]</code>）。値は自動計算で、
+          手入力はできません。
+        </div>
+      )}
     </div>
   )
 }
@@ -471,6 +481,16 @@ function ColumnDetailEditor({
       toast.show('保存しました', 'success', 2000)
     },
     onError: () => toast.show('保存に失敗しました', 'error'),
+  })
+  // 取り込みで `2025-10-18 00:00:00` のまま入ってしまった値を、あとから
+  // 'YYYY-MM-DD' に揃え直す（サーバ側が type="date" の保存で正規化する）。
+  const fixDates = useMutation({
+    mutationFn: () => api.updateColumn(column.id, { type: 'date' }),
+    onSuccess: () => {
+      onDone()
+      toast.show('この列の値を日付に揃えました', 'success', 2500)
+    },
+    onError: () => toast.show('揃えられませんでした', 'error'),
   })
   const canWeeklyReset = ['text', 'number', 'date', 'dropdown'].includes(type)
 
@@ -522,6 +542,26 @@ function ColumnDetailEditor({
                 </span>
               </label>
             )}
+            {column.type === 'date' && (
+              <div className="rounded-[9px] bg-[var(--line2)] px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[12px] text-[var(--ink2)]">値を日付に揃える</span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={fixDates.isPending}
+                    onClick={() => fixDates.mutate()}
+                  >
+                    {fixDates.isPending ? '整えています…' : '実行'}
+                  </Button>
+                </div>
+                <span className="mt-1 block text-[11px] text-[var(--ink3)]">
+                  取り込みで <code>2025-10-18 00:00:00</code> や <code>2025/10/18</code> のまま
+                  入った値を <code>2025-10-18</code> に直します。日付として読めない値
+                  （「未定」など）はそのまま残ります。
+                </span>
+              </div>
+            )}
             {type === 'text' && (
               <label className="flex items-start gap-2 text-[12px] text-[var(--ink2)]">
                 <input
@@ -560,6 +600,9 @@ function ColumnDetailEditor({
       {column.type === 'lookup' && (
         <LookupConfigEditor column={column} sheetId={sheetId} onDone={onDone} />
       )}
+      {column.type === 'formula' && (
+        <FormulaConfigEditor column={column} sheetId={sheetId} onDone={onDone} />
+      )}
     </>
   )
 }
@@ -568,6 +611,7 @@ function SheetLevelSettings({
   sheetId,
   columns,
   hasWeekGrid,
+  isMaster,
   keyColumnId,
   colorBasisColumnId,
   settings,
@@ -575,6 +619,7 @@ function SheetLevelSettings({
   sheetId: string
   columns: Column[]
   hasWeekGrid: boolean
+  isMaster: boolean
   keyColumnId: string | null
   colorBasisColumnId: string | null
   settings: SheetSettings
@@ -584,6 +629,8 @@ function SheetLevelSettings({
     mutationFn: (body: {
       key_column_id?: string | null
       color_basis_column_id?: string | null
+      has_week_grid?: boolean
+      is_master?: boolean
       settings?: SheetSettings
     }) => api.updateSheet(sheetId, body),
     onSuccess: () => {
@@ -617,6 +664,43 @@ function SheetLevelSettings({
       </CardHeader>
       <CardBody>
         <div className="flex flex-col gap-3">
+          {/* 取り込みで形式を取り違えたシートを作り直さずに直せるように
+              （要望: 取り込んだらスケジュール形式になってた）。週次工数のデータは
+              消えないので、戻せば元通り表示される。 */}
+          <label className="text-[12px] text-[var(--ink2)]">
+            形式
+            <Select
+              className="mt-1 w-full"
+              value={hasWeekGrid ? 'schedule' : 'table'}
+              onChange={(e) => mutation.mutate({ has_week_grid: e.target.value === 'schedule' })}
+            >
+              <option value="schedule">スケジュール（週次グリッド）</option>
+              <option value="table">テーブル（一覧・参照）</option>
+            </Select>
+            <span className="mt-1 block text-[11px] text-[var(--ink3)]">
+              テーブルにすると週次グリッド（ガント・工数入力）が消えます。入力済みの工数は
+              残っているので、スケジュールに戻せばそのまま表示されます。
+            </span>
+          </label>
+
+          {/* マスタは「参照される側」— 日々の作業画面には出さない。 */}
+          <label className="flex items-start gap-2 text-[12px] text-[var(--ink2)]">
+            <input
+              type="checkbox"
+              checked={isMaster}
+              className="mt-0.5 h-4 w-4 accent-[var(--green)]"
+              onChange={(e) => mutation.mutate({ is_master: e.target.checked })}
+            />
+            <span>
+              マスタにする（一覧に出さない）
+              <span className="block text-[11px] text-[var(--ink3)]">
+                参照(LOOKUP)や数式の元にする一覧向け。サイドバーの「シート」やダッシュボード・
+                年間計画のシート選択には出ず、サイドバーの「マスタ」から開けます。参照先としては
+                今までどおり選べます。
+              </span>
+            </span>
+          </label>
+
           {/* Frozen columns apply to BOTH views: the schedule grid and the table
               （テーブルでも左端の列を固定できる）. */}
           <label className="text-[12px] text-[var(--ink2)]">
@@ -762,8 +846,8 @@ function SheetLevelSettings({
 
 /** Which columns make up a task's display text in 実績入力 / みんなの入力一覧
  *  (要望: IDと件名だけでなく XX・YY・ZZ で表示したい). Order follows the sheet's
- *  column order; an empty selection falls back to ID＋件名. 参照(LOOKUP)列はサーバ側
- *  で値を解決しないため選べない。 */
+ *  column order; an empty selection falls back to ID＋件名. 計算列（参照・数式）は
+ *  サーバ側で値を解決しないため選べない。 */
 function TaskLabelEditor({
   columns,
   settings,
@@ -777,7 +861,7 @@ function TaskLabelEditor({
   const current = Array.isArray(settings.worklog_task_columns)
     ? settings.worklog_task_columns.map(String)
     : []
-  const candidates = columns.filter((c) => c.type !== 'lookup')
+  const candidates = columns.filter((c) => !isComputed(c))
   const toggle = (key: string, on: boolean) => {
     const next = on ? [...current, key] : current.filter((k) => k !== key)
     // Keep sheet order (ID first) so the label reads consistently.

@@ -22,6 +22,7 @@ export function AddSheetDialog({ onClose }: Props) {
   const navigate = useNavigate()
   const [name, setName] = useState('')
   const [hasWeekGrid, setHasWeekGrid] = useState(true)
+  const [isMaster, setIsMaster] = useState(false)
   const [file, setFile] = useState<File | null>(null)
   const [wizard, setWizard] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -29,7 +30,11 @@ export function AddSheetDialog({ onClose }: Props) {
 
   const mutation = useMutation({
     mutationFn: async () => {
-      const s = await api.createSheet({ name: name.trim(), has_week_grid: hasWeekGrid })
+      const s = await api.createSheet({
+        name: name.trim(),
+        has_week_grid: hasWeekGrid,
+        is_master: isMaster,
+      })
       return { id: String(s.id) }
     },
     onSuccess: async (sheet) => {
@@ -51,6 +56,7 @@ export function AddSheetDialog({ onClose }: Props) {
         file={file}
         defaultName={name.trim()}
         hasWeekGrid={hasWeekGrid}
+        isMaster={isMaster}
         onBack={() => setWizard(false)}
         onClose={onClose}
       />
@@ -93,6 +99,22 @@ export function AddSheetDialog({ onClose }: Props) {
             desc="属性列のみの一覧／参照用シート"
           />
         </div>
+
+        <label className="mt-3 flex items-start gap-2 text-[12px] text-[var(--ink2)]">
+          <input
+            type="checkbox"
+            checked={isMaster}
+            onChange={(e) => setIsMaster(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-[var(--green)]"
+          />
+          <span>
+            マスタにする（一覧に出さない）
+            <span className="block text-[11px] text-[var(--ink3)]">
+              参照(LOOKUP)や数式の元にする一覧向け。サイドバーの「シート」やダッシュボードの
+              シート選択には出ず、「マスタ」から開けます。
+            </span>
+          </span>
+        </label>
 
         <div className="mb-1.5 mt-4 text-[12px] text-[var(--ink2)]">
           Excelから取り込む<span className="text-[var(--ink3)]">（任意）</span>

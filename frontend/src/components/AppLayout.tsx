@@ -9,6 +9,8 @@ import { NotificationBell } from '@/components/NotificationBell'
 import {
   CalendarIcon,
   ChartIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
   GearIcon,
   LogoutIcon,
   MembersIcon,
@@ -50,7 +52,12 @@ export function AppLayout() {
   const openSearch = useCallback(() => setSearchOpen(true), [])
   useGlobalSearchHotkey(openSearch)
 
-  const sheets = [...(sheetsQ.data ?? [])].sort((a, b) => a.order - b.order)
+  const allSheets = [...(sheetsQ.data ?? [])].sort((a, b) => a.order - b.order)
+  // マスタシートは「シート」に並べない（要望: マスタがたくさん見えると使いにくい）。
+  // 開けないと編集できないので、下の「マスタ」から畳んだ形で出す。
+  const sheets = allSheets.filter((s) => !s.is_master)
+  const masters = allSheets.filter((s) => s.is_master)
+  const [showMasters, setShowMasters] = useState(false)
   const appTitle = org?.settings?.app_title?.trim() || '工数スケジュール'
 
   // Close the mobile drawer on route change.
@@ -134,6 +141,24 @@ export function AppLayout() {
             <PlusIcon className="h-[15px] w-[15px]" strokeWidth={1.8} />
             シート追加
           </button>
+
+          {/* ---- Masters (collapsed by day-to-day work) ---- */}
+          {masters.length > 0 && (
+            <>
+              <button
+                onClick={() => setShowMasters((v) => !v)}
+                className="mb-1 flex items-center gap-1.5 rounded-[9px] px-2.5 py-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-[#8FB0A2] hover:bg-[var(--green-line)] hover:text-white"
+              >
+                {showMasters ? (
+                  <ChevronUpIcon className="h-3 w-3" />
+                ) : (
+                  <ChevronDownIcon className="h-3 w-3" />
+                )}
+                マスタ（{masters.length}）
+              </button>
+              {showMasters && masters.map((s) => <SheetNavItem key={s.id} sheet={s} />)}
+            </>
+          )}
 
           {/* ---- Divider + fixed group ---- */}
           <div className="my-2 border-t border-[var(--green-line)]" />

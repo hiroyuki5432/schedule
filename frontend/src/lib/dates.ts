@@ -2,6 +2,21 @@
 
 export const MS_WEEK = 7 * 24 * 60 * 60 * 1000
 
+// 保存済みの日付は 'YYYY-MM-DD'（サーバ側が入口で揃える）。ただし過去の取り込みで
+// '2025-10-18 00:00:00' や '2025/10/18' のまま入った値が残っていることがあるので、
+// 表示と <input type="date"> に渡すときだけ「日」までに直す。値そのものは、シート設定の
+// 「値を日付に揃える」か、次に保存したときに直る。
+const LOOSE_DATE = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/
+
+/** 日付セルの表示文字列。日付として読めない値はそのまま返す。 */
+export function dateCellText(v: unknown): string {
+  if (v == null) return ''
+  const s = String(v).trim()
+  const m = LOOSE_DATE.exec(s)
+  if (!m) return s
+  return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`
+}
+
 /** Parse a YYYY-MM-DD string into a local Date at midnight. */
 export function parseDate(s: string): Date {
   const [y, m, d] = s.split('-').map(Number)

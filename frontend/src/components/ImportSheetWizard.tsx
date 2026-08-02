@@ -24,6 +24,8 @@ interface Props {
   /** シート名 typed in the 追加ダイアログ (blank → the worksheet's own name). */
   defaultName: string
   hasWeekGrid: boolean
+  /** マスタシートとして作る（サイドバーの一覧には出さない）。 */
+  isMaster?: boolean
   /** Back to the 追加ダイアログ. */
   onBack: () => void
   onClose: () => void
@@ -57,7 +59,14 @@ const TYPE_LABEL: Record<string, string> = {
 
 const TYPE_OPTIONS: ColumnType[] = ['text', 'number', 'date', 'dropdown', 'member']
 
-export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onClose }: Props) {
+export function ImportSheetWizard({
+  file,
+  defaultName,
+  hasWeekGrid,
+  isMaster = false,
+  onBack,
+  onClose,
+}: Props) {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const [step, setStep] = useState(0)
@@ -180,6 +189,10 @@ export function ImportSheetWizard({ file, defaultName, hasWeekGrid, onBack, onCl
             mapping: chosen,
           })
           .catch(() => {})
+      }
+      // 取り込みAPIは通常シートを作るので、マスタ指定はあとから立てる。
+      if (isMaster) {
+        await api.updateSheet(String(r.sheet_id), { is_master: true }).catch(() => {})
       }
       toast.show(
         `「${r.name}」を作成しました（列 ${r.columns} / 行 ${r.created}）`,

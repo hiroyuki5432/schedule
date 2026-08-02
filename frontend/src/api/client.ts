@@ -75,7 +75,7 @@ export const deleteMember = (id: string) => http.del<void>(`/api/members/${id}`)
 // ---- Sheets ----
 export const getSheets = () => http.get<Sheet[]>('/api/sheets')
 
-export const createSheet = (body: { name: string; has_week_grid: boolean }) =>
+export const createSheet = (body: { name: string; has_week_grid: boolean; is_master?: boolean }) =>
   http.post<Sheet>('/api/sheets', body)
 
 export const getSheet = (id: string) => http.get<SheetDetail>(`/api/sheets/${id}`)
@@ -85,7 +85,12 @@ export const updateSheet = (
   body: Partial<
     Pick<
       Sheet,
-      'name' | 'has_week_grid' | 'key_column_id' | 'color_basis_column_id' | 'order'
+      | 'name'
+      | 'has_week_grid'
+      | 'is_master'
+      | 'key_column_id'
+      | 'color_basis_column_id'
+      | 'order'
     >
   > & { settings?: SheetSettings },
 ) => http.patch<Sheet>(`/api/sheets/${id}`, body)
@@ -230,7 +235,7 @@ export interface ImportRowsColumn {
    *  deleted, or turned into a 参照(LOOKUP) column (computed, never imported).
    *  `target` is cleared in that case so the counts stay honest. */
   lost_target: string
-  lost_reason: '' | 'lookup' | 'missing'
+  lost_reason: '' | 'computed' | 'missing'
   /** Set when the header is an ISO week date (週次工数の列). */
   week_start: string | null
   filled: number

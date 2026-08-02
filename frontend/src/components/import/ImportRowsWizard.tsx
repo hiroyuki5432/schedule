@@ -410,12 +410,12 @@ function PreviewStep({
       )
     }
   })
-  // 前回の設定が指していた列が、その後で改名・削除されたり参照(LOOKUP)列に
+  // 前回の設定が指していた列が、その後で改名・削除されたり計算列（参照・数式）に
   // 変わっていることがある。取り込みでは元々無視されるが、黙って減るのは困る。
   src.columns.forEach((c) => {
-    if (c.lost_reason === 'lookup') {
+    if (c.lost_reason === 'computed') {
       warnings.push(
-        `「${c.header}」→「${c.lost_target}」は参照(LOOKUP)列のため取り込みません（値は自動計算されます）。`,
+        `「${c.header}」→「${c.lost_target}」は計算列のため取り込みません（値は自動計算されます）。`,
       )
     } else if (c.lost_reason === 'missing') {
       warnings.push(

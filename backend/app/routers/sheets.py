@@ -77,6 +77,7 @@ def create_sheet(
         org_id=user.org_id,
         name=payload.name,
         has_week_grid=payload.has_week_grid,
+        is_master=payload.is_master,
         order=max_order + 1,
         numbering_rule={"prefix": "", "digits": 3, "next_seq": 1},
     )

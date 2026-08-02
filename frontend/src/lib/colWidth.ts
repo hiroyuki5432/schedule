@@ -49,6 +49,7 @@ export function defaultColWidth(c: Column): number {
     case 'text':
       return 176
     case 'lookup':
+    case 'formula':
       return 150
     default:
       return 128
@@ -69,6 +70,7 @@ export function widthRange(t: Column['type']): [number, number] {
     case 'text':
       return [96, 240]
     case 'lookup':
+    case 'formula':
       return [96, 200]
     default:
       return [80, 150]

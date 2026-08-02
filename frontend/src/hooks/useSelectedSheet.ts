@@ -22,7 +22,10 @@ export interface SelectedSheet {
 export function useSelectedSheet(storageKey: string, onlyWeekGrid = false): SelectedSheet {
   const sheetsQ = useSheets()
   const sheets = useMemo(() => {
-    const all = [...(sheetsQ.data ?? [])].sort((a, b) => a.order - b.order)
+    // マスタシートは作業対象ではないので、この画面のシート選択には出さない。
+    const all = [...(sheetsQ.data ?? [])]
+      .filter((s) => !s.is_master)
+      .sort((a, b) => a.order - b.order)
     return onlyWeekGrid ? all.filter((s) => s.has_week_grid) : all
   }, [sheetsQ.data, onlyWeekGrid])
 

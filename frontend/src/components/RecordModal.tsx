@@ -11,6 +11,7 @@ import { Modal } from '@/components/ui/Modal'
 import { InlineCell } from '@/components/schedule/InlineCell'
 import { HistoryPanel } from '@/components/schedule/HistoryPanel'
 import { statusFromPhases } from '@/lib/status'
+import { isComputed } from '@/lib/computed'
 import { cn } from '@/lib/format'
 import type { CellValue, Column, Member, Row } from '@/types/api'
 
@@ -21,7 +22,7 @@ export function RecordModal({
   columns,
   members,
   rows,
-  lookupValue,
+  computedValue,
   autoStatusColId,
   autoStatusBadge,
   onClose,
@@ -33,7 +34,7 @@ export function RecordModal({
   columns: Column[]
   members: Member[] | undefined
   rows: Row[]
-  lookupValue: (column: Column, row: Row) => string | null
+  computedValue: (column: Column, row: Row) => string | null
   /** Set only where a status column is derived from milestones (テーブル表示).
    *  The schedule leaves these out and lets InlineCell resolve status itself. */
   autoStatusColId?: string | null
@@ -74,7 +75,7 @@ export function RecordModal({
                 row={row}
                 column={c}
                 members={members ?? []}
-                lookupValue={lookupValue}
+                computedValue={computedValue}
                 rows={rows}
                 onSave={(v) => onSaveCell(c.id, v)}
               />
@@ -136,19 +137,19 @@ function ModalCell({
   row,
   column,
   members,
-  lookupValue,
+  computedValue,
   rows,
   onSave,
 }: {
   row: Row
   column: Column
   members: Member[]
-  lookupValue: (column: Column, row: Row) => string | null
+  computedValue: (column: Column, row: Row) => string | null
   rows: Row[]
   onSave: (v: CellValue) => void
 }) {
-  if (column.type === 'lookup') {
-    const text = lookupValue(column, row) ?? ''
+  if (isComputed(column)) {
+    const text = computedValue(column, row) ?? ''
     return (
       <div className="w-full whitespace-pre-wrap break-words px-2.5 py-1.5 text-[12.5px] text-[var(--ink2)]">
         {text || <span className="text-[var(--ink3)]">—</span>}
@@ -170,7 +171,7 @@ function ModalCell({
         row={row}
         column={column}
         members={members}
-        lookupValue={lookupValue}
+        computedValue={computedValue}
         rows={rows}
         onSave={onSave}
       />

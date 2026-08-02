@@ -9,15 +9,39 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import history_service
+from app.date_values import normalize_date_text
 from app.db import get_db
 from app.deps import get_row_for_user, get_sheet_for_user
-from app.models import Row, RowEvent, Sheet, User
+from app.models import Column, Row, RowEvent, Sheet, User
 from app.schemas import RowCreate, RowEventOut, RowOut, RowUpdate
 from app.security import current_user
 from app.weeks import current_week_start
 from app.worklog_service import org_week_start_weekday
 
 router = APIRouter(prefix="/api", tags=["rows"])
+
+
+def _normalize_cells(db: Session, sheet_id: int, data: dict | None) -> dict:
+    """日付列の値を 'YYYY-MM-DD' に揃えてから保存する。
+
+    貼り付けや取り込み経由だと `2025/10/18` や `2025-10-18 00:00:00` のまま入って
+    しまい、並べ替えや期間計算が効かなくなる。入口がどこであれ保存形は1つにする。
+    読めない値は残す（消すよりは見えて直せるほうがよい）。
+    """
+    if not data:
+        return data or {}
+    date_col_ids = {
+        str(cid)
+        for cid in db.execute(
+            select(Column.id).where(Column.sheet_id == sheet_id, Column.type == "date")
+        ).scalars()
+    }
+    if not date_col_ids:
+        return data
+    out = dict(data)
+    for cid in date_col_ids & set(out):
+        out[cid] = normalize_date_text(out[cid])
+    return out
 
 
 def _next_key_value(db: Session, sheet: Sheet) -> str:
@@ -72,7 +96,7 @@ def create_row(
     row = Row(
         sheet_id=sheet_id,
         key_value=key_value,
-        data=payload.data or {},
+        data=_normalize_cells(db, sheet_id, payload.data),
         version=1,
         created_by=user.id,
         updated_by=user.id,
@@ -119,7 +143,7 @@ def create_child_row(
         sheet_id=parent.sheet_id,
         parent_row_id=parent.id,
         key_value=key_value,
-        data=payload.data or {},
+        data=_normalize_cells(db, parent.sheet_id, payload.data),
         version=1,
         created_by=user.id,
         updated_by=user.id,
@@ -166,19 +190,21 @@ def update_row(
             ),
         )
     fields = payload.model_dump(exclude_unset=True)
+    # 正規化してから履歴を取る（履歴に残るのも保存されるのと同じ値にする）。
+    new_data = _normalize_cells(db, row.sheet_id, payload.data)
     # Log the diff BEFORE mutating, while `row` still holds the old values.
     history_service.record_row_update(
         db,
         user=user,
         row=row,
-        new_data=payload.data,
+        new_data=new_data,
         new_key=payload.key_value,
         new_progress=payload.progress if "progress" in fields else ...,
         new_depends_on=payload.depends_on if "depends_on" in fields else ...,
     )
     if payload.key_value is not None and payload.key_value != row.key_value:
         row.key_value = payload.key_value
-    row.data = payload.data
+    row.data = new_data
     # progress / depends_on are applied only when present in the body (so a normal
     # data edit never clears them); an explicit null clears progress.
     if "progress" in fields:

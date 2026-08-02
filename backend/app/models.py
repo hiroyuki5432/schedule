@@ -69,6 +69,10 @@ class Sheet(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     order: Mapped[int] = mapped_column("order", Integer, nullable=False, default=0)
     has_week_grid: Mapped[bool] = mapped_column(default=True, nullable=False)
+    # マスタシート: 参照(LOOKUP)や数式の元にする一覧。サイドバーの「シート」からは
+    # 隠れ、ダッシュボード等のシート選択にも出てこない（要望: マスタが並ぶと使いにくい）。
+    # 中身は普通のシートと同じで、開けば編集できる。
+    is_master: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Nullable FKs to columns. Defined without DB-level FK to avoid create_all ordering issues
     # (columns table references sheets); validated at the application layer.
     key_column_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -105,7 +109,7 @@ class Column(Base):
     sheet_id: Mapped[int] = mapped_column(ForeignKey("sheets.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     order: Mapped[int] = mapped_column("order", Integer, nullable=False, default=0)
-    type: Mapped[str] = mapped_column(String(32), nullable=False)  # text|number|date|dropdown|status|member|lookup
+    type: Mapped[str] = mapped_column(String(32), nullable=False)  # text|number|date|dropdown|status|member|lookup|formula
     is_key: Mapped[bool] = mapped_column(default=False, nullable=False)
     config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 

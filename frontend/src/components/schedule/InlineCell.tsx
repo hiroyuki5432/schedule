@@ -11,6 +11,8 @@ import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import { deriveStatus, literalStatusBadge, statusOptions } from '@/lib/status'
+import { isComputed } from '@/lib/computed'
+import { dateCellText } from '@/lib/dates'
 import { cn } from '@/lib/format'
 import type { CellValue, Column, Member, Row } from '@/types/api'
 
@@ -19,7 +21,7 @@ interface Props {
   column: Column
   members: Member[]
   /** Lookup resolver: returns display value for a lookup column, or null. */
-  lookupValue?: (column: Column, row: Row) => string | null
+  computedValue?: (column: Column, row: Row) => string | null
   /** All rows in the sheet — used to build the status option list. */
   rows?: Row[]
   onSave: (value: CellValue) => void
@@ -38,7 +40,7 @@ export function InlineCell({
   row,
   column,
   members,
-  lookupValue,
+  computedValue,
   rows,
   onSave,
   className,
@@ -85,8 +87,9 @@ export function InlineCell({
     )
   }
 
-  if (column.type === 'lookup') {
-    const text = lookupValue?.(column, row) ?? ''
+  if (isComputed(column)) {
+    const text = computedValue?.(column, row) ?? ''
+    const what = column.type === 'formula' ? '数式列' : '参照列'
     return (
       <div
         className={cn(
@@ -94,7 +97,7 @@ export function InlineCell({
           pad,
           className,
         )}
-        title={text ? `${text}（参照列・読み取り専用）` : '参照列（読み取り専用）'}
+        title={text ? `${text}（${what}・読み取り専用）` : `${what}（読み取り専用）`}
       >
         {text}
       </div>
@@ -178,12 +181,10 @@ export function InlineCell({
 
   // --- Editable: text / number / date (text inputs) ---
   const inputType = column.type === 'number' ? 'number' : column.type === 'date' ? 'date' : 'text'
+  // 日付列は「日」までを見せる（時刻つきで入ってしまった古い値でも空欄にならない）。
+  const shown = column.type === 'date' ? dateCellText(value) : value == null ? '' : String(value)
   const display =
-    value == null || value === '' ? (
-      <span className="text-[var(--ink3)]">—</span>
-    ) : (
-      String(value)
-    )
+    shown === '' ? <span className="text-[var(--ink3)]">—</span> : shown
 
   if (!editing) {
     return (
@@ -191,7 +192,7 @@ export function InlineCell({
         type="button"
         onClick={() => setEditing(true)}
         // Full value on hover so narrow columns stay readable (truncated text).
-        title={value == null || value === '' ? undefined : String(value)}
+        title={shown === '' ? undefined : shown}
         className={cn(
           'box-border flex h-full w-full items-center overflow-hidden text-ellipsis whitespace-nowrap rounded text-left text-[12.5px] hover:bg-[var(--line2)]',
           pad,
@@ -208,7 +209,7 @@ export function InlineCell({
       type={inputType}
       pad={pad}
       className={className}
-      initial={value == null ? '' : String(value)}
+      initial={shown}
       onCommit={(v) => {
         setEditing(false)
         const next: CellValue =

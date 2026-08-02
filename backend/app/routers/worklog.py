@@ -24,6 +24,7 @@ from app.db import get_db
 from app.deps import get_row_for_user
 from app.models import Column, Organization, Row, Sheet, User, WorkLog
 from app.schemas import (
+    COMPUTED_COLUMN_TYPES,
     TaskOption,
     UserDayWorkLog,
     WorkLogCreate,
@@ -107,8 +108,8 @@ def _task_label(
             parts.append(row.key_value or "")
             continue
         col = by_id.get(key)
-        if col is None or col.type == "lookup":
-            continue  # 参照列はサーバ側で解決しないので表示に使わない
+        if col is None or col.type in COMPUTED_COLUMN_TYPES:
+            continue  # 計算列はサーバ側で解決しないので表示に使わない
         v = data.get(key)
         if v is None or v == "":
             continue

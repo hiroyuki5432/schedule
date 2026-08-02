@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addWeeks, monthStarts, startOfWeek, weekIndex } from '@/lib/dates'
+import { addWeeks, dateCellText, monthStarts, startOfWeek, weekIndex } from '@/lib/dates'
 
 describe('startOfWeek', () => {
   it('snaps to the Monday of the week (default)', () => {
@@ -35,5 +35,25 @@ describe('monthStarts', () => {
   it('flags the first week and any week starting a new month', () => {
     const weeks = [new Date(2026, 5, 22), new Date(2026, 5, 29), new Date(2026, 6, 6)]
     expect(monthStarts(weeks)).toEqual([true, false, true])
+  })
+})
+
+describe('dateCellText', () => {
+  it('shows the day part of values that came in with a time', () => {
+    expect(dateCellText('2025-10-18 00:00:00')).toBe('2025-10-18')
+    expect(dateCellText('2025-10-18T09:30:00')).toBe('2025-10-18')
+  })
+
+  it('normalises slash/dot dates and single digits', () => {
+    expect(dateCellText('2025/10/18')).toBe('2025-10-18')
+    expect(dateCellText('2025/1/8')).toBe('2025-01-08')
+    expect(dateCellText('2025.10.18')).toBe('2025-10-18')
+  })
+
+  it('leaves anything that is not a date alone', () => {
+    expect(dateCellText('未定')).toBe('未定')
+    expect(dateCellText('')).toBe('')
+    expect(dateCellText(null)).toBe('')
+    expect(dateCellText(undefined)).toBe('')
   })
 })

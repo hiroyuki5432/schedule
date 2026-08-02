@@ -163,7 +163,7 @@ export function ImportWorkbookDialog({ onClose }: Props) {
   }
 
   return (
-    <Modal title="Excel一括取り込み" onClose={onClose} widthClass="w-[980px] max-w-[96vw]">
+    <Modal title="Excel一括取り込み" onClose={onClose} widthClass="w-[1080px] max-w-[96vw]">
       {!file ? (
         <div>
           <button
@@ -227,6 +227,9 @@ export function ImportWorkbookDialog({ onClose }: Props) {
                     </th>
                     <th className="border-b border-[var(--line)] px-2 py-1.5 text-left">
                       取り込み先
+                    </th>
+                    <th className="w-[118px] border-b border-[var(--line)] px-2 py-1.5 text-left">
+                      形式
                     </th>
                     <th className="w-[76px] border-b border-[var(--line)] px-2 py-1.5 text-left">
                       見出し行
@@ -327,11 +330,14 @@ function PlanRow({
   /** The user's un-analysed edits. They win over `row` so the controls respond
    *  immediately instead of snapping back while the dry-run catches up. */
   ov: WorkbookPlanItem | undefined
-  sheets: { id: string; name: string }[]
+  sheets: { id: string; name: string; has_week_grid: boolean }[]
   onPatch: (p: Partial<WorkbookPlanItem>) => void
 }) {
   const action = row.error ? SKIP : (ov?.action ?? row.action)
   const targetId = ov && 'target_sheet_id' in ov ? ov.target_sheet_id : row.target_sheet_id
+  const targetSheet = sheets.find((s) => String(s.id) === String(targetId ?? ''))
+  // 新規作成のときだけ選べる。既定はサーバが見出し行から推測した形式。
+  const weekGrid = ov?.has_week_grid ?? row.has_week_grid
   const headerRow = ov?.header_row ?? row.header_row
   const lastRow = ov?.last_row ?? row.last_row
   const targetName = ov?.target_sheet_name ?? row.target_sheet_name
@@ -381,6 +387,26 @@ function PlanRow({
             onChange={(e) => onPatch({ target_sheet_name: e.target.value })}
             className="mt-1 h-7 w-full px-2 py-1 text-[11.5px]"
           />
+        )}
+      </td>
+
+      <td className="border-b border-[var(--line)] px-2 py-1.5 align-top">
+        {skipped ? (
+          <span className="text-[var(--ink3)]">—</span>
+        ) : action === NEW_SHEET ? (
+          <Select
+            value={weekGrid ? 'schedule' : 'table'}
+            className="h-7 w-full px-2 py-0 text-[11.5px]"
+            onChange={(e) => onPatch({ has_week_grid: e.target.value === 'schedule' })}
+          >
+            <option value="schedule">スケジュール</option>
+            <option value="table">テーブル</option>
+          </Select>
+        ) : (
+          // 既存シートに入れるときは、そのシートの形式のまま（変えられない）。
+          <span className="text-[var(--ink3)]">
+            {targetSheet ? (targetSheet.has_week_grid ? 'スケジュール' : 'テーブル') : '—'}
+          </span>
         )}
       </td>
 

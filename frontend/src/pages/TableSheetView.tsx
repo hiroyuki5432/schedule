@@ -6,7 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { useMembers } from '@/hooks/useSheets'
 import { useRowMutation } from '@/hooks/useRowMutation'
-import { useLookupTargets } from '@/hooks/useLookupTargets'
+import { useComputedValues } from '@/hooks/useComputedValues'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
@@ -19,6 +19,7 @@ import { statusFromPhases } from '@/lib/status'
 import { ColumnHeaderMenu } from '@/components/schedule/ColumnHeaderMenu'
 import { buildColFilterOptions, filterKindOf, matchColFilter } from '@/lib/colFilter'
 import type { ColFilter, ColFilterOptions } from '@/lib/colFilter'
+import { isComputed } from '@/lib/computed'
 import { cn, normalizeDateForSort } from '@/lib/format'
 import { ID_COL_KEY, defaultColWidth, fitWidth, useColumnWidths } from '@/lib/colWidth'
 import { usePersistentState } from '@/hooks/usePersistentState'
@@ -84,13 +85,13 @@ function measureValue(
   c: Column,
   row: Row,
   members: Member[],
-  lookupValue: (column: Column, row: Row) => string | null,
+  computedValue: (column: Column, row: Row) => string | null,
 ): string {
   if (c.type === 'member') {
     const id = row.data[c.id]
     return members.find((m) => String(m.id) === String(id ?? ''))?.name ?? ''
   }
-  if (c.type === 'lookup') return lookupValue(c, row) ?? ''
+  if (isComputed(c)) return computedValue(c, row) ?? ''
   const v = row.data[c.id]
   // Multi-line text only ever shows its first line in the table.
   return v == null ? '' : String(v).split('\n')[0]
@@ -112,7 +113,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
     [detailQ.data],
   )
   const rows: Row[] = useMemo(() => detailQ.data?.rows ?? [], [detailQ.data])
-  const { lookupValue } = useLookupTargets(columns, members)
+  const { computedValue } = useComputedValues(columns, members)
 
   // Feature 6: when a status column auto-derives from milestones, fetch each
   // row's milestones (batched) and compute a read-only badge per row.
@@ -172,7 +173,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
       const m = members.find((x) => String(x.id) === String(id ?? ''))
       return m?.name ?? ''
     }
-    if (c.type === 'lookup') return lookupValue(c, row) ?? ''
+    if (isComputed(c)) return computedValue(c, row) ?? ''
     const v = row.data[c.id]
     if (v == null || v === '') return ''
     if (c.type === 'number') {
@@ -196,8 +197,8 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
       // user actually sees.
       col.id === autoStatusColId
         ? (autoStatusByRow.get(r.id)?.label ?? '')
-        : measureValue(col, r, members, lookupValue),
-    [members, lookupValue, autoStatusColId, autoStatusByRow],
+        : measureValue(col, r, members, computedValue),
+    [members, computedValue, autoStatusColId, autoStatusByRow],
   )
   const filterOptions = useMemo(
     () => buildColFilterOptions(columns, rows, resolveColValue),
@@ -278,11 +279,11 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
         c.id,
         fitWidth(
           c,
-          rows.map((r) => measureValue(c, r, members, lookupValue)),
+          rows.map((r) => measureValue(c, r, members, computedValue)),
         ),
       )
     return m
-  }, [columns, rows, members, lookupValue])
+  }, [columns, rows, members, computedValue])
   const { colW, startResize, resetWidth } = useColumnWidths()
   const cw = (c: Column) => colW[c.id] ?? fitWidths.get(c.id) ?? defaultColWidth(c)
   const idW = colW[ID_COL_KEY] ?? ID_W_DEFAULT
@@ -569,7 +570,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                             row={row}
                             column={c}
                             members={members}
-                            lookupValue={lookupValue}
+                            computedValue={computedValue}
                             rows={rows}
                             compact
                             onSave={(v) => saveCell(row, c.id, v)}
@@ -600,7 +601,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
           columns={columns}
           members={members}
           rows={rows}
-          lookupValue={lookupValue}
+          computedValue={computedValue}
           autoStatusColId={autoStatusColId}
           autoStatusBadge={autoStatusByRow.get(modalRow.id) ?? null}
           onClose={() => setModalRowId(null)}

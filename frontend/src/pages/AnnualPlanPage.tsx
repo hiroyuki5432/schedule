@@ -10,7 +10,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { useMembers, useSheets } from '@/hooks/useSheets'
-import { useLookupTargets } from '@/hooks/useLookupTargets'
+import { useComputedValues } from '@/hooks/useComputedValues'
 import { usePersistentState } from '@/hooks/usePersistentState'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
@@ -20,6 +20,7 @@ import { Select } from '@/components/ui/Select'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { fiscalCol, fiscalYearOf, parseDate } from '@/lib/dates'
+import { isComputed } from '@/lib/computed'
 import { cn } from '@/lib/format'
 import type { Column, Effort, Member, Row } from '@/types/api'
 
@@ -85,7 +86,10 @@ interface Preset {
 export function AnnualPlanPage() {
   const sheetsQ = useSheets()
   const sheets = useMemo(
-    () => [...(sheetsQ.data ?? [])].sort((a, b) => a.order - b.order),
+    () =>
+      [...(sheetsQ.data ?? [])]
+        .filter((s) => !s.is_master)
+        .sort((a, b) => a.order - b.order),
     [sheetsQ.data],
   )
   const [sheetIdState, setSheetIdState] = usePersistentState('view:annualPlan:sheetId', '')
@@ -107,18 +111,18 @@ export function AnnualPlanPage() {
   const rows = useMemo(() => detailQ.data?.rows ?? [], [detailQ.data])
   const effort: Effort[] = useMemo(() => effortQ.data ?? [], [effortQ.data])
 
-  // Group-by candidates: dropdown / status / member / text / lookup. 参照(LOOKUP)
-  // 列も選べる（値は他シートから解決した表示値で集約）— 要望: 大分類にLOOKUP列。
+  // Group-by candidates: dropdown / status / member / text / 計算列. 参照(LOOKUP)や
+  // 数式の列も選べる（値は計算した表示値で集約）— 要望: 大分類にLOOKUP列。
   const groupable = useMemo(
     () =>
       columns.filter((c) =>
-        ['dropdown', 'status', 'member', 'text', 'lookup'].includes(c.type),
+        ['dropdown', 'status', 'member', 'text', 'lookup', 'formula'].includes(c.type),
       ),
     [columns],
   )
-  const { lookupValue } = useLookupTargets(columns, membersQ.data ?? [])
+  const { computedValue } = useComputedValues(columns, membersQ.data ?? [])
   const defaultBigId = useMemo(() => {
-    const prio = ['dropdown', 'member', 'status', 'lookup', 'text']
+    const prio = ['dropdown', 'member', 'status', 'lookup', 'formula', 'text']
     return [...groupable].sort((a, b) => prio.indexOf(a.type) - prio.indexOf(b.type))[0]?.id
   }, [groupable])
 
@@ -193,8 +197,8 @@ export function AnnualPlanPage() {
 
   function valueOf(row: Row, col: Column): string {
     // 参照(LOOKUP)列は保存値ではなく解決した表示値で束ねる。
-    if (col.type === 'lookup') {
-      const resolved = lookupValue(col, row)
+    if (isComputed(col)) {
+      const resolved = computedValue(col, row)
       return resolved == null || resolved === '' ? UNSET : resolved
     }
     const v = row.data[col.id]
@@ -267,7 +271,7 @@ export function AnnualPlanPage() {
     sortRec(rootChildren)
     return rootChildren
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, big, mid, small, year, membersById, childrenByParent, effortWeeksByRow, lookupValue])
+  }, [rows, big, mid, small, year, membersById, childrenByParent, effortWeeksByRow, computedValue])
 
   const currentMonth = year === thisYear ? fiscalCol(new Date()) : -1
   const loading = detailQ.isLoading || effortQ.isLoading

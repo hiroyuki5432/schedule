@@ -12,6 +12,7 @@ import json
 from datetime import date, datetime
 
 from fastapi import HTTPException, UploadFile, status
+from app.date_values import parse_date_value
 
 #: Raw rows returned for the 見出し行 picker.
 PREVIEW_ROWS = 30
@@ -152,17 +153,12 @@ def looks_numeric(v) -> bool:
 
 
 def coerce_date(raw) -> date | None:
-    """Excel cell → date object, or None when it isn't one."""
-    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
-        return None
-    if isinstance(raw, datetime):
-        return raw.date()
-    if isinstance(raw, date):
-        return raw
-    try:
-        return date.fromisoformat(str(raw).strip())
-    except ValueError:
-        return None
+    """Excel cell → date object, or None when it isn't one.
+
+    書き方の違い（`2025/10/18`・`2025年10月18日`・時刻つき）の吸収は
+    :mod:`app.date_values` に集約している。
+    """
+    return parse_date_value(raw)
 
 
 def preview_of(grid: list[tuple], limit: int = PREVIEW_ROWS) -> list[dict]:

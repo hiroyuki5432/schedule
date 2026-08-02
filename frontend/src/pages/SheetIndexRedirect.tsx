@@ -20,7 +20,10 @@ export function SheetIndexRedirect() {
     )
   }
 
-  const sheets = [...(sheetsQ.data ?? [])].sort((a, b) => a.order - b.order)
+  // マスタシートには着地しない（作業用のシートだけが行き先）。
+  const sheets = [...(sheetsQ.data ?? [])]
+    .filter((s) => !s.is_master)
+    .sort((a, b) => a.order - b.order)
   if (sheets.length > 0) {
     // Resume the last opened sheet when it still exists, else the first sheet.
     const last = getLastSheet()

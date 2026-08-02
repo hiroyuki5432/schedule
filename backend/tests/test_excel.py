@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import datetime
 
 from openpyxl import Workbook, load_workbook
 
@@ -115,6 +116,48 @@ def test_import_ignores_lookup_columns(auth_client):
     data = rows[0]["data"]
     assert data[str(col)] == "設計"
     assert str(lk_id) not in data  # lookup value never written
+
+
+def test_import_ignores_formula_columns(auth_client):
+    """数式列も計算列なので、Excel 側に値が入っていても取り込まない。"""
+    sid = make_sheet(auth_client, "F")
+    col = _add_text_column(auth_client, sid, "件名")
+    fx = auth_client.post(
+        f"/api/sheets/{sid}/columns",
+        json={"name": "日数", "type": "formula", "config": {"expr": "[完了日] - [開始日]"}},
+    )
+    assert fx.status_code in (200, 201), fx.text
+    fx_id = fx.json()["id"]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["ID", "件名", "日数"])
+    ws.append(["A-1", "設計", 99])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    r = auth_client.post(f"/api/sheets/{sid}/import.xlsx", files={"file": ("in.xlsx", buf, _MEDIA)})
+    assert r.status_code == 200, r.text
+    data = auth_client.get(f"/api/sheets/{sid}/rows").json()[0]["data"]
+    assert data[str(col)] == "設計"
+    assert str(fx_id) not in data
+
+
+def test_renaming_a_column_follows_through_to_formulas(auth_client):
+    """数式は列を名前で参照するので、改名したら式のほうも書き換わること。"""
+    sid = make_sheet(auth_client, "R")
+    unit = _add_text_column(auth_client, sid, "単価")
+    _add_text_column(auth_client, sid, "数量")
+    fx = auth_client.post(
+        f"/api/sheets/{sid}/columns",
+        json={"name": "金額", "type": "formula", "config": {"expr": "[単価] * [数量]"}},
+    ).json()
+
+    assert auth_client.patch(f"/api/columns/{unit}", json={"name": "税抜単価"}).status_code == 200
+
+    cols = {c["id"]: c for c in auth_client.get(f"/api/sheets/{sid}/columns").json()}
+    assert cols[fx["id"]]["config"]["expr"] == "[税抜単価] * [数量]"
 
 
 def test_export_has_sched_and_template_milestone_columns(auth_client):
@@ -552,3 +595,75 @@ def test_import_weekly_effort_future_planned(auth_client):
     assert len(effort) == 1
     assert float(effort[0]["planned_hours"]) == 12.0
     assert effort[0]["actual_hours"] is None
+
+
+def test_date_columns_survive_stray_placeholder_cells(auth_client):
+    """要望: 日付で取り込んだのに列が自由入力になり、値が 2025-10-18 00:00:00 になる。
+
+    原因は「-」1個で列全体が自由入力に落ち、日時セルがそのまま文字列化されていたこと。
+    日付として作られ、値は 'YYYY-MM-DD' で入ること。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "予定"
+    ws.append(["ID", "件名", "納期"])
+    ws.append(["A-1", "設計", datetime(2025, 10, 18)])
+    ws.append(["A-2", "実装", "2025/11/4"])   # 文字列の日付（日本語Excelでよくある）
+    ws.append(["A-3", "検査", "-"])            # 日付なしのプレースホルダ
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    r = auth_client.post(
+        "/api/sheets/import.xlsx",
+        files={"file": ("in.xlsx", buf, _MEDIA)},
+        data={"name": "予定", "has_week_grid": "false"},
+    )
+    assert r.status_code == 200, r.text
+    sid = r.json()["sheet_id"]
+
+    detail = auth_client.get(f"/api/sheets/{sid}").json()
+    due = next(c for c in detail["columns"] if c["name"] == "納期")
+    assert due["type"] == "date"
+
+    by_key = {row["key_value"]: row["data"] for row in detail["rows"]}
+    assert by_key["A-1"][str(due["id"])] == "2025-10-18"
+    assert by_key["A-2"][str(due["id"])] == "2025-11-04"
+    assert by_key["A-3"].get(str(due["id"])) in (None, "")
+
+
+def test_switching_a_column_to_date_cleans_up_the_stored_values(auth_client):
+    """要望: 日付に変えても時間が残ったまま。型を変えたら中身も揃うこと。"""
+    sid = make_sheet(auth_client, "既存")
+    col = _add_text_column(auth_client, sid, "納期")
+    for key, value in [("A-1", "2025-10-18 00:00:00"), ("A-2", "2025/11/4"), ("A-3", "未定")]:
+        auth_client.post(f"/api/sheets/{sid}/rows", json={"key_value": key, "data": {str(col): value}})
+
+    assert auth_client.patch(f"/api/columns/{col}", json={"type": "date"}).status_code == 200
+
+    by_key = {r["key_value"]: r["data"] for r in auth_client.get(f"/api/sheets/{sid}/rows").json()}
+    assert by_key["A-1"][str(col)] == "2025-10-18"
+    assert by_key["A-2"][str(col)] == "2025-11-04"
+    assert by_key["A-3"][str(col)] == "未定"  # 読めない値は消さない
+
+    # すでに日付型の列にもう一度かけても直せる（シート設定の「値を日付に揃える」）。
+    auth_client.post(f"/api/sheets/{sid}/rows", json={"key_value": "A-4", "data": {}})
+    assert auth_client.patch(f"/api/columns/{col}", json={"type": "date"}).status_code == 200
+
+
+def test_a_date_cell_is_stored_as_a_plain_date_whatever_was_typed(auth_client):
+    """貼り付けや手入力で時刻つき・スラッシュ区切りが来ても保存形は 'YYYY-MM-DD'。"""
+    sid = make_sheet(auth_client, "入力")
+    r = auth_client.post(f"/api/sheets/{sid}/columns", json={"name": "納期", "type": "date"})
+    col = str(r.json()["id"])
+
+    row = auth_client.post(
+        f"/api/sheets/{sid}/rows",
+        json={"key_value": "A-1", "data": {col: "2025/10/18"}},
+    ).json()
+    assert row["data"][col] == "2025-10-18"
+
+    updated = auth_client.patch(
+        f"/api/rows/{row['id']}",
+        json={"data": {col: "2025-12-01 00:00:00"}, "version": row["version"]},
+    ).json()
+    assert updated["data"][col] == "2025-12-01"

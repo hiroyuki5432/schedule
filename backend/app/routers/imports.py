@@ -174,6 +174,9 @@ def _resolve(
         "target_sheet_id": target_id if target_id in sheets_by_id else None,
         "target_sheet_name": (preset.target_sheet_name if preset else "") or ws_name,
         "has_week_grid": preset.has_week_grid if preset else True,
+        # 誰も選んでいないとき（初めてのワークシート）は見出し行から推測する。
+        # 前回の設定 or 画面での選択があれば、それが優先。
+        "week_grid_explicit": preset is not None,
         "header_row": preset.header_row if preset else 0,
         # 0 = 最後まで. Where a sheet stops being a table is a property of the
         # source, so it rides along with everything else.
@@ -200,6 +203,7 @@ def _resolve(
                     pass
         if override.get("has_week_grid") is not None:
             plan["has_week_grid"] = bool(override["has_week_grid"])
+            plan["week_grid_explicit"] = True
         if override.get("columns"):
             plan["mapping"] = _clean_mapping(override["columns"])
 
@@ -284,6 +288,10 @@ def _analyse(
         wb, ws_name, settings["header_row"], settings["last_row"]
     )
     entry["header_row"] = hr
+    # 形式（スケジュール／テーブル）を誰も選んでいないうちは、見出しから推測した形を出す。
+    if not settings["week_grid_explicit"]:
+        settings["has_week_grid"] = excel.looks_like_schedule(header)
+        entry["has_week_grid"] = settings["has_week_grid"]
     entry["suggested_header_row"] = xlsx.auto_header_row(grid)
     entry["sheet_last_row"] = len(grid)
     entry["total_rows"] = len(data_rows)
@@ -300,12 +308,12 @@ def _analyse(
         entry["column_count"] = len(taken)
         entry.update(excel.upsert_counts(db, sheet, data_rows, id_column))
         # A saved mapping can outlive the column it points at (renamed / deleted /
-        # turned into 参照(LOOKUP)). Those are skipped on import either way — the
-        # point of saying so is that the setting is now stale.
+        # turned into 計算列). Those are skipped on import either way — the point of
+        # saying so is that the setting is now stale.
         for c in cols:
-            if c["lost_reason"] == "lookup":
+            if c["lost_reason"] == "computed":
                 entry["warnings"].append(
-                    f"「{c['header']}」→「{c['lost_target']}」は参照(LOOKUP)列になったため取り込みません（値は自動計算）"
+                    f"「{c['header']}」→「{c['lost_target']}」は計算列になったため取り込みません（値は自動計算）"
                 )
             elif c["lost_reason"] == "missing":
                 entry["warnings"].append(
@@ -389,6 +397,9 @@ def run_workbook(
             # Remember the RESOLVED 見出し行, not the 0 that means 自動判定 — the run
             # the user just confirmed is exactly what the next one should repeat.
             settings["header_row"] = hr
+            # 確認画面と同じ推測を使う（画面で選ばれていれば、そちらが優先される）。
+            if not settings["week_grid_explicit"]:
+                settings["has_week_grid"] = excel.looks_like_schedule(header)
             if settings["action"] == "existing":
                 sheet = sheets_by_id[settings["target_sheet_id"]]
                 # commit=False: this run is all-or-nothing (see the except below).

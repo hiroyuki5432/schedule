@@ -8,7 +8,12 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 Role = Literal["admin", "member"]
-ColumnType = Literal["text", "number", "date", "dropdown", "status", "member", "lookup"]
+ColumnType = Literal[
+    "text", "number", "date", "dropdown", "status", "member", "lookup", "formula"
+]
+#: 値を自動計算する列（参照(LOOKUP)／数式）。手入力できず、Excel の取り込み・書き出し
+#: の対象外。解決はフロント側で行う。
+COMPUTED_COLUMN_TYPES = ("lookup", "formula")
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +134,8 @@ class SheetOut(BaseModel):
     name: str
     order: int
     has_week_grid: bool
+    #: マスタシート（一覧に出さない参照用）。
+    is_master: bool = False
     key_column_id: Optional[int] = None
     color_basis_column_id: Optional[int] = None
     settings: dict[str, Any] = Field(default_factory=dict)
@@ -137,11 +144,13 @@ class SheetOut(BaseModel):
 class SheetCreate(BaseModel):
     name: str
     has_week_grid: bool = True
+    is_master: bool = False
 
 
 class SheetUpdate(BaseModel):
     name: Optional[str] = None
     has_week_grid: Optional[bool] = None
+    is_master: Optional[bool] = None
     key_column_id: Optional[int] = None
     color_basis_column_id: Optional[int] = None
     order: Optional[int] = None
