@@ -18,6 +18,26 @@ import type { Column, Member, Row, SheetDetail } from '@/types/api'
 
 export type TargetSheets = Record<string, SheetDetail | undefined>
 
+/** 照合キー → 参照先の行（先頭一致）。1シート・1キー列につき1回だけ作る。 */
+export type LookupIndex = Map<string, Row>
+
+/**
+ * 参照先シートを「照合キーの値 → 行」で引ける形にする。
+ *
+ * これが無いと、1セル解決するたびに参照先を頭から線形探索していた（行数×参照先行数）。
+ * 400行のシートが400行のマスタを引くと1列あたり16万回の比較になり、しかも列幅の計測・
+ * 絞り込みの候補作り・検索・セル描画と、同じ計算を1描画で何度も通る。
+ */
+export function buildLookupIndex(target: SheetDetail, matchKey: string): LookupIndex {
+  const index: LookupIndex = new Map()
+  for (const t of target.rows) {
+    const k = String(valueFor(matchKey, t) ?? '')
+    // 先頭一致（同じIDが複数あっても最初の行を返す）— 線形探索時と同じ意味。
+    if (k !== '' && !index.has(k)) index.set(k, t)
+  }
+  return index
+}
+
 /** Sentinel meaning "use the row's key_value (the ID)" instead of a column. */
 export const ID_KEY = '__id__'
 
@@ -36,6 +56,8 @@ export function resolveLookup(
   row: Row,
   targets: TargetSheets,
   members: Member[] = [],
+  /** 事前に作った索引を渡すと線形探索をしない（makeComputedResolver が渡す）。 */
+  getIndex?: (targetSheetId: string, matchKey: string) => LookupIndex,
 ): string | null {
   const cfg = column.config
   if (!cfg?.target_sheet_id) return null
@@ -56,10 +78,9 @@ export function resolveLookup(
   const localStr = String(localVal ?? '')
   if (localStr === '') return null
 
-  const hit = target.rows.find((t) => {
-    const targetVal = valueFor(matchKey, t)
-    return String(targetVal ?? '') === localStr
-  })
+  const hit = getIndex
+    ? getIndex(String(cfg.target_sheet_id), matchKey).get(localStr)
+    : target.rows.find((t) => String(valueFor(matchKey, t) ?? '') === localStr)
   if (!hit) return null
 
   const out = valueFor(returnKey, hit)

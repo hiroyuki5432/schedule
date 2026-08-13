@@ -15,6 +15,9 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import type { ScheduleRowModel } from '@/hooks/useScheduleData'
 import { InlineCell } from '@/components/schedule/InlineCell'
 import { ColumnHeaderMenu } from '@/components/schedule/ColumnHeaderMenu'
+import { ContextMenu } from '@/components/ui/ContextMenu'
+import { ColumnSettingsModal } from '@/components/settings/ColumnSettingsModal'
+import type { MenuAnchor } from '@/components/ui/ContextMenu'
 import { filterKindOf } from '@/lib/colFilter'
 import type { ColFilter, ColFilterOptions } from '@/lib/colFilter'
 import { ID_COL_KEY, defaultColWidth, fitWidth, useColumnWidths } from '@/lib/colWidth'
@@ -213,6 +216,8 @@ interface SelRect {
 const WEEK_OVERSCAN = 6
 
 interface Props {
+  /** 見出しの ⋮ →「この列の設定…」が、この行データを読み直すのに使う。 */
+  sheetId: string
   rows: ScheduleRowModel[]
   columns: Column[]
   members: Member[]
@@ -272,6 +277,7 @@ interface EditingCell {
 }
 
 export function GanttGrid({
+  sheetId,
   rows,
   columns,
   members,
@@ -334,6 +340,11 @@ export function GanttGrid({
   const [highlightId, setHighlightId] = useState<string | null>(null)
   // Which column header menu is open (column id, or SORT_ID for the ID column).
   const [openMenu, setOpenMenu] = useState<SortKey | null>(null)
+  // 行の右クリックメニュー（要望: 行削除が右クリックでできない）。テーブル画面と同じ
+  // 操作にしてある。
+  const [rowMenu, setRowMenu] = useState<{ at: MenuAnchor; rowId: string } | null>(null)
+  // 見出しの ⋮ →「この列の設定…」（要望: 設定と一覧を往復したくない）。
+  const [settingsColId, setSettingsColId] = useState<string | null>(null)
   // Collapsed parents (子タスクを畳む). Empty = all expanded.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const toggleCollapse = (rowId: string) =>
@@ -1166,6 +1177,7 @@ export function GanttGrid({
                   onToggleMenu={() => toggleMenu(c.id)}
                   onSort={(dir) => setSortDir(c.id, dir)}
                   onFilter={(next) => onColFilterChange(String(c.id), next)}
+                  onOpenSettings={() => setSettingsColId(c.id)}
                   onResizeStart={(e) => startResize(e, c.id, cw(c))}
                   onResizeReset={() => resetWidth(c.id)}
                 />
@@ -1186,6 +1198,7 @@ export function GanttGrid({
                   onToggleMenu={() => toggleMenu(c.id)}
                   onSort={(dir) => setSortDir(c.id, dir)}
                   onFilter={(next) => onColFilterChange(String(c.id), next)}
+                  onOpenSettings={() => setSettingsColId(c.id)}
                   onResizeStart={(e) => startResize(e, c.id, cw(c))}
                   onResizeReset={() => resetWidth(c.id)}
                 />
@@ -1260,6 +1273,10 @@ export function GanttGrid({
                   isFocus ? 'bg-[#FCEFD0]' : odd && 'bg-[#FCFBF7]',
                 )}
                 style={{ top: HEAD_H + vRow.start, height: ROW_H, width: totalW }}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  setRowMenu({ at: { x: e.clientX, y: e.clientY }, rowId: String(model.row.id) })
+                }}
               >
                 {/* pinned: ID + title */}
                 <div
@@ -1724,6 +1741,59 @@ export function GanttGrid({
         </div>
       </div>
 
+      {settingsColId && (
+        <ColumnSettingsModal
+          column={ordered.find((c) => c.id === settingsColId)!}
+          columns={ordered}
+          sheetId={sheetId}
+          onClose={() => setSettingsColId(null)}
+        />
+      )}
+
+      {rowMenu &&
+        (() => {
+          const model = displayRows.find((r) => String(r.row.id) === rowMenu.rowId)
+          if (!model) return null
+          return (
+            <ContextMenu
+              at={rowMenu.at}
+              items={[
+                {
+                  key: 'open',
+                  label: '開く（全項目・変更履歴）',
+                  onClick: () => onOpenRecord(model.row),
+                },
+                {
+                  key: 'milestones',
+                  label: 'フェーズ（◇）を編集',
+                  onClick: () => onEditMilestones(model.row),
+                },
+                {
+                  key: 'deps',
+                  label: '先行タスク（依存）を設定',
+                  onClick: () => onEditDeps(model.row),
+                },
+                {
+                  key: 'child',
+                  label: '子タスクを追加',
+                  separatorBefore: true,
+                  // サブタスクの下にさらに子は作れない（サーバ側の決まり）。
+                  disabled: model.depth === 1,
+                  onClick: () => onAddChild(model.row),
+                },
+                {
+                  key: 'delete',
+                  label: '行を削除',
+                  danger: true,
+                  separatorBefore: true,
+                  onClick: () => onDeleteRow(model.row),
+                },
+              ]}
+              onClose={() => setRowMenu(null)}
+            />
+          )
+        })()}
+
       {/* Always mounted, moved/filled imperatively by showTip/hideTip. */}
       <div
         ref={tipRef}
@@ -1835,6 +1905,7 @@ function AttrHead({
   onToggleMenu,
   onSort,
   onFilter,
+  onOpenSettings,
   onResizeStart,
   onResizeReset,
 }: {
@@ -1847,6 +1918,7 @@ function AttrHead({
   onToggleMenu: () => void
   onSort: (dir: SortDir | null) => void
   onFilter: (next: ColFilter | undefined) => void
+  onOpenSettings: () => void
   onResizeStart: (e: React.MouseEvent) => void
   onResizeReset: () => void
 }) {
@@ -1900,6 +1972,7 @@ function AttrHead({
           anchorRef={ref}
           onSort={() => {}}
           onFilter={onFilter}
+          onOpenSettings={onOpenSettings}
           onClose={onToggleMenu}
         />
       )}

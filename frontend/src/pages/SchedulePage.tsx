@@ -879,6 +879,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           />
         ) : (
           <GanttGrid
+            sheetId={sheetId}
             rows={visibleRows}
             columns={grid.columns}
             members={members}

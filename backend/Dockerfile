@@ -17,6 +17,11 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
+# バージョン表示用（フロントの Dockerfile と同じ引数を渡す）。未指定でも動く。
+ARG APP_COMMIT
+ARG APP_BUILT_AT
+ENV APP_COMMIT=$APP_COMMIT APP_BUILT_AT=$APP_BUILT_AT
+
 RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8100

@@ -26,6 +26,10 @@ interface Props {
   anchorRef: RefObject<HTMLElement>
   onSort: (dir: SortDir | null) => void
   onFilter: (next: ColFilter | undefined) => void
+  /** 「この列の設定…」を出す。設定画面へ移動するのではなく、その場でモーダルを開く
+   *  （要望: 設定とどう見えるかがいちいち戻らないといけない）。省略すると出ない
+   *  （ID列・集計列には設定が無いので）。 */
+  onOpenSettings?: () => void
   onClose: () => void
 }
 
@@ -48,6 +52,7 @@ export function ColumnHeaderMenu({
   anchorRef,
   onSort,
   onFilter,
+  onOpenSettings,
   onClose,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null)
@@ -174,6 +179,22 @@ export function ColumnHeaderMenu({
             </button>
           </div>
         </>
+      )}
+
+      {onOpenSettings && (
+        <div className="mt-2 flex-shrink-0 border-t border-[var(--line2)] pt-2">
+          <button
+            type="button"
+            onClick={() => {
+              onClose()
+              onOpenSettings()
+            }}
+            title="列名・型・選択肢などをここで直す（一覧に戻る必要はありません）"
+            className="w-full rounded-[7px] px-1.5 py-1 text-left text-[11.5px] text-[var(--green-d)] hover:bg-[var(--line2)]"
+          >
+            ⚙ この列の設定…
+          </button>
+        </div>
       )}
     </div>,
     document.body,

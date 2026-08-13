@@ -218,10 +218,16 @@ export const exportXlsxUrl = (sheetId: string) => `/api/sheets/${sheetId}/export
 /** Upload an .xlsx to upsert rows (matched by ID). With no plan this behaves as
  *  before (active worksheet, row 1 = header, column A = ID). Returns counts. */
 export const importXlsx = (sheetId: string, file: File, plan: Partial<ImportPlan> = {}) =>
-  postForm<{ created: number; updated: number }>(
-    `/api/sheets/${sheetId}/import.xlsx`,
-    importForm(file, plan),
-  )
+  postForm<ImportResult>(`/api/sheets/${sheetId}/import.xlsx`, importForm(file, plan))
+
+/** What an import writes back. `notes` explains anything the import decided on
+ *  its own — today: which プルダウン列 gained選択肢, and which were left alone for
+ *  having too many distinct values. */
+export interface ImportResult {
+  created: number
+  updated: number
+  notes?: string[]
+}
 
 /** One Excel column as seen by the EXISTING-sheet wizard. `target` is the sheet
  *  column (or reserved header) it will be written into; '' = 取り込まない. */
@@ -295,6 +301,14 @@ export interface ImportColumnInfo {
   /** Cells that would NOT convert to `type` (dropped or blanked on import). */
   invalid: number
   invalid_samples: string[]
+  /** Present only when the Excel column holds formulas. `expr` is the translated
+   *  `[列名]` expression, or null with `reason` explaining why it stayed values. */
+  formula?: {
+    cells: number
+    expr: string | null
+    reason: string | null
+    sample: string | null
+  }
 }
 
 export interface ImportInspection {
@@ -329,7 +343,9 @@ export interface ImportPlan {
   tailFrom?: number
   /** 0-based; -1 = no ID column (keys are auto-numbered). */
   idColumn?: number
-  columns?: { index: number; name: string; type: ColumnType | '' }[]
+  /** `expr` only matters for `type: 'formula'` — the `[列名]` expression the
+   *  column computes (translated from the Excel formula on import). */
+  columns?: { index: number; name: string; type: ColumnType | ''; expr?: string }[]
 }
 
 function importForm(file: File, plan: Partial<ImportPlan>): FormData {
@@ -365,13 +381,9 @@ export const inspectImportXlsx = (file: File, plan: Partial<ImportPlan>) =>
 /** Upload an .xlsx as a BRAND NEW sheet, following the wizard's plan (or, with no
  *  plan, the auto-detected header row and inferred types). Returns id + counts. */
 export const importNewSheetXlsx = (file: File, plan: ImportPlan) =>
-  postForm<{
-    sheet_id: number
-    name: string
-    columns: number
-    created: number
-    updated: number
-  }>('/api/sheets/import.xlsx', importForm(file, plan))
+  postForm<
+    ImportResult & { sheet_id: number; name: string; columns: number }
+  >('/api/sheets/import.xlsx', importForm(file, plan))
 
 export const exportWorklogXlsxUrl = (from: string, to: string) =>
   `/api/worklog/export.xlsx?from=${from}&to=${to}`
@@ -553,7 +565,9 @@ export interface WorkbookPlanItem {
   header_row?: number
   last_row?: number
   id_column?: number
-  columns?: { index: number; name: string; type: ColumnType | '' }[]
+  /** `expr` only matters for `type: 'formula'` — the `[列名]` expression the
+   *  column computes (translated from the Excel formula on import). */
+  columns?: { index: number; name: string; type: ColumnType | ''; expr?: string }[]
 }
 
 function workbookForm(file: File, plan?: WorkbookPlanItem[], savePresets?: boolean): FormData {
@@ -640,3 +654,12 @@ export const registerNotifications = (items: NotificationItem[]) =>
 // Mark notifications read (omit ids to mark all).
 export const markNotificationsRead = (ids?: string[]) =>
   http.post<{ updated: number }>('/api/notifications/mark-read', ids ? { ids } : {})
+
+// ---- Build info (画面のバージョン表示) ----
+/** サーバ側の実バージョン。フロントの埋め込み値と突き合わせてズレを検出する。 */
+export const getServerVersion = () =>
+  http.get<{ version: string; commit: string; built_at: string }>('/api/version')
+
+/** 複数行をまとめて削除（1トランザクション）。子タスクは親と一緒に消える。 */
+export const bulkDeleteRows = (ids: string[]) =>
+  http.post<{ deleted: number }>('/api/rows/bulk-delete', { ids })

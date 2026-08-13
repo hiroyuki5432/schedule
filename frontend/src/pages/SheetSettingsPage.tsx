@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
-import { useSheets, useColumns } from '@/hooks/useSheets'
+import { useSheets, useColumns, useSheetDetail } from '@/hooks/useSheets'
 import { usePersistentState } from '@/hooks/usePersistentState'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/Card'
@@ -25,7 +25,7 @@ import { PlusIcon } from '@/components/ui/icons'
 import { cn } from '@/lib/format'
 import { toast } from '@/lib/toast'
 import { ApiError } from '@/lib/http'
-import type { Column, ColumnType, DefaultMilestone, SheetSettings } from '@/types/api'
+import type { Column, ColumnType, DefaultMilestone, Row, SheetSettings } from '@/types/api'
 
 const TYPE_LABEL: Record<ColumnType, string> = {
   text: '自由入力',
@@ -49,6 +49,9 @@ export function SheetSettingsPage() {
     () => [...(columnsQ.data ?? [])].sort((a, b) => a.order - b.order),
     [columnsQ.data],
   )
+  // 行も読む（プルダウンの「選択肢に無い値」を洗い出すため）。一覧画面と同じキャッシュ
+  // なので、シートを見た直後に設定を開くぶんには追加の通信は起きない。
+  const detailQ = useSheetDetail(sheetId)
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const selected = columns.find((c) => String(c.id) === String(selectedId)) ?? null
@@ -147,6 +150,7 @@ export function SheetSettingsPage() {
                 key={selected.id}
                 column={selected}
                 columns={columns}
+                rows={detailQ.data?.rows}
                 sheetId={sheetId}
                 onDone={invalidate}
               />
@@ -445,11 +449,13 @@ function AddColumnForm({
 function ColumnDetailEditor({
   column,
   columns,
+  rows,
   sheetId,
   onDone,
 }: {
   column: Column
   columns: Column[]
+  rows: Row[] | undefined
   sheetId: string
   onDone: () => void
 }) {
@@ -592,7 +598,7 @@ function ColumnDetailEditor({
       </Card>
 
       {column.type === 'dropdown' && (
-        <DropdownOptionsEditor column={column} onDone={onDone} />
+        <DropdownOptionsEditor column={column} rows={rows} onDone={onDone} />
       )}
       {column.type === 'status' && (
         <StatusRuleBuilder column={column} columns={columns} onDone={onDone} />

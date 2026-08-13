@@ -3,7 +3,7 @@
 // Each option carries a stable `id` so renaming a value follows through to the
 // stored row data (the backend remaps on save). Frozen options stay in the data
 // but are hidden from the picker. Saves into column.config.
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/Card'
@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/Button'
 import { TrashIcon } from '@/components/ui/icons'
 import { cn } from '@/lib/format'
 import { toast } from '@/lib/toast'
-import type { Column, DropdownOption } from '@/types/api'
+import type { Column, DropdownOption, Row } from '@/types/api'
 
 const SWATCHES = [
   '#E3EFEA',
@@ -26,7 +26,16 @@ const SWATCHES = [
 ]
 
 function newId(): string {
-  return crypto.randomUUID()
+  // crypto.randomUUID は「安全なコンテキスト」(https / localhost) にしか生えない。
+  // 社内配布は http://<サーバーIP>:8080 で開くため undefined になり、選択肢の追加が
+  // 例外で黙って死んでいた（ボタンが無反応）。フォールバックを持つ。
+  const c = globalThis.crypto as Crypto | undefined
+  if (typeof c?.randomUUID === 'function') return c.randomUUID()
+  const rand = () =>
+    typeof c?.getRandomValues === 'function'
+      ? c.getRandomValues(new Uint32Array(1))[0].toString(36)
+      : Math.floor(Math.random() * 0xffffffff).toString(36)
+  return `opt-${Date.now().toString(36)}-${rand()}${rand()}`
 }
 
 /** Ensure every option has a stable id (legacy options were saved without one). */
@@ -36,9 +45,13 @@ function withIds(options: DropdownOption[]): DropdownOption[] {
 
 export function DropdownOptionsEditor({
   column,
+  rows,
   onDone,
 }: {
   column: Column
+  /** This sheet's rows — used to find values that are IN the data but not in the
+   *  option list (Excel 取り込みは row.data に直接書くので必ず起きる). */
+  rows?: Row[]
   onDone: () => void
 }) {
   const qc = useQueryClient()
@@ -48,6 +61,34 @@ export function DropdownOptionsEditor({
   const [newValue, setNewValue] = useState('')
   const [bulk, setBulk] = useState('')
   const [showBulk, setShowBulk] = useState(false)
+
+  // 「データには入っているのに、選択肢には無い値」。取り込んだ直後はここが本番で、
+  // 放っておくとセルが「選択肢に未登録」のまま並ぶ。件数と中身を見せて、そのまま
+  // 選択肢にできるようにする。
+  const orphans = useMemo(() => {
+    if (!rows?.length) return []
+    const known = new Set(options.map((o) => o.value))
+    const seen = new Set<string>()
+    for (const r of rows) {
+      const v = r.data?.[column.id]
+      if (v == null) continue
+      const s = String(v).trim()
+      if (s === '' || known.has(s) || seen.has(s)) continue
+      seen.add(s)
+    }
+    return [...seen].sort((a, b) => a.localeCompare(b, 'ja'))
+  }, [rows, options, column.id])
+
+  function addOrphans() {
+    setOptions([
+      ...options,
+      ...orphans.map((v, i) => ({
+        id: newId(),
+        value: v,
+        color: SWATCHES[(options.length + i) % SWATCHES.length],
+      })),
+    ])
+  }
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -95,12 +136,41 @@ export function DropdownOptionsEditor({
     setOptions(options.map((x, j) => (j === i ? { ...x, ...p } : x)))
   }
 
+  const dirty =
+    JSON.stringify(options) !== JSON.stringify(withIds(column.config?.options ?? []))
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>{column.name} — 選択肢</CardTitle>
       </CardHeader>
       <CardBody>
+        {orphans.length > 0 && (
+          <div className="mb-3 rounded-[9px] border border-[#E4C9A8] bg-[#FBF3E6] px-3 py-2.5">
+            <div className="text-[12px] font-medium text-[#8A5A1E]">
+              選択肢に無い値が {orphans.length} 種類、データに入っています
+            </div>
+            <div className="mt-1 text-[11.5px] leading-relaxed text-[#8A5A1E]">
+              Excel の取り込みは値をそのまま書き込むため、この列の選択肢には入っていません。
+              一覧では「選択肢に未登録」と点線付きで表示されます。
+              {orphans.length > 40 && (
+                <>
+                  {' '}
+                  種類が多いので、この列は<b>「自由入力」</b>
+                  のほうが合っているかもしれません（型を変えても値は消えません）。
+                </>
+              )}
+            </div>
+            <div className="mt-1.5 max-h-[64px] overflow-auto text-[11px] text-[#8A5A1E]/85">
+              {orphans.slice(0, 30).join(' ・ ')}
+              {orphans.length > 30 && ` …ほか ${orphans.length - 30} 種類`}
+            </div>
+            <Button size="sm" variant="outline" className="mt-2" onClick={addOrphans}>
+              {orphans.length} 件すべてを選択肢に追加
+            </Button>
+          </div>
+        )}
+
         <ul className="mb-3 flex flex-col gap-2">
           {options.map((o, i) => (
             <li
@@ -188,7 +258,8 @@ export function DropdownOptionsEditor({
               value={newValue}
               onChange={(e) => setNewValue(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') {
+                // IME 変換確定の Enter を拾わない（拾うと変換途中の値が入る）。
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
                   e.preventDefault()
                   add()
                 }
@@ -203,9 +274,19 @@ export function DropdownOptionsEditor({
           </div>
         )}
 
-        <div className="flex justify-end">
-          <Button onClick={() => mutation.mutate()} disabled={mutation.isPending}>
-            保存
+        {/* 「追加」はまだ画面の中の話で、押すべきボタンは下の「保存」— そこを黙って
+            いると "追加したのに反映されない" になる（要望）。 */}
+        <div className="flex items-center justify-end gap-2">
+          {dirty && (
+            <span className="mr-auto text-[11.5px] text-[#A8442B]">
+              未保存の変更があります。「保存」を押すまで表には反映されません。
+            </span>
+          )}
+          <Button
+            onClick={() => mutation.mutate()}
+            disabled={mutation.isPending || !dirty}
+          >
+            {mutation.isPending ? '保存中…' : '保存'}
           </Button>
         </div>
       </CardBody>

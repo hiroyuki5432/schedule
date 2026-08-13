@@ -1,13 +1,14 @@
 {
   "name": "kosu-schedule-frontend",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "_typecheck_note": "`tsc --noEmit` はここでは何も検査しない — ルートの tsconfig.json は references だけの解決ファイルで files が空なので、対象ゼロで即成功する。本番ビルド (tsc -b) だけが落ちる状態を作ってしまうので -b を使うこと。",
+    "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest"
   },

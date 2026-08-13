@@ -6,6 +6,7 @@ import * as api from '@/api/client'
 import { ApiError } from '@/lib/http'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { FRONTEND_BUILD, shortLabel } from '@/lib/version'
 
 export function LoginPage() {
   const { login } = useAuth()
@@ -180,6 +181,11 @@ export function LoginPage() {
             ? '新しいグループを作成する'
             : 'ログイン画面に戻る'}
         </button>
+
+        {/* ログインできないときの問い合わせでも版が分かるように。 */}
+        <div className="mt-4 text-center text-[10.5px] text-[var(--ink3)]">
+          {shortLabel(FRONTEND_BUILD)}
+        </div>
       </div>
     </div>
   )

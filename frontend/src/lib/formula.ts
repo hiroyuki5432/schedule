@@ -285,6 +285,9 @@ function num(v: FormulaValue): number {
   if (isBlank(v)) return 0
   if (typeof v === 'number') return v
   if (typeof v === 'boolean') return v ? 1 : 0
+  // ここまでで null・数値・真偽値は片付いている。残るのは文字列だけだが、isBlank は
+  // 型を絞らない述語なので TypeScript にはそれが伝わらない — 明示しておく。
+  if (typeof v !== 'string') return 0
   const d = asDate(v)
   if (d !== null) return d
   // 「1,200」「1200 円」のような表記も拾う（取り込んだ値がそのまま入っていることがある）

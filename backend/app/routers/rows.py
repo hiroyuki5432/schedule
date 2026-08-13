@@ -13,7 +13,7 @@ from app.date_values import normalize_date_text
 from app.db import get_db
 from app.deps import get_row_for_user, get_sheet_for_user
 from app.models import Column, Row, RowEvent, Sheet, User
-from app.schemas import RowCreate, RowEventOut, RowOut, RowUpdate
+from app.schemas import RowBulkDelete, RowCreate, RowEventOut, RowOut, RowUpdate
 from app.security import current_user
 from app.weeks import current_week_start
 from app.worklog_service import org_week_start_weekday
@@ -244,6 +244,58 @@ def delete_row(
     db.delete(row)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/rows/bulk-delete")
+def bulk_delete_rows(
+    payload: RowBulkDelete,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """複数行をまとめて削除する（要望: まとめて選択して削除）。
+
+    1行ずつ DELETE を投げると、100行選んだら100リクエスト＋100回の再取得になり、
+    途中で失敗すれば「どこまで消えたのか分からない」状態が残る。これは1トランザクション
+    なので、全部消えるか、1つも消えないかのどちらか。
+
+    子タスク（サブタスク）は親を消せば一緒に消える。明示的に選ばれていなくても消えるので、
+    件数は「実際に消えた行数」を返す。
+    """
+    ids = list(dict.fromkeys(payload.ids))  # 重複を潰して順序は保つ
+    if not ids:
+        return {"deleted": 0}
+    # 1件ずつ所有権を確認する — 他組織の行IDを混ぜられても触れないように。
+    rows = [get_row_for_user(db, rid, user) for rid in ids]
+
+    selected = {r.id for r in rows}
+    children = list(
+        db.execute(select(Row).where(Row.parent_row_id.in_(selected))).scalars()
+    )
+    # 件数は commit の前に確定させる。commit 後に child.id を読むと、削除済みの行を
+    # 読み直そうとして ObjectDeletedError になる。
+    deleted_ids = selected | {c.id for c in children}
+    for row in rows:
+        history_service.record(
+            db,
+            user=user,
+            row=row,
+            kind="delete",
+            changes=[("行を削除", row.key_value or "", None)],
+        )
+    for child in children:
+        if child.id in selected:
+            continue
+        history_service.record(
+            db,
+            user=user,
+            row=child,
+            kind="delete",
+            changes=[("行を削除（親の削除に伴う）", child.key_value or "", None)],
+        )
+    for row in rows:
+        db.delete(row)
+    db.commit()
+    return {"deleted": len(deleted_ids)}
 
 
 def _events_out(db: Session, events: list[RowEvent]) -> list[RowEventOut]:

@@ -37,6 +37,8 @@ interface Pick {
   selected: boolean
   name: string
   type: ColumnType | ''
+  /** 数式列のときの `[列名]` 式（Excelの数式から翻訳したもの）。 */
+  expr?: string
 }
 
 const STEPS = ['シートと見出し行', '取り込む列', 'プレビュー']
@@ -55,6 +57,7 @@ const TYPE_LABEL: Record<string, string> = {
   date: '日付',
   dropdown: 'プルダウン',
   member: '担当者',
+  formula: '数式（計算のまま）',
 }
 
 const TYPE_OPTIONS: ColumnType[] = ['text', 'number', 'date', 'dropdown', 'member']
@@ -115,6 +118,7 @@ export function ImportSheetWizard({
         selected: c.selected,
         name: c.header,
         type: c.type,
+        expr: c.formula?.expr ?? undefined,
       })),
     )
   }, [insp.data])
@@ -129,7 +133,12 @@ export function ImportSheetWizard({
     () =>
       picks
         .filter((p) => p.selected && p.name.trim() !== '' && p.index !== idColumn)
-        .map((p) => ({ index: p.index, name: p.name.trim(), type: p.type })),
+        .map((p) => ({
+          index: p.index,
+          name: p.name.trim(),
+          type: p.type,
+          ...(p.type === 'formula' && p.expr ? { expr: p.expr } : {}),
+        })),
     [picks, idColumn],
   )
 
@@ -198,6 +207,8 @@ export function ImportSheetWizard({
         `「${r.name}」を作成しました（列 ${r.columns} / 行 ${r.created}）`,
         'success',
       )
+      // 選択肢を増やした／増やさなかった理由は黙らない（要望: 取込後のプルダウン）。
+      for (const note of r.notes ?? []) toast.show(note, 'info', 7000)
       return String(r.sheet_id)
     },
     onSuccess: async (id) => {
@@ -388,6 +399,9 @@ function StepColumns({
                         }
                         className="h-7 px-2 py-0 text-[11.5px]"
                       >
+                        {/* 「数式」は、Excel の式をこのアプリの式に翻訳できた列だけに
+                            出す。翻訳できない式を数式列にしても計算できないので。 */}
+                        {c?.formula?.expr && <option value="formula">{TYPE_LABEL.formula}</option>}
                         {TYPE_OPTIONS.map((t) => (
                           <option key={t} value={t}>
                             {TYPE_LABEL[t]}
@@ -403,6 +417,7 @@ function StepColumns({
                     {c && c.filled === 0 && (
                       <span className="text-[var(--ink3)]">値が入っていません</span>
                     )}
+                    {c?.formula && <FormulaNote formula={c.formula} asFormula={p.type === 'formula'} />}
                     {role === 'milestone' && (
                       <span className="block text-[var(--ink3)]">
                         マイルストン列。取り込むと通常の列になります
@@ -416,6 +431,43 @@ function StepColumns({
         </table>
       </div>
     </div>
+  )
+}
+
+/** Excel の数式が入っていた列に添える説明。
+ *
+ *  取り込みは既定で「計算結果」を値として書き込むので、何も言わないと、元の列を直しても
+ *  動かない“焼き付いた数字”になる。翻訳できたときは何の式になるかを見せ、できなかった
+ *  ときは理由を出して、値のまま入ることを納得してもらう。 */
+function FormulaNote({
+  formula,
+  asFormula,
+}: {
+  formula: NonNullable<ImportColumnInfo['formula']>
+  asFormula: boolean
+}) {
+  if (formula.expr) {
+    return (
+      <span className="mt-0.5 block text-[10.5px] leading-relaxed text-[var(--ink3)]">
+        Excelの数式 <code className="text-[var(--ink2)]">{formula.sample}</code>（
+        {formula.cells}セル）
+        {asFormula ? (
+          <>
+            {' → '}
+            <code className="text-[var(--green-d)]">{formula.expr}</code>{' '}
+            として計算し続けます。
+          </>
+        ) : (
+          <> → いまの計算結果を値として取り込みます（元の列を直しても変わりません）。</>
+        )}
+      </span>
+    )
+  }
+  return (
+    <span className="mt-0.5 block text-[10.5px] leading-relaxed text-[#8A5A1E]">
+      Excelの数式 <code>{formula.sample}</code>（{formula.cells}セル）は、この列の式に
+      できません（{formula.reason}）。計算結果を値として取り込みます。
+    </span>
   )
 }
 

@@ -207,6 +207,9 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
         qc.invalidateQueries({ queryKey: ['snapshot', sheetId] }),
       ])
       toast.show(`取り込み完了：新規 ${r.created} 件 / 更新 ${r.updated} 件`, 'success')
+      // プルダウン列の選択肢をどう扱ったか（増やした／多すぎるので増やさなかった）は、
+      // 黙っていると「取り込んだのに選択肢に出ない」になるので必ず伝える。
+      for (const note of r.notes ?? []) toast.show(note, 'info', 7000)
       return r
     },
     onSuccess: () => onClose(),

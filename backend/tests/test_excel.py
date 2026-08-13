@@ -80,7 +80,7 @@ def test_import_upserts_by_id(auth_client):
         files={"file": ("in.xlsx", buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
     )
     assert r.status_code == 200, r.text
-    assert r.json() == {"created": 1, "updated": 1}
+    assert r.json() == {"created": 1, "updated": 1, "notes": []}
 
     rows = auth_client.get(f"/api/sheets/{sid}/rows").json()
     by_key = {row["key_value"]: row for row in rows}
@@ -554,7 +554,7 @@ def test_import_existing_sheet_honors_mapping(auth_client):
         },
     )
     assert r.status_code == 200, r.text
-    assert r.json() == {"created": 1, "updated": 1}
+    assert r.json() == {"created": 1, "updated": 1, "notes": []}
 
     rows = {x["key_value"]: x for x in auth_client.get(f"/api/sheets/{sid}/rows").json()}
     assert rows["A-1"]["data"][str(col)] == "新しい件名"
@@ -618,7 +618,7 @@ def test_date_columns_survive_stray_placeholder_cells(auth_client):
         files={"file": ("in.xlsx", buf, _MEDIA)},
         data={"name": "予定", "has_week_grid": "false"},
     )
-    assert r.status_code == 200, r.text
+    assert r.status_code == 201, r.text
     sid = r.json()["sheet_id"]
 
     detail = auth_client.get(f"/api/sheets/{sid}").json()
@@ -667,3 +667,92 @@ def test_a_date_cell_is_stored_as_a_plain_date_whatever_was_typed(auth_client):
         json={"data": {col: "2025-12-01 00:00:00"}, "version": row["version"]},
     ).json()
     assert updated["data"][col] == "2025-12-01"
+
+
+# --------------------------------------------------------------------------- #
+# Excel の数式を数式列として取り込む（要望: Excelの数式もいい感じに取り込む）
+# --------------------------------------------------------------------------- #
+def _formula_workbook() -> io.BytesIO:
+    """単価・数量・金額(=C*D)・備考(=VLOOKUP,翻訳不可) の4列。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["ID", "単価", "数量", "金額", "備考"])
+    for r in range(2, 5):
+        ws.cell(row=r, column=1, value=f"K-{r - 1}")
+        ws.cell(row=r, column=2, value=100 * (r - 1))
+        ws.cell(row=r, column=3, value=r)
+        ws.cell(row=r, column=4, value=f"=B{r}*C{r}")
+        ws.cell(row=r, column=5, value=f"=VLOOKUP(B{r},X:Y,2,FALSE)")
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def test_inspect_reports_translatable_formulas(auth_client):
+    r = auth_client.post(
+        "/api/sheets/import.xlsx/inspect",
+        files={"file": ("in.xlsx", _formula_workbook(), _MEDIA)},
+        data={"has_week_grid": "false"},
+    )
+    assert r.status_code == 200, r.text
+    by_header = {c["header"]: c for c in r.json()["columns"]}
+
+    money = by_header["金額"]
+    assert money["type"] == "formula"          # 既定で数式列として提案される
+    assert money["formula"]["expr"] == "[単価]*[数量]"
+    assert money["formula"]["cells"] == 3
+    assert money["formula"]["sample"] == "=B2*C2"
+
+    # 翻訳できない式は数式列にしない — 理由は画面に出せるよう返す。
+    note = by_header["備考"]
+    assert note["type"] != "formula"
+    assert note["formula"]["expr"] is None
+    assert "対応していない関数" in note["formula"]["reason"]
+
+    # 数式のない普通の列には formula キー自体が付かない。
+    assert "formula" not in by_header["単価"]
+
+
+def test_import_creates_a_formula_column(auth_client):
+    r = auth_client.post(
+        "/api/sheets/import.xlsx",
+        files={"file": ("in.xlsx", _formula_workbook(), _MEDIA)},
+        data={"name": "見積", "has_week_grid": "false"},
+    )
+    assert r.status_code == 201, r.text
+    sid = r.json()["sheet_id"]
+
+    detail = auth_client.get(f"/api/sheets/{sid}").json()
+    money = next(c for c in detail["columns"] if c["name"] == "金額")
+    assert money["type"] == "formula"
+    assert money["config"]["expr"] == "[単価]*[数量]"
+
+    # 数式列は計算列なので値を保存しない（残っていると手入力と区別がつかなくなる）。
+    assert all(str(money["id"]) not in row["data"] for row in detail["rows"])
+    # 元になる列の値はちゃんと入っている。
+    unit = next(c for c in detail["columns"] if c["name"] == "単価")
+    assert detail["rows"][0]["data"][str(unit["id"])] == 100
+
+
+def test_formula_column_can_be_forced_back_to_a_value(auth_client):
+    """ウィザードで「値として取り込む」を選んだとき（type=number, expr なし）。"""
+    r = auth_client.post(
+        "/api/sheets/import.xlsx",
+        files={"file": ("in.xlsx", _formula_workbook(), _MEDIA)},
+        data={
+            "name": "見積2",
+            "has_week_grid": "false",
+            "columns": json.dumps(
+                [
+                    {"index": 1, "name": "単価", "type": "number"},
+                    {"index": 2, "name": "数量", "type": "number"},
+                    {"index": 3, "name": "金額", "type": "number"},
+                ]
+            ),
+        },
+    )
+    assert r.status_code == 201, r.text
+    detail = auth_client.get(f"/api/sheets/{r.json()['sheet_id']}").json()
+    money = next(c for c in detail["columns"] if c["name"] == "金額")
+    assert money["type"] == "number"

@@ -29,10 +29,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # GHCR image names must be lowercase.
-      - name: Compute image name
+      # GHCR image names must be lowercase. `sha` / `built_at` are baked into the
+      # images so the running app can say WHICH build it is (画面のバージョン表示).
+      # Without them the deployed app reports 「開発」, which is exactly the answer
+      # nobody needs when checking whether a fix actually shipped.
+      - name: Compute image name and build info
         id: img
-        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}-${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+        run: |
+          {
+            echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}-${{ matrix.name }}"
+            echo "sha=${GITHUB_SHA::7}"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -52,6 +60,9 @@ jobs:
           tags: |
             ${{ steps.img.outputs.ref }}:latest
             ${{ steps.img.outputs.ref }}:${{ github.sha }}
+          build-args: |
+            APP_COMMIT=${{ steps.img.outputs.sha }}
+            APP_BUILT_AT=${{ steps.img.outputs.built_at }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

@@ -189,6 +189,12 @@ class RowCreate(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class RowBulkDelete(BaseModel):
+    """まとめて削除（要望: まとめて選択して削除）。1トランザクションで処理する。"""
+
+    ids: list[int] = Field(default_factory=list)
+
+
 class RowUpdate(BaseModel):
     data: dict[str, Any]
     version: int

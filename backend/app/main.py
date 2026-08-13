@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
+from app.version import VERSION, build_info
 from app.routers import (
     aggregate,
     auth,
@@ -44,7 +45,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="工数スケジュール管理 API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="工数スケジュール管理 API", version=VERSION, lifespan=lifespan)
 
 app.add_middleware(
     SessionMiddleware,
@@ -75,4 +76,12 @@ app.include_router(search.router)
 
 @app.get("/api/health", tags=["health"])
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", **build_info()}
+
+
+@app.get("/api/version", tags=["health"])
+def version() -> dict[str, str]:
+    """サーバ側で実際に動いているバージョン。画面のバージョン表示が、これと自分
+    （フロント）を突き合わせて「片方だけ古い」を検出する。認証不要 — ログインできない
+    ときこそ知りたい情報なので。"""
+    return build_info()

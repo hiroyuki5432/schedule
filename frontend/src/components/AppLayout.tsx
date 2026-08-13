@@ -6,6 +6,7 @@ import { cn, initial } from '@/lib/format'
 import { AddSheetDialog } from '@/components/AddSheetDialog'
 import { GlobalSearch, useGlobalSearchHotkey } from '@/components/GlobalSearch'
 import { NotificationBell } from '@/components/NotificationBell'
+import { VersionBadge } from '@/components/VersionBadge'
 import {
   CalendarIcon,
   ChartIcon,
@@ -170,18 +171,22 @@ export function AppLayout() {
           ))}
         </nav>
 
-        <div className="mt-3 flex items-center gap-2.5 border-t border-[var(--green-line)] pt-3">
-          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-[#C9DCD3] text-[12px] font-semibold text-[var(--green-d)]">
-            {initial(user?.name)}
+        <div className="mt-3 border-t border-[var(--green-line)] pt-3">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-7 w-7 items-center justify-center rounded-full bg-[#C9DCD3] text-[12px] font-semibold text-[var(--green-d)]">
+              {initial(user?.name)}
+            </div>
+            <div className="flex-1 text-[12px] text-[#CFE0D7]">{user?.name}</div>
+            <button
+              onClick={() => void logout()}
+              title="ログアウト"
+              className="rounded-md p-1 text-[#9CB8AC] hover:bg-[var(--green-line)] hover:text-white"
+            >
+              <LogoutIcon className="h-[16px] w-[16px]" />
+            </button>
           </div>
-          <div className="flex-1 text-[12px] text-[#CFE0D7]">{user?.name}</div>
-          <button
-            onClick={() => void logout()}
-            title="ログアウト"
-            className="rounded-md p-1 text-[#9CB8AC] hover:bg-[var(--green-line)] hover:text-white"
-          >
-            <LogoutIcon className="h-[16px] w-[16px]" />
-          </button>
+          {/* どのビルドが動いているか。「直したはずなのに直らない」の切り分け用。 */}
+          <VersionBadge />
         </div>
       </aside>
 

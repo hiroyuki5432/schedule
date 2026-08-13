@@ -26,7 +26,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app import xlsx_import as xlsx
+from app import xlsx_formula, xlsx_import as xlsx
 from app.db import get_db
 from app.deps import get_sheet_for_user
 from app.models import Column, EffortEntry, Row, RowMilestone, Sheet, User
@@ -474,8 +474,16 @@ def import_rows_with_mapping(
 
 
 def _effective_selection(kept: list[dict]) -> list[dict]:
-    """The resolved picks in the `[{index, name, type}]` shape a preset stores."""
-    return [{"index": it["index"], "name": it["label"], "type": it.get("type") or ""} for it in kept]
+    """The resolved picks in the `[{index, name, type, expr}]` shape a preset stores."""
+    return [
+        {
+            "index": it["index"],
+            "name": it["label"],
+            "type": it.get("type") or "",
+            "expr": it.get("expr") or "",
+        }
+        for it in kept
+    ]
 
 
 @router.post("/{sheet_id}/import.xlsx/inspect")
@@ -743,6 +751,8 @@ def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter, commi
     cur_week = current_week_start(week_weekday)
     created = updated = 0
     deps_to_resolve: list[tuple[Row, list[str]]] = []
+    #: 取り込んだプルダウン列の値（列ID → 値の集合）。行を回し終えてから選択肢に足す。
+    seen_dropdown_values: dict[int, set[str]] = {}
 
     for raw_row in rows_iter:
         if raw_row is None:
@@ -776,7 +786,13 @@ def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter, commi
         for idx, col in attr_at.items():
             if idx >= len(raw_row):
                 continue
-            data[str(col.id)] = _coerce_attr(col, raw_row[idx], members_by_name)
+            value = _coerce_attr(col, raw_row[idx], members_by_name)
+            data[str(col.id)] = value
+            # プルダウン列は値を書くだけでなく、選択肢そのものも育てる。取り込みは
+            # row.data に直接書くので、選択肢に無い値がそのまま入り、セルが「選択肢に
+            # 未登録」だらけになっていた（要望: シート取込後にプルダウンがおかしい）。
+            if col.type == "dropdown" and isinstance(value, str) and value:
+                seen_dropdown_values.setdefault(col.id, set()).add(value)
         row.data = data
         row.version = (row.version or 1) + 1
         row.updated_by = user.id
@@ -844,6 +860,8 @@ def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter, commi
                 entry.planned_hours = hours
             entry.updated_by = user.id
 
+    dropdown_notes = _grow_dropdown_options(columns, seen_dropdown_values)
+
     # Resolve 先行タスク (key_value → row id, first match in the sheet).
     if deps_to_resolve:
         db.flush()
@@ -860,7 +878,57 @@ def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter, commi
         db.commit()
     else:
         db.flush()
-    return {"created": created, "updated": updated}
+    return {"created": created, "updated": updated, "notes": dropdown_notes}
+
+
+#: 取り込みで1列に自動追加してよい選択肢の上限。これを超える種類が入ってくる列は、
+#: そもそもプルダウンではなく自由入力なので、勝手に何百件も足さずに知らせるだけにする。
+_MAX_AUTO_OPTIONS = 60
+
+
+def _grow_dropdown_options(
+    columns: list[Column], seen: dict[int, set[str]]
+) -> list[str]:
+    """取り込んだ値をプルダウン列の選択肢に足す。返り値は画面に出す注意書き。
+
+    足さないと、値は入っているのに選択肢に無い＝一覧で「選択肢に未登録」と出る状態に
+    なる（要望: シート取込後にプルダウンがうまく追加できない）。ただし種類が
+    `_MAX_AUTO_OPTIONS` を超える列まで機械的に足すと、住所のような自由記述が
+    数百件の選択肢になって使い物にならないので、そこは足さずに理由を返す。
+    """
+    notes: list[str] = []
+    by_id = {c.id: c for c in columns}
+    for col_id, values in seen.items():
+        col = by_id.get(col_id)
+        if col is None or col.type != "dropdown":
+            continue
+        config = dict(col.config or {})
+        options = list(config.get("options") or [])
+        known = {o.get("value") for o in options if isinstance(o, dict)}
+        fresh = sorted(v for v in values if v not in known)
+        if not fresh:
+            continue
+        if len(known) + len(fresh) > _MAX_AUTO_OPTIONS:
+            notes.append(
+                f"「{col.name}」は取り込んだ値が {len(fresh)} 種類あり、選択肢には"
+                f"追加していません（{_MAX_AUTO_OPTIONS} 種類が上限）。"
+                "値はそのまま入っています。自由入力に変えるか、シート設定の"
+                "「選択肢」から必要なものだけ追加してください。"
+            )
+            continue
+        start = len(options)
+        for i, v in enumerate(fresh):
+            options.append(
+                {
+                    "id": uuid4().hex,
+                    "value": v,
+                    "color": _SWATCHES[(start + i) % len(_SWATCHES)],
+                }
+            )
+        config["options"] = options
+        col.config = config
+        notes.append(f"「{col.name}」に選択肢を {len(fresh)} 件追加しました。")
+    return notes
 
 
 # --------------------------------------------------------------------------- #
@@ -992,17 +1060,30 @@ def _parse_selection(raw: str) -> list[dict] | None:
                 "index": idx,
                 "name": str(it.get("name") or "").strip(),
                 "type": str(it.get("type") or "").strip(),
+                # 数式列のとき、`[列名]` 形式の式。ウィザードが翻訳結果を送り返す。
+                "expr": str(it.get("expr") or "").strip(),
             }
         )
     return out
 
 
 def _default_selection(
-    header: tuple, data_rows: list[tuple], id_column: int, has_week_grid: bool, member_names: set[str]
+    header: tuple,
+    data_rows: list[tuple],
+    id_column: int,
+    has_week_grid: bool,
+    member_names: set[str],
+    formula_rows: list[tuple[int, tuple]] | None = None,
 ) -> list[dict]:
     """What the wizard proposes (and what an unattended import uses): every named
     column except the ID one, with its type inferred. ◇予定/◇実績 are left out —
-    a brand-new sheet has no milestone template to hang them on."""
+    a brand-new sheet has no milestone template to hang them on.
+
+    A column whose Excel cells are a translatable formula becomes a 数式列 — keeping
+    the calculation instead of the frozen numbers it happened to produce."""
+    names_by_index = {
+        i: _cell_text(raw) for i, raw in enumerate(header) if _cell_text(raw)
+    }
     sel: list[dict] = []
     for idx, raw_name in enumerate(header):
         if idx == id_column or _is_blank(raw_name):
@@ -1012,9 +1093,14 @@ def _default_selection(
         if role == "milestone":
             continue
         ctype = ""
+        expr = ""
         if role == "attr":
-            ctype, _cfg = _infer_type(_column_values(data_rows, idx), member_names)
-        sel.append({"index": idx, "name": nm, "type": ctype})
+            formula = _column_formula(formula_rows, idx, names_by_index)
+            if formula and formula.get("expr"):
+                ctype, expr = "formula", formula["expr"]
+            else:
+                ctype, _cfg = _infer_type(_column_values(data_rows, idx), member_names)
+        sel.append({"index": idx, "name": nm, "type": ctype, "expr": expr})
     return sel
 
 
@@ -1060,7 +1146,7 @@ def inspect_import_xlsx(
     would NOT survive the conversion. Pass `columns` (the same JSON the import
     takes) to re-check the counts against the user's own choices before committing.
     """
-    wb, ws, grid, hr, header, data_rows = xlsx.read_source(
+    wb, ws, grid, hr, header, data_rows, formula_rows = xlsx.read_source_with_formulas(
         file, sheet_name, header_row, last_row
     )
     return {
@@ -1076,7 +1162,14 @@ def inspect_import_xlsx(
         "tail_preview": xlsx.tail_preview_of(grid, hr, tail_from, last_row),
         "preview": xlsx.preview_of(grid),
         "columns": new_sheet_column_info(
-            db, user, header, data_rows, id_column, has_week_grid, _parse_selection(columns)
+            db,
+            user,
+            header,
+            data_rows,
+            id_column,
+            has_week_grid,
+            _parse_selection(columns),
+            formula_rows,
         ),
         **id_column_counts(data_rows, id_column),
     }
@@ -1090,12 +1183,24 @@ def new_sheet_column_info(
     id_column: int,
     has_week_grid: bool,
     chosen: list[dict] | None,
+    formula_rows: list[tuple[int, tuple]] | None = None,
 ) -> list[dict]:
     """Per-Excel-column analysis for a BRAND NEW sheet: the role the header plays,
     the guessed (or chosen) column type, sample values, inferred dropdown options
-    and how many cells would not convert. Shared with the 一括取り込み dry-run."""
+    and how many cells would not convert. Shared with the 一括取り込み dry-run.
+
+    When `formula_rows` is given (the same rows read with `data_only=False`), each
+    column also reports whether its cells are Excel FORMULAS and, if they translate,
+    the equivalent `[列名]` expression — so the wizard can offer 数式列 instead of
+    freezing today's numbers into text (要望: Excelの数式もいい感じに取り込む)."""
     member_names = set(_members_by_name(db, user.org_id).keys())
     by_index = {it["index"]: it for it in (chosen or [])}
+
+    # 数式の中の A1 参照を列名に置き換えるための対応表。取り込む列だけを載せる
+    # （取り込まない列を参照している式は、翻訳しても値が出ないので弾く）。
+    names_by_index = {
+        idx: _cell_text(raw) for idx, raw in enumerate(header) if _cell_text(raw)
+    }
 
     cols: list[dict] = []
     for idx, raw_name in enumerate(header):
@@ -1107,11 +1212,19 @@ def new_sheet_column_info(
             inferred, cfg = _infer_type(values, member_names)
         else:
             inferred, cfg = "", {}
+
+        formula = _column_formula(formula_rows, idx, names_by_index)
+        # 翻訳できた列は、既定を「数式」にする。ここが "いい感じ" の中身 — 何もしなければ
+        # 計算結果が焼き付いた文字列になり、元の列を直しても追従しない。
+        if formula and formula.get("expr") and role == "attr" and not picked:
+            inferred = "formula"
+
         ctype = (picked or {}).get("type") or inferred
-        if ctype not in _IMPORTABLE_TYPES:
+        if ctype not in _IMPORTABLE_TYPES and ctype != "formula":
             ctype = inferred
         filled = [v for v in values if not _is_blank(v)]
-        bad = _invalid_values(values, role, ctype, member_names)
+        # 数式列は値を保存しないので、型が合わない件数の話は関係ない。
+        bad = [] if ctype == "formula" else _invalid_values(values, role, ctype, member_names)
         selected = (
             idx in by_index
             if chosen is not None
@@ -1129,9 +1242,39 @@ def new_sheet_column_info(
                 "options": [o["value"] for o in (cfg.get("options") or [])],
                 "invalid": len(bad),
                 "invalid_samples": bad[:_SAMPLE_LIMIT],
+                **({"formula": formula} if formula else {}),
             }
         )
     return cols
+
+
+def _column_formula(
+    formula_rows: list[tuple[int, tuple]] | None,
+    idx: int,
+    names_by_index: dict[int, str],
+) -> dict | None:
+    """この Excel 列が数式かどうかと、翻訳できるなら `[列名]` 式。数式が無ければ None。
+
+    返す辞書はそのままウィザードに渡る:
+      cells   … 数式セルの数
+      expr    … 翻訳できた式（None なら翻訳不可）
+      reason  … 翻訳できなかった理由
+      sample  … 元の Excel 数式の例（画面に出して納得してもらうため）
+      cached  … 計算結果が Excel に保存されているか。False のときは「値として取り込む」
+                を選ぶと空になるので、警告を出す必要がある。
+    """
+    if not formula_rows:
+        return None
+    cells = [(row, xlsx.cell_at(r, idx)) for row, r in formula_rows]
+    tr = xlsx_formula.translate_column(cells, names_by_index)
+    if tr.formula_cells == 0:
+        return None
+    return {
+        "cells": tr.formula_cells,
+        "expr": tr.expr,
+        "reason": tr.reason,
+        "sample": tr.sample,
+    }
 
 
 def id_column_counts(data_rows: list[tuple], id_column: int) -> dict:
@@ -1180,9 +1323,15 @@ def import_new_sheet_xlsx(
     ◇予定/◇実績 are skipped unless explicitly selected (then they land as ordinary
     date columns, since a new sheet has no milestone template yet).
     """
-    _wb, ws, _grid_rows, _hr, header, data_rows = xlsx.read_source(
-        file, sheet_name, header_row, last_row
-    )
+    (
+        _wb,
+        ws,
+        _grid_rows,
+        _hr,
+        header,
+        data_rows,
+        formula_rows,
+    ) = xlsx.read_source_with_formulas(file, sheet_name, header_row, last_row)
     result = create_sheet_with_selection(
         db,
         user,
@@ -1193,6 +1342,7 @@ def import_new_sheet_xlsx(
         data_rows=data_rows,
         id_column=id_column,
         selection=_parse_selection(columns),
+        formula_rows=formula_rows,
     )
     result.pop("selection", None)  # internal — only the 一括取り込み needs it
     return result
@@ -1210,11 +1360,15 @@ def create_sheet_with_selection(
     id_column: int,
     selection: list[dict] | None,
     commit: bool = True,
+    formula_rows: list[tuple[int, tuple]] | None = None,
 ) -> dict:
     """Create a sheet from an already-sliced worksheet and fill it.
 
     The body of `import_new_sheet_xlsx`, factored out so the 一括取り込み can create
     several sheets from one workbook inside a single transaction (`commit=False`).
+
+    `formula_rows` (the same rows read with `data_only=False`) lets a column that
+    holds an Excel formula become a 数式列 instead of the numbers it produced.
     """
     if not any(not _is_blank(v) for v in header):
         raise HTTPException(
@@ -1223,7 +1377,9 @@ def create_sheet_with_selection(
 
     member_names = set(_members_by_name(db, user.org_id).keys())
     if selection is None:
-        selection = _default_selection(header, data_rows, id_column, has_week_grid, member_names)
+        selection = _default_selection(
+            header, data_rows, id_column, has_week_grid, member_names, formula_rows
+        )
     selection = [it for it in selection if it["index"] != id_column and 0 <= it["index"] < len(header)]
 
     new_name = (name or "").strip() or worksheet_title.strip() or "取り込みシート"
@@ -1264,8 +1420,13 @@ def create_sheet_with_selection(
         if role in ("week", "progress", "deps") or nm in existing_names:
             continue
         values = _column_values(data_rows, idx)
-        ctype = it["type"] if it["type"] in _IMPORTABLE_TYPES else ""
-        if not ctype:
+        # 数式列は「取り込める型」の一覧には入らない（値を保存しないので）が、選択としては
+        # 正当。式が空なら普通の推定に落とす — 式の無い数式列は永久に空欄になるだけなので。
+        wants_formula = it["type"] == "formula" and bool(it.get("expr"))
+        ctype = "formula" if wants_formula else (it["type"] if it["type"] in _IMPORTABLE_TYPES else "")
+        if wants_formula:
+            config = {"expr": it["expr"]}
+        elif not ctype:
             ctype, config = _infer_type(values, member_names)
         elif ctype == "dropdown":
             config = _dropdown_config(values)

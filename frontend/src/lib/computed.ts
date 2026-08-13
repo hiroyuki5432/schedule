@@ -9,8 +9,8 @@
 
 import { evalFormula, formatFormulaValue, parseFormula } from '@/lib/formula'
 import type { FormulaAst, FormulaValue } from '@/lib/formula'
-import { resolveLookup } from '@/lib/lookup'
-import type { TargetSheets } from '@/lib/lookup'
+import { buildLookupIndex, resolveLookup } from '@/lib/lookup'
+import type { LookupIndex, TargetSheets } from '@/lib/lookup'
 import type { Column, ColumnType, Member, Row } from '@/types/api'
 
 /** 値を自動計算する列の型。 */
@@ -39,6 +39,26 @@ export function makeComputedResolver(
   const asts = new Map<string, { ast: FormulaAst | null; error: string | null }>()
   const byName = new Map<string, Column>()
   for (const c of columns) if (!byName.has(c.name)) byName.set(c.name, c)
+
+  // 参照(LOOKUP)先の索引。「シートID|照合キー列」ごとに1回だけ作る。
+  const indexes = new Map<string, LookupIndex>()
+  const getIndex = (targetSheetId: string, matchKey: string): LookupIndex => {
+    const k = `${targetSheetId}|${matchKey}`
+    let idx = indexes.get(k)
+    if (!idx) {
+      const target = targets[targetSheetId]
+      idx = target ? buildLookupIndex(target, matchKey) : new Map()
+      indexes.set(k, idx)
+    }
+    return idx
+  }
+
+  // 解決済みの値。1回の描画で、同じセルが列幅の計測・絞り込みの候補・検索・セル本体と
+  // 4〜5回聞かれるので、そのたびに数式を評価し直さない。
+  //
+  // キーは Row オブジェクトそのもの（WeakMap）。行を編集すると react-query が
+  // シートを取り直して行オブジェクトごと差し替わるため、古い値が残ることはない。
+  const cache = new WeakMap<Row, Map<string, string | null>>()
 
   const memberName = (v: unknown): string => {
     const m = members.find((x) => String(x.id) === String(v))
@@ -80,11 +100,31 @@ export function makeComputedResolver(
   function resolve(column: Column, row: Row, seen: Set<string>): string | null {
     const key = `${column.id}:${row.id}`
     if (seen.has(key)) return '#循環参照しています'
-    if (column.type === 'lookup') return resolveLookup(column, row, targets, members)
-    if (column.type !== 'formula') return null
-    const next = new Set(seen)
-    next.add(key)
-    return formulaValue(column, row, next)
+    // 循環参照の判定中（seen が空でない）はキャッシュに載せない／読まない — 途中経過の
+    // 「#循環参照しています」が正しい値として焼き付いてしまうため。
+    const memo = seen.size === 0 ? cache.get(row) : undefined
+    if (memo?.has(String(column.id))) return memo.get(String(column.id)) ?? null
+
+    let out: string | null
+    if (column.type === 'lookup') {
+      out = resolveLookup(column, row, targets, members, getIndex)
+    } else if (column.type !== 'formula') {
+      out = null
+    } else {
+      const next = new Set(seen)
+      next.add(key)
+      out = formulaValue(column, row, next)
+    }
+
+    if (seen.size === 0) {
+      let m = cache.get(row)
+      if (!m) {
+        m = new Map()
+        cache.set(row, m)
+      }
+      m.set(String(column.id), out)
+    }
+    return out
   }
 
   return (column, row) => resolve(column, row, new Set())

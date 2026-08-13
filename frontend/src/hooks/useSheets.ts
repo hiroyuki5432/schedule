@@ -13,6 +13,16 @@ export function useColumns(sheetId: string | undefined) {
   })
 }
 
+/** Sheet + columns + rows. Same cache key the grid uses, so opening 設定 from a
+ *  sheet you were just looking at costs nothing. */
+export function useSheetDetail(sheetId: string | undefined) {
+  return useQuery({
+    queryKey: ['sheet', sheetId],
+    queryFn: () => api.getSheet(sheetId!),
+    enabled: !!sheetId,
+  })
+}
+
 export function useOrg() {
   return useQuery({ queryKey: ['org'], queryFn: api.getOrg })
 }

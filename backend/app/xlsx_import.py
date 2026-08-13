@@ -30,11 +30,17 @@ SAMPLE_LIMIT = 4
 SCAN_ROWS = 200
 
 
-def workbook_from_bytes(data: bytes):
+def workbook_from_bytes(data: bytes, *, data_only: bool = True):
+    """開いたワークブック。
+
+    `data_only=True` は数式セルを **Excel が最後に保存した計算結果** として返す（通常の
+    取り込みはこちら）。`data_only=False` にすると数式そのもの（`'=C2*D2'`）が返るので、
+    数式列として取り込めるかの判定に使う（:mod:`app.xlsx_formula`）。
+    """
     from openpyxl import load_workbook
 
     try:
-        return load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        return load_workbook(io.BytesIO(data), data_only=data_only, read_only=True)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -250,3 +256,35 @@ def read_source(file: UploadFile, sheet_name: str, header_row: int, last_row: in
     wb = open_workbook(file)
     ws, grid, hr, header, data_rows = slice_worksheet(wb, sheet_name, header_row, last_row)
     return wb, ws, grid, hr, header, data_rows
+
+
+def read_source_with_formulas(
+    file: UploadFile, sheet_name: str, header_row: int, last_row: int = 0
+):
+    """`read_source` に加えて、同じ範囲の **数式** も返す。
+
+    値と数式は openpyxl の別々の読み込みでしか取れない（`data_only` は開くときに決まる）
+    ので、アップロードのバイト列を1回だけ読んで2回開く。返り値の最後は
+    ``[(ワークシート行番号, 生セル), …]`` の行リストで、値側の `data_rows` と同じ
+    行だけが同じ順で並ぶ。
+    """
+    data = upload_bytes(file)
+    wb = workbook_from_bytes(data)
+    ws, grid, hr, header, data_rows = slice_worksheet(wb, sheet_name, header_row, last_row)
+
+    fwb = workbook_from_bytes(data, data_only=False)
+    try:
+        fws = pick_worksheet(fwb, ws.title)
+        fgrid = grid_of(fws)
+    except HTTPException:
+        fgrid = []
+
+    # 値側は「空行を落とした後」の並び。数式側も同じ行だけを、物理行番号つきで拾う。
+    end = last_row if 0 < last_row <= len(grid) else len(grid)
+    formula_rows: list[tuple[int, tuple]] = []
+    for i in range(hr, end):  # i は 0 始まり = 物理行番号 - 1
+        row = grid[i]
+        if row is None or not any(not is_blank(v) for v in row):
+            continue
+        formula_rows.append((i + 1, fgrid[i] if i < len(fgrid) else ()))
+    return wb, ws, grid, hr, header, data_rows, formula_rows

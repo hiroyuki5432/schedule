@@ -137,6 +137,17 @@ export function InlineCell({
     // Resolve the display badge from ALL options so a frozen current value still
     // renders with its label/color.
     const opt = allOptions.find((o) => o.value === cur)
+    // A value that is NOT in the option list must still be shown and must stay
+    // selectable. Excel imports write straight into row.data without touching the
+    // column's options, so a re-imported sheet is full of values the list has never
+    // heard of — and this cell used to render them as 「—」, i.e. the data looked
+    // like it had been wiped (要望: シート取込後にプルダウンがおかしい). It is drawn
+    // without a colour and marked 未登録 so it reads as "present, but not on the
+    // list" rather than as a normal choice.
+    if (cur !== '' && !opt) {
+      // 色は付けない — 登録済みの選択肢と見分けがつかなくなるので。
+      options.unshift({ value: cur, label: `${cur}（選択肢に未登録）`, color: undefined })
+    }
     return (
       <SelectCell
         className={className}
@@ -151,6 +162,13 @@ export function InlineCell({
             <Badge bg={opt.color ?? '#EFEDE4'} color="#3a382f">
               {opt.value}
             </Badge>
+          ) : cur !== '' ? (
+            <span
+              title={`「${cur}」はこの列の選択肢に登録されていません（シート設定 → 列 → 選択肢 で追加できます）`}
+              className="overflow-hidden text-ellipsis whitespace-nowrap border-b border-dashed border-[var(--ink3)] text-[12.5px] text-[var(--ink2)]"
+            >
+              {cur}
+            </span>
           ) : null
         }
       />

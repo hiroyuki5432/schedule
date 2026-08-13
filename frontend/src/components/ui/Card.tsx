@@ -1,17 +1,23 @@
+import { forwardRef } from 'react'
 import type { HTMLAttributes } from 'react'
 import { cn } from '@/lib/format'
 
-export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return (
-    <div
-      className={cn(
-        'rounded-[14px] border border-[var(--line)] bg-[var(--surface)]',
-        className,
-      )}
-      {...props}
-    />
-  )
-}
+// forwardRef: the table view uses the card itself as the scroll container and
+// hands that element to the row virtualizer.
+export const Card = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
+  function Card({ className, ...props }, ref) {
+    return (
+      <div
+        ref={ref}
+        className={cn(
+          'rounded-[14px] border border-[var(--line)] bg-[var(--surface)]',
+          className,
+        )}
+        {...props}
+      />
+    )
+  },
+)
 
 export function CardHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
