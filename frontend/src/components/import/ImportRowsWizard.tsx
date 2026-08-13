@@ -9,11 +9,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/api/client'
-import type { ImportRowsColumn } from '@/api/client'
+import type { ImportMatchMode, ImportRowsColumn } from '@/api/client'
 import { ApiError } from '@/lib/http'
 import { Select } from '@/components/ui/Select'
 import { WizardShell, colLetter } from '@/components/import/WizardShell'
-import { SourceStep } from '@/components/import/SourceStep'
+import { AUTO_ID, SourceStep } from '@/components/import/SourceStep'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/format'
 
@@ -52,7 +52,10 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
   const [headerRow, setHeaderRow] = useState(0) // 0 = 自動判定
   const [lastRow, setLastRow] = useState(0) // 0 = 最後まで
   const [tailFrom, setTailFrom] = useState(0) // 0 = 末尾から自動
-  const [idColumn, setIdColumn] = useState(0)
+  // 既定は「照合しない」＝ Excelの1行がそのまま1行になる（要望: 1列目が被るだけで
+  // 1行にまとめないでほしい）。それに合わせて ID列も既定は自動採番。
+  const [matchMode, setMatchMode] = useState<ImportMatchMode>('none')
+  const [idColumn, setIdColumn] = useState(AUTO_ID)
   /** Excel column index → target (sheet column name / reserved header). '' = 除外 */
   const [mapping, setMapping] = useState<Record<number, string>>({})
   /** The saved mapping, once applied — sent to inspect so the server proposes it. */
@@ -88,6 +91,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
       lastRow,
       tailFrom,
       idColumn,
+      matchMode,
       JSON.stringify(presetCols ?? null),
     ],
     queryFn: () =>
@@ -97,6 +101,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
         lastRow,
         tailFrom,
         idColumn,
+        matchMode,
         columns: presetCols,
       }),
     // Wait for the presets so the first analysis is already the saved one — no
@@ -119,6 +124,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
     setHeaderRow(preset.header_row)
     setLastRow(preset.last_row)
     setIdColumn(preset.id_column)
+    if (preset.match_mode) setMatchMode(preset.match_mode)
     // An empty saved mapping means "never recorded" — leave it to the by-name
     // defaults rather than asking for a mapping that takes no columns.
     if (preset.mapping.length) {
@@ -158,6 +164,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
       headerRow,
       lastRow,
       idColumn,
+      matchMode,
       JSON.stringify(chosen),
     ],
     queryFn: () =>
@@ -166,6 +173,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
         headerRow,
         lastRow,
         idColumn,
+        matchMode,
         columns: chosen,
       }),
     enabled: step === 2 && chosen.length > 0,
@@ -180,6 +188,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
         headerRow: insp.data?.header_row,
         lastRow,
         idColumn,
+        matchMode,
         columns: chosen,
       })
       // Remember what just worked, so the next round (and the 一括取り込み) can
@@ -194,6 +203,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
             header_row: insp.data.header_row,
             last_row: lastRow,
             id_column: idColumn,
+            match_mode: matchMode,
             mapping: chosen,
           })
           .then(() => qc.invalidateQueries({ queryKey: ['import-presets'] }))
@@ -206,7 +216,12 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
         qc.invalidateQueries({ queryKey: ['sheet-milestones', sheetId] }),
         qc.invalidateQueries({ queryKey: ['snapshot', sheetId] }),
       ])
-      toast.show(`取り込み完了：新規 ${r.created} 件 / 更新 ${r.updated} 件`, 'success')
+      toast.show(
+        r.deleted
+          ? `入れ替え完了：${r.deleted} 件を削除して ${r.created} 件を取り込みました`
+          : `取り込み完了：新規 ${r.created} 件 / 更新 ${r.updated} 件`,
+        'success',
+      )
       // プルダウン列の選択肢をどう扱ったか（増やした／多すぎるので増やさなかった）は、
       // 黙っていると「取り込んだのに選択肢に出ない」になるので必ず伝える。
       for (const note of r.notes ?? []) toast.show(note, 'info', 7000)
@@ -260,8 +275,9 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
               setSheetName('')
               setHeaderRow(0)
               setLastRow(0)
-            setTailFrom(0)
-              setIdColumn(0)
+              setTailFrom(0)
+              setIdColumn(AUTO_ID)
+              setMatchMode('none')
             }}
           >
             設定を使わず最初から
@@ -278,7 +294,8 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
             setHeaderRow(0)
             setLastRow(0)
             setTailFrom(0)
-            setIdColumn(0)
+            setIdColumn(AUTO_ID)
+            setMatchMode('none')
             // The saved mapping is by column position — it means nothing on
             // another worksheet, so switching drops it.
             setPresetCols(undefined)
@@ -289,7 +306,19 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
           onTailFrom={setTailFrom}
           idColumn={idColumn}
           onIdColumn={setIdColumn}
-          note="ID列（薄い黄色）が既存のタスクと一致する行は上書き、無い行は新規追加になります。"
+          matchMode={matchMode}
+          onMatchMode={(m) => {
+            setMatchMode(m)
+            // 照合しない／入れ替えなら ID列は要らない（内部のIDを自動で振る）。
+            // 逆に「IDで照合」に切り替えたら、照合する列が要る。
+            if (m === 'id') setIdColumn((cur) => (cur < 0 ? 0 : cur))
+            else setIdColumn(AUTO_ID)
+          }}
+          note={
+            matchMode === 'id'
+              ? 'ID列（薄い黄色）が既存のタスクと一致する行は上書き、無い行は新規追加になります。'
+              : 'ID列を選ぶと、その値が行のIDになります（選ばなければ自動採番）。'
+          }
         />
       )}
 
@@ -374,6 +403,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
           src={src}
           chosen={chosen}
           idColumn={idColumn}
+          matchMode={matchMode}
           dataPreview={dataPreview}
           checking={check.isFetching}
         />
@@ -386,18 +416,31 @@ function PreviewStep({
   src,
   chosen,
   idColumn,
+  matchMode,
   dataPreview,
   checking,
 }: {
   src: api.ImportRowsInspection
   chosen: { index: number; name: string }[]
   idColumn: number
+  matchMode: ImportMatchMode
   dataPreview: { row: number; cells: string[] }[]
   checking: boolean
 }) {
   const byIndex = new Map(src.columns.map((c) => [c.index, c]))
   const warnings: string[] = []
-  if (idColumn < 0) {
+  if (matchMode === 'replace') {
+    warnings.push(
+      `いまシートにある ${src.deleted_rows} 行を削除してから取り込みます（工数・◇・進捗も消えます）。`,
+    )
+  } else if (matchMode === 'none') {
+    if (idColumn < 0)
+      warnings.push('すべての行が新しいタスクとして追加されます（IDは自動採番）。')
+    else if (src.duplicate_ids > 0)
+      warnings.push(
+        `同じIDの行が ${src.duplicate_ids} 行ありますが、まとめずに別々の行として追加します。`,
+      )
+  } else if (idColumn < 0) {
     warnings.push('ID列を指定していないため、すべての行が新規タスクとして追加されます。')
   } else {
     if (src.blank_ids > 0)
@@ -440,7 +483,15 @@ function PreviewStep({
         <span className="rounded-[9px] bg-[#F2F6F3] px-2.5 py-1 text-[var(--green-d)]">
           新規 {src.new_rows} 行
         </span>
-        <span className="rounded-[9px] bg-[#EEF2F5] px-2.5 py-1">更新 {src.updated_rows} 行</span>
+        {matchMode === 'replace' ? (
+          <span className="rounded-[9px] bg-[#FAE6E0] px-2.5 py-1 text-[#A8442B]">
+            削除 {src.deleted_rows} 行
+          </span>
+        ) : (
+          <span className="rounded-[9px] bg-[#EEF2F5] px-2.5 py-1">
+            更新 {src.updated_rows} 行
+          </span>
+        )}
         <span className="text-[var(--ink3)]">
           ワークシート「{src.sheet_name}」／見出し {src.header_row} 行目／取り込む列 {chosen.length} 列
         </span>

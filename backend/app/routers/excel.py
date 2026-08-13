@@ -44,6 +44,25 @@ _XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
 PROGRESS_HEADER = "進捗(%)"
 DEPS_HEADER = "先行タスク(ID)"
 
+#: 取り込みで「行をどう照合するか」。
+#:   'none'    … 照合しない。Excel の1行＝アプリの1行（既定）。同じIDが並んでいても
+#:                別々の行として入る。ID列を指定していなければ内部IDを自動採番する。
+#:   'id'      … ID列で既存の行を探して更新する（従来の動き）。同じIDは1行になる。
+#:   'replace' … 取り込む前にシートの行を全部消してから入れる（入れ替え）。
+MATCH_MODES = ("none", "id", "replace")
+
+
+def resolve_match_mode(mode: str, id_column: int) -> str:
+    """指定された照合モード。未指定（''）は従来の意味に解決する。
+
+    この設定より前に保存されたプリセットや、モードを送ってこない API 利用は
+    「ID列があるなら ID で照合」という従来の動きのままにする — 黙って挙動が変わって
+    再取り込みが行を増殖させる、という壊れ方をしないため。画面（ウィザード）は
+    常に明示的に送るので、そちらの既定は 'none'。
+    """
+    m = (mode or "").strip()
+    return m if m in MATCH_MODES else ("id" if id_column >= 0 else "none")
+
 
 # --------------------------------------------------------------------------- #
 # Template milestone columns
@@ -406,31 +425,43 @@ def import_xlsx(
     header_row: int = Form(default=0),
     last_row: int = Form(default=0),
     id_column: int = Form(default=0),
+    match_mode: str = Form(default=""),
     columns: str = Form(default=""),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Upsert rows into an EXISTING sheet from an .xlsx (ID で照合).
+    """Import rows into an EXISTING sheet from an .xlsx.
 
     With no wizard fields this behaves exactly as before: the active worksheet,
     row 1 as the header, column A as the ID, every header matched to a column of
-    the same name. The 取り込みウィザード instead passes `sheet_name` /
-    `header_row` / `last_row` / `id_column` and `columns` — a JSON list of
-    ``[{"index": 2, "name": "件名"}]`` mapping an Excel column to the sheet column
-    (or reserved header) it should be written into. `last_row` is the last
-    worksheet row to take (0 = 最後まで), for sheets that end in a 合計行 or notes.
+    the same name, upserted by ID. The 取り込みウィザード instead passes
+    `sheet_name` / `header_row` / `last_row` / `id_column` / `match_mode` and
+    `columns` — a JSON list of ``[{"index": 2, "name": "件名"}]`` mapping an Excel
+    column to the sheet column (or reserved header) it should be written into.
+    `last_row` is the last worksheet row to take (0 = 最後まで), for sheets that end
+    in a 合計行 or notes. `match_mode` decides whether rows are matched at all
+    (see :data:`MATCH_MODES`); omitted means the historic「ID列があれば照合」.
     """
     sheet = get_sheet_for_user(db, sheet_id, user)
     ensure_schedule_columns(db, sheet)
     mapping = _parse_selection(columns)
-    if mapping is None and not sheet_name and header_row <= 0 and last_row <= 0 and id_column == 0:
+    if (
+        mapping is None
+        and not sheet_name
+        and header_row <= 0
+        and last_row <= 0
+        and id_column == 0
+        and not match_mode
+    ):
         _ws, header, rows_iter = _load_active_sheet(file)
         return _import_rows(db, user, sheet, header, rows_iter)
 
     _wb, _ws, _grid, _hr, header, data_rows = xlsx.read_source(
         file, sheet_name, header_row, last_row
     )
-    result = import_rows_with_mapping(db, user, sheet, header, data_rows, id_column, mapping)
+    result = import_rows_with_mapping(
+        db, user, sheet, header, data_rows, id_column, mapping, match_mode=match_mode
+    )
     result.pop("selection", None)  # internal — only the 一括取り込み needs it
     return result
 
@@ -444,14 +475,29 @@ def import_rows_with_mapping(
     id_column: int,
     mapping: list[dict] | None,
     commit: bool = True,
+    match_mode: str = "",
 ) -> dict:
-    """Upsert `data_rows` into an existing sheet through the wizard's column mapping.
+    """Import `data_rows` into an existing sheet through the wizard's column mapping.
 
     `mapping` is [{index, name}] — the Excel column and the sheet column (or
     reserved header) it goes into. None falls back to "every named column, matched
     by its own header". Shared with the 一括取り込み, which imports many worksheets
     inside one transaction (hence `commit`).
+
+    `match_mode` decides what happens to the rows already in the sheet: keep them
+    and match by ID ('id'), keep them and always add ('none'), or wipe them first
+    ('replace' — 入れ替え, which is how a repeated load stays the same size instead
+    of piling up copies).
     """
+    mode = resolve_match_mode(match_mode, id_column)
+    deleted = 0
+    if mode == "replace":
+        # 取り込む前に空にする。行・工数・◇・スナップショットが消え、採番も1に戻る
+        # ので、同じファイルを何度入れ直しても中身は毎回まっさらから同じになる。
+        from app.routers.sheets import clear_sheet_rows  # local import avoids a cycle
+
+        deleted = clear_sheet_rows(db, sheet)
+        db.flush()
     if mapping is None:
         mapping = [
             {"index": i, "name": _cell_text(h), "type": ""}
@@ -466,7 +512,11 @@ def import_rows_with_mapping(
     kept = [it for it in kept if it["label"]]
     out_header, out_rows = _synthesize(data_rows, kept, id_column)
     return {
-        **_import_rows(db, user, sheet, out_header, iter(out_rows), commit=commit),
+        **_import_rows(
+            db, user, sheet, out_header, iter(out_rows), commit=commit, match=mode == "id"
+        ),
+        # 入れ替えで消した行数。入れ替え以外では返さない（何も消していないので）。
+        **({"deleted": deleted} if mode == "replace" else {}),
         # The mapping actually used — with `mapping=None` the defaults were filled
         # in here, and a preset has to remember those, not the None.
         "selection": _effective_selection(kept),
@@ -495,6 +545,7 @@ def inspect_import_rows_xlsx(
     last_row: int = Form(default=0),
     tail_from: int = Form(default=0),
     id_column: int = Form(default=0),
+    match_mode: str = Form(default=""),
     columns: str = Form(default=""),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
@@ -523,6 +574,7 @@ def inspect_import_rows_xlsx(
         "last_row": last_row,
         "sheet_last_row": len(grid),
         "id_column": id_column,
+        "match_mode": resolve_match_mode(match_mode, id_column),
         "total_rows": len(data_rows),
         # Rows below the header with NO cut, so the UI can say how many the 最終行
         # setting is excluding.
@@ -531,7 +583,7 @@ def inspect_import_rows_xlsx(
         "tail_preview": xlsx.tail_preview_of(grid, hr, tail_from, last_row),
         "columns": cols,
         "targets": targets,
-        **upsert_counts(db, sheet, data_rows, id_column),
+        **upsert_counts(db, sheet, data_rows, id_column, match_mode),
     }
 
 
@@ -652,14 +704,28 @@ def row_target_info(
     return cols, targets
 
 
-def upsert_counts(db: Session, sheet: Sheet, data_rows: list[tuple], id_column: int) -> dict:
+def upsert_counts(
+    db: Session,
+    sheet: Sheet,
+    data_rows: list[tuple],
+    id_column: int,
+    match_mode: str = "",
+) -> dict:
     """How many rows would land on an existing task vs create a new one, plus the
-    blank/duplicate ID counts the preview warns about."""
-    existing_keys = {
-        k
-        for k in db.execute(select(Row.key_value).where(Row.sheet_id == sheet.id)).scalars()
-        if k
-    }
+    blank/duplicate ID counts the preview warns about.
+
+    Only 'id' matching produces 更新 rows. 'none' adds every line; 'replace' does
+    the same after emptying the sheet, so it also reports how many rows the run
+    would delete (`deleted_rows`) — the number nobody wants to discover afterwards.
+    """
+    mode = resolve_match_mode(match_mode, id_column)
+    existing_keys: set[str] = set()
+    if mode == "id":
+        existing_keys = {
+            k
+            for k in db.execute(select(Row.key_value).where(Row.sheet_id == sheet.id)).scalars()
+            if k
+        }
     ids = [_cell_text(xlsx.cell_at(r, id_column)) for r in data_rows] if id_column >= 0 else []
     seen: set[str] = set()
     updated = created = duplicate_ids = blank_ids = 0
@@ -675,18 +741,39 @@ def upsert_counts(db: Session, sheet: Sheet, data_rows: list[tuple], id_column: 
             updated += 1
         else:
             created += 1
-    if id_column < 0:
+    if id_column < 0 or mode != "id":
         created = len(data_rows)
+        updated = 0
+    deleted = 0
+    if mode == "replace":
+        deleted = db.execute(
+            select(func.count()).select_from(Row).where(Row.sheet_id == sheet.id)
+        ).scalar_one()
     return {
         "new_rows": created,
         "updated_rows": updated,
+        "deleted_rows": deleted,
         "blank_ids": blank_ids,
         "duplicate_ids": duplicate_ids,
     }
 
 
-def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter, commit: bool = True) -> dict:
-    """Upsert rows (by ID) from an already-opened worksheet into `sheet`.
+def _import_rows(
+    db: Session,
+    user: User,
+    sheet: Sheet,
+    header,
+    rows_iter,
+    commit: bool = True,
+    match: bool = True,
+) -> dict:
+    """Import rows from an already-opened worksheet into `sheet`.
+
+    `match=True` upserts by ID (key_value): a row whose ID already exists is
+    updated. `match=False` never looks anything up — **every source line becomes
+    its own row**, even when the ID column repeats (要望: 1列目が被るだけで1行に
+    まとめられては困る). Blank IDs are auto-numbered from the sheet's 採番ルール, so
+    a file with no ID column at all still gets a distinct internal id per row.
 
     `commit=False` leaves the transaction open so the 一括取り込み can write every
     worksheet of a workbook as one all-or-nothing operation."""
@@ -742,10 +829,15 @@ def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter, commi
     members_by_name = _members_by_name(db, user.org_id)
 
     # Existing rows by key_value (first match wins, matching lookup semantics).
+    # Only built when we are actually matching — with match=False nothing is looked
+    # up, so two source lines sharing an ID can never collapse into one row.
     existing: dict[str, Row] = {}
-    for r in db.execute(select(Row).where(Row.sheet_id == sheet.id).order_by(Row.id)).scalars():
-        if r.key_value is not None:
-            existing.setdefault(r.key_value, r)
+    if match:
+        for r in db.execute(
+            select(Row).where(Row.sheet_id == sheet.id).order_by(Row.id)
+        ).scalars():
+            if r.key_value is not None:
+                existing.setdefault(r.key_value, r)
 
     today = date.today()
     cur_week = current_week_start(week_weekday)
@@ -763,7 +855,7 @@ def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter, commi
         if not any(v not in (None, "") for v in raw_row):
             continue
 
-        row = existing.get(key_value) if key_value else None
+        row = existing.get(key_value) if (match and key_value) else None
         if row is None:
             if not key_value:
                 key_value = _gen_key(db, sheet)
@@ -777,7 +869,8 @@ def _import_rows(db: Session, user: User, sheet: Sheet, header, rows_iter, commi
             )
             db.add(row)
             db.flush()
-            existing[key_value] = row
+            if match:
+                existing[key_value] = row
             created += 1
         else:
             updated += 1
@@ -1303,6 +1396,7 @@ def import_new_sheet_xlsx(
     header_row: int = Form(default=0),
     last_row: int = Form(default=0),
     id_column: int = Form(default=0),
+    match_mode: str = Form(default=""),
     columns: str = Form(default=""),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
@@ -1343,6 +1437,7 @@ def import_new_sheet_xlsx(
         id_column=id_column,
         selection=_parse_selection(columns),
         formula_rows=formula_rows,
+        match_mode=match_mode,
     )
     result.pop("selection", None)  # internal — only the 一括取り込み needs it
     return result
@@ -1361,6 +1456,7 @@ def create_sheet_with_selection(
     selection: list[dict] | None,
     commit: bool = True,
     formula_rows: list[tuple[int, tuple]] | None = None,
+    match_mode: str = "",
 ) -> dict:
     """Create a sheet from an already-sliced worksheet and fill it.
 
@@ -1450,7 +1546,17 @@ def create_sheet_with_selection(
     db.flush()
 
     out_header, out_rows = _synthesize(data_rows, kept, id_column)
-    result = _import_rows(db, user, sheet, out_header, iter(out_rows), commit=commit)
+    # 新しいシートなので照合する相手はいない。効くのは「同じファイル内で ID が重なった
+    # 行」で、'id' 以外なら 1行ずつ別の行として入る（要望: 勝手にまとめない）。
+    result = _import_rows(
+        db,
+        user,
+        sheet,
+        out_header,
+        iter(out_rows),
+        commit=commit,
+        match=resolve_match_mode(match_mode, id_column) == "id",
+    )
     return {
         "sheet_id": sheet.id,
         "name": sheet.name,

@@ -6,6 +6,8 @@
 // The tail grid exists because sheets routinely end in something that is not data
 // (合計行・注記・別表) and the head preview stops at row 30, so there would
 // otherwise be no way to even see the rows that need cutting off.
+import { useEffect, useState } from 'react'
+import type { ImportMatchMode } from '@/api/client'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { colLetter } from '@/components/import/WizardShell'
@@ -40,6 +42,11 @@ interface Props {
   /** Omit both to hide the ID picker (日報のようにID列を使わない取込). */
   idColumn?: number
   onIdColumn?: (n: number) => void
+  /** 行の照合。省略すると照合の選択そのものを出さない（日報の取込）。 */
+  matchMode?: ImportMatchMode
+  onMatchMode?: (m: ImportMatchMode) => void
+  /** 選べる照合の種類。新しいシートを作るときは中身が空なので「入れ替え」は出さない。 */
+  matchModes?: ImportMatchMode[]
   /** Extra note under the grid. */
   note?: string
 }
@@ -50,6 +57,18 @@ export const AUTO_ID = -1
 /** How far one 「さらに上を表示」 press walks the tail window up. */
 const MORE_ROWS = 50
 
+const MATCH_LABEL: Record<ImportMatchMode, string> = {
+  none: '照合しない（1行ずつ追加）',
+  id: 'ID列で照合して更新',
+  replace: '入れ替え（既存の行を消してから）',
+}
+
+const MATCH_HELP: Record<ImportMatchMode, string> = {
+  none: 'Excelの1行が、そのままこのアプリの1行になります。1列目が同じ行があっても、まとまりません。',
+  id: '同じIDの行を探して上書きします。ファイルの中に同じIDが複数あると、1行にまとまります。',
+  replace: 'いまシートに入っている行を全部消してから取り込みます。手で足した行・工数・◇も消えます。',
+}
+
 export function SourceStep({
   data,
   sheetName,
@@ -59,10 +78,14 @@ export function SourceStep({
   onTailFrom,
   idColumn,
   onIdColumn,
+  matchMode,
+  onMatchMode,
+  matchModes = ['none', 'id', 'replace'],
   note,
 }: Props) {
   const headerCells = data.preview.find((r) => r.row === data.header_row)?.cells ?? []
   const showId = idColumn !== undefined && !!onIdColumn
+  const showMatch = matchMode !== undefined && !!onMatchMode
   const excluded = data.available_rows - data.total_rows
   // The head grid already shows these rows; repeating them would just confuse.
   // They stay cuttable there — every row of both grids carries the same ✂.
@@ -90,9 +113,28 @@ export function SourceStep({
           </Select>
         </label>
 
+        {showMatch && (
+          <label className="block">
+            <span className="mb-1.5 block text-[12px] text-[var(--ink2)]">行の照合</span>
+            <Select
+              value={matchMode}
+              onChange={(e) => onMatchMode!(e.target.value as ImportMatchMode)}
+              className="min-w-[230px]"
+            >
+              {matchModes.map((m) => (
+                <option key={m} value={m}>
+                  {MATCH_LABEL[m]}
+                </option>
+              ))}
+            </Select>
+          </label>
+        )}
+
         {showId && (
           <label className="block">
-            <span className="mb-1.5 block text-[12px] text-[var(--ink2)]">ID列（行の識別子）</span>
+            <span className="mb-1.5 block text-[12px] text-[var(--ink2)]">
+              ID列（行の識別子）
+            </span>
             <Select
               value={String(idColumn)}
               onChange={(e) => onIdColumn!(Number(e.target.value))}
@@ -112,14 +154,10 @@ export function SourceStep({
           <span className="mb-1.5 block text-[12px] text-[var(--ink2)]">
             最終行<span className="text-[var(--ink3)]">（0＝最後まで）</span>
           </span>
-          <Input
-            type="number"
-            min={0}
+          <LastRowInput
+            value={data.last_row}
             max={data.sheet_last_row}
-            value={data.last_row || ''}
-            placeholder="最後まで"
-            onChange={(e) => onLastRow(Number(e.target.value) || 0)}
-            className="w-[120px] tabular-nums"
+            onCommit={onLastRow}
           />
         </label>
 
@@ -130,6 +168,10 @@ export function SourceStep({
           行番号をクリックすると見出し行を変更できます。
         </div>
       </div>
+
+      {showMatch && (
+        <div className="mt-2 text-[11.5px] text-[var(--ink3)]">{MATCH_HELP[matchMode!]}</div>
+      )}
 
       <div className="mt-3 max-h-[300px] overflow-auto rounded-[10px] border border-[var(--line)]">
         <table className="w-max min-w-full border-collapse text-[11.5px]">
@@ -215,6 +257,46 @@ export function SourceStep({
         )}
       </div>
     </div>
+  )
+}
+
+/** 最終行の入力。打っている途中の数字で解析し直さない（要望: 何か入れるごとに
+ *  読み込みなおして画面が切り替わるのを何とかしてほしい）。確定は Enter か、
+ *  入力欄から離れたとき。プレビューの ✂ を押したときは即座に反映される。 */
+function LastRowInput({
+  value,
+  max,
+  onCommit,
+}: {
+  value: number
+  max: number
+  onCommit: (n: number) => void
+}) {
+  const [draft, setDraft] = useState(value ? String(value) : '')
+  // 外から変わったとき（✂ や「最後まで取り込む」）は入力欄も追従させる。
+  useEffect(() => setDraft(value ? String(value) : ''), [value])
+  const commit = () => {
+    const next = Number(draft) || 0
+    if (next !== value) onCommit(next)
+  }
+  return (
+    <Input
+      type="number"
+      min={0}
+      max={max}
+      value={draft}
+      placeholder="最後まで"
+      title="この行までを取り込む（Enter か、ほかをクリックで反映）"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          commit()
+        }
+      }}
+      className="w-[120px] tabular-nums"
+    />
   )
 }
 

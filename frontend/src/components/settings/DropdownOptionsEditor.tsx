@@ -9,6 +9,7 @@ import * as api from '@/api/client'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
+import { Select } from '@/components/ui/Select'
 import { TrashIcon } from '@/components/ui/icons'
 import { cn } from '@/lib/format'
 import { toast } from '@/lib/toast'
@@ -61,6 +62,25 @@ export function DropdownOptionsEditor({
   const [newValue, setNewValue] = useState('')
   const [bulk, setBulk] = useState('')
   const [showBulk, setShowBulk] = useState(false)
+  // 「この値の行をどうするか」。選択肢を消すときに決めた行き先（null = 空にする）。
+  // 保存と同時にサーバへ渡し、行の値もまとめて付け替える（要望: プルダウンを削るとき、
+  // どこにあてがうかを選べるように）。
+  const [remap, setRemap] = useState<Record<string, string | null>>({})
+  // 削除の確認を出している選択肢（index）。使われていない選択肢はそのまま消える。
+  const [deleting, setDeleting] = useState<number | null>(null)
+
+  // 値ごとの使用件数。「消していいのか」はこれが分からないと判断できない。
+  const usage = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const r of rows ?? []) {
+      const v = r.data?.[column.id]
+      if (v == null) continue
+      const s = String(v).trim()
+      if (s === '') continue
+      counts.set(s, (counts.get(s) ?? 0) + 1)
+    }
+    return counts
+  }, [rows, column.id])
 
   // 「データには入っているのに、選択肢には無い値」。取り込んだ直後はここが本番で、
   // 放っておくとセルが「選択肢に未登録」のまま並ぶ。件数と中身を見せて、そのまま
@@ -92,15 +112,29 @@ export function DropdownOptionsEditor({
 
   const mutation = useMutation({
     mutationFn: () =>
-      api.updateColumn(column.id, { config: { ...column.config, options } }),
+      api.updateColumn(column.id, {
+        config: { ...column.config, options },
+        ...(Object.keys(remap).length ? { value_remap: remap } : {}),
+      }),
     onSuccess: () => {
-      // Renames may have remapped stored values → refresh the sheet's rows.
+      // Renames / 付け替え may have rewritten stored values → refresh the rows.
       void qc.invalidateQueries({ queryKey: ['sheet'] })
+      setRemap({})
       onDone()
       toast.show('選択肢を保存しました', 'success', 2000)
     },
     onError: () => toast.show('選択肢を保存できませんでした。', 'error'),
   })
+
+  /** 選択肢を1つ消す。`to` は行き先（undefined＝値はそのまま残す / null＝空にする）。 */
+  function removeOption(i: number, to?: string | null) {
+    const gone = options[i]
+    setOptions(options.filter((_, j) => j !== i))
+    if (to !== undefined && gone?.value) {
+      setRemap((prev) => ({ ...prev, [gone.value]: to }))
+    }
+    setDeleting(null)
+  }
 
   function add() {
     const v = newValue.trim()
@@ -137,7 +171,8 @@ export function DropdownOptionsEditor({
   }
 
   const dirty =
-    JSON.stringify(options) !== JSON.stringify(withIds(column.config?.options ?? []))
+    JSON.stringify(options) !== JSON.stringify(withIds(column.config?.options ?? [])) ||
+    Object.keys(remap).length > 0
 
   return (
     <Card>
@@ -173,8 +208,8 @@ export function DropdownOptionsEditor({
 
         <ul className="mb-3 flex flex-col gap-2">
           {options.map((o, i) => (
-            <li
-              key={o.id ?? i}
+            <li key={o.id ?? i} className="flex flex-col gap-1.5">
+            <div
               className={cn('flex items-center gap-2', o.frozen && 'opacity-55')}
             >
               <div className="flex flex-col">
@@ -206,6 +241,20 @@ export function DropdownOptionsEditor({
                 value={o.value}
                 onChange={(e) => patch(i, { value: e.target.value })}
               />
+              {/* 使用件数。消していいかは、これが分からないと決められない。 */}
+              <span
+                className={cn(
+                  'w-[52px] flex-shrink-0 text-right text-[11px] tabular-nums',
+                  usage.get(o.value) ? 'text-[var(--ink2)]' : 'text-[var(--ink3)]',
+                )}
+                title={
+                  rows
+                    ? `この値が入っている行の数`
+                    : '行を読み込んでいないため件数は出せません'
+                }
+              >
+                {rows ? `${usage.get(o.value) ?? 0} 件` : ''}
+              </span>
               <button
                 type="button"
                 onClick={() => patch(i, { frozen: !o.frozen })}
@@ -223,17 +272,42 @@ export function DropdownOptionsEditor({
               </button>
               <button
                 className="rounded p-1 text-[var(--ink3)] hover:bg-[#FAE6E0] hover:text-[#A8442B]"
-                onClick={() => setOptions(options.filter((_, j) => j !== i))}
+                onClick={() =>
+                  // 使われていない選択肢はそのまま消す。使われているなら、その行を
+                  // どうするか（空にする／別の値へ／そのまま）を先に決めてもらう。
+                  usage.get(o.value) ? setDeleting(i) : removeOption(i)
+                }
                 title="削除"
               >
                 <TrashIcon className="h-4 w-4" />
               </button>
+            </div>
+
+            {deleting === i && (
+              <RemoveOptionPanel
+                value={o.value}
+                count={usage.get(o.value) ?? 0}
+                others={options.filter((_, j) => j !== i).map((x) => x.value)}
+                onCancel={() => setDeleting(null)}
+                onChoose={(to) => removeOption(i, to)}
+              />
+            )}
             </li>
           ))}
           {options.length === 0 && (
             <li className="text-[12px] text-[var(--ink3)]">選択肢がありません。</li>
           )}
         </ul>
+
+        {Object.keys(remap).length > 0 && (
+          <ul className="mb-3 space-y-0.5 rounded-[9px] bg-[#F2F6F3] px-3 py-2 text-[11.5px] text-[var(--green-d)]">
+            {Object.entries(remap).map(([from, to]) => (
+              <li key={from}>
+                「{from}」の行は{to === null ? '空になります' : `「${to}」になります`}（保存時）
+              </li>
+            ))}
+          </ul>
+        )}
 
         {showBulk ? (
           <div className="mb-3 flex flex-col gap-2">
@@ -291,6 +365,69 @@ export function DropdownOptionsEditor({
         </div>
       </CardBody>
     </Card>
+  )
+}
+
+/** 使われている選択肢を消すときの確認（要望: プルダウンを削る場合、どこにあてがうか
+ *  など選べるといい）。
+ *
+ *  黙って消すと、行の値だけが取り残されて「選択肢に未登録」の点線セルが並ぶ。かといって
+ *  勝手に空にすると入力が消える。だから、消す前にここで行き先を決めてもらう。 */
+function RemoveOptionPanel({
+  value,
+  count,
+  others,
+  onCancel,
+  onChoose,
+}: {
+  value: string
+  count: number
+  others: string[]
+  onCancel: () => void
+  /** null = 空にする / 文字列 = その値に付け替える / undefined = 値はそのまま残す。 */
+  onChoose: (to: string | null | undefined) => void
+}) {
+  const [to, setTo] = useState<string>(others[0] ?? '')
+  return (
+    <div className="ml-9 rounded-[9px] border border-[#E4C9A8] bg-[#FBF3E6] px-3 py-2.5">
+      <div className="text-[12px] font-medium text-[#8A5A1E]">
+        「{value}」は {count} 行で使われています。その行をどうしますか？
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {others.length > 0 && (
+          <>
+            <Select
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              className="h-7 min-w-[140px] px-2 py-0 text-[11.5px]"
+            >
+              {others.map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
+            </Select>
+            <Button size="sm" onClick={() => onChoose(to)} disabled={!to}>
+              この値に付け替えて削除
+            </Button>
+          </>
+        )}
+        <Button size="sm" variant="outline" onClick={() => onChoose(null)}>
+          空にして削除
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          title="行の値はそのまま残ります（一覧では「選択肢に未登録」と点線で表示されます）"
+          onClick={() => onChoose(undefined)}
+        >
+          値は残して削除
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onCancel}>
+          やめる
+        </Button>
+      </div>
+    </div>
   )
 }
 

@@ -131,3 +131,48 @@ def test_import_does_not_explode_a_free_text_column(auth_client):
     # 値そのものは失われない — 表示できることが最低条件。
     rows = auth_client.get(f"/api/sheets/{sheet_id}/rows").json()
     assert rows[0]["data"][str(col_id)] == "住所0"
+
+
+def test_removing_an_option_can_hand_its_rows_to_another_value(auth_client):
+    """要望: プルダウンを削るとき、その値の行をどこにあてがうか選べるように。
+
+    選択肢を消しただけでは行の値は残り、一覧では「選択肢に未登録」になる。付け替え先を
+    一緒に送れば、消すのと同時に行も新しい値に寄せられる。
+    """
+    sheet_id = make_sheet(auth_client)
+    col_id = _add_dropdown(
+        auth_client,
+        sheet_id,
+        [
+            {"id": "a", "value": "保留", "color": "#fff"},
+            {"id": "b", "value": "進行中", "color": "#eee"},
+        ],
+    )
+    make_row(auth_client, sheet_id, {str(col_id): "保留"})
+    make_row(auth_client, sheet_id, {str(col_id): "進行中"})
+
+    r = auth_client.patch(
+        f"/api/columns/{col_id}",
+        json={
+            "config": {"options": [{"id": "b", "value": "進行中", "color": "#eee"}]},
+            "value_remap": {"保留": "進行中"},
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    rows = auth_client.get(f"/api/sheets/{sheet_id}/rows").json()
+    assert [row["data"].get(str(col_id)) for row in rows] == ["進行中", "進行中"]
+
+
+def test_removing_an_option_can_blank_its_rows(auth_client):
+    sheet_id = make_sheet(auth_client)
+    col_id = _add_dropdown(auth_client, sheet_id, [{"id": "a", "value": "保留"}])
+    make_row(auth_client, sheet_id, {str(col_id): "保留"})
+
+    r = auth_client.patch(
+        f"/api/columns/{col_id}",
+        json={"config": {"options": []}, "value_remap": {"保留": None}},
+    )
+    assert r.status_code == 200, r.text
+    row = auth_client.get(f"/api/sheets/{sheet_id}/rows").json()[0]
+    assert str(col_id) not in row["data"]

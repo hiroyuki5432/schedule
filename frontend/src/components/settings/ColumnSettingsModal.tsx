@@ -15,6 +15,8 @@ import { DropdownOptionsEditor } from '@/components/settings/DropdownOptionsEdit
 import { StatusRuleBuilder } from '@/components/settings/StatusRuleBuilder'
 import { LookupConfigEditor } from '@/components/settings/LookupConfigEditor'
 import { FormulaConfigEditor } from '@/components/settings/FormulaConfigEditor'
+import { ReplaceDialog } from '@/components/settings/ReplaceDialog'
+import { isComputed } from '@/lib/computed'
 import { useSheetDetail } from '@/hooks/useSheets'
 import { toast } from '@/lib/toast'
 import type { Column, ColumnType } from '@/types/api'
@@ -49,6 +51,7 @@ export function ColumnSettingsModal({
   const rows = detailQ.data?.rows ?? []
   const [name, setName] = useState(column.name)
   const [type, setType] = useState<ColumnType>(column.type)
+  const [replacing, setReplacing] = useState(false)
 
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ['columns', sheetId] })
@@ -118,12 +121,33 @@ export function ColumnSettingsModal({
           <FormulaConfigEditor column={column} sheetId={sheetId} onDone={refresh} />
         )}
 
-        <div className="flex justify-end border-t border-[var(--line2)] pt-3">
+        <div className="flex items-center justify-end gap-2 border-t border-[var(--line2)] pt-3">
+          {/* 表記ゆれを直すのに、セルを1つずつ開かなくて済むように（要望: 列のみの
+              一括置換）。ダイアログの中でシート全体にも切り替えられる。 */}
+          {!isComputed(column) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="mr-auto"
+              onClick={() => setReplacing(true)}
+            >
+              ⇄ この列の値を一括置換…
+            </Button>
+          )}
           <Button size="sm" variant="outline" onClick={onClose}>
             閉じる
           </Button>
         </div>
       </div>
+
+      {replacing && (
+        <ReplaceDialog
+          sheetId={sheetId}
+          columns={columns}
+          initialColumnId={String(column.id)}
+          onClose={() => setReplacing(false)}
+        />
+      )}
     </Modal>
   )
 }

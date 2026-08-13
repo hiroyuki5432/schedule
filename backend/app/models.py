@@ -350,6 +350,13 @@ class ImportPreset(Base):
     # 1-based 見出し行 (0 = 自動判定), 0-based ID列 (-1 = 自動採番).
     header_row: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     id_column: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 行の照合のしかた（要望: 1列目が被ると勝手に1行にまとまる）:
+    #   'none'    … 照合しない。Excel の1行＝アプリの1行（既定）
+    #   'id'      … ID列で既存の行を探して更新（従来の動き）
+    #   'replace' … 取り込む前にシートの行を全部消してから入れる
+    # 空文字は「記録が無い」= この設定より前に保存されたプリセット。そのときは
+    # ID列の有無から従来どおりの意味（ID列あり→'id'）に解決する。
+    match_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="")
     # Last worksheet row to take, 1-based inclusive (0 = 最後まで). Sheets routinely
     # end in a 合計行 or notes that must not become tasks, and where that line falls
     # is a property of the source sheet — so it is remembered with everything else.

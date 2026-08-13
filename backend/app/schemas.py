@@ -122,6 +122,12 @@ class ColumnUpdate(BaseModel):
     config: Optional[dict[str, Any]] = None
     order: Optional[int] = None
     is_key: Optional[bool] = None
+    #: 「いまこの値が入っている行をどうするか」（要望: プルダウンを削るとき、どこに
+    #: あてがうかを選べるように）。`{"旧の値": "新しい値"}` で付け替え、値を null に
+    #: すると空にする。列そのものの属性ではないので、保存前に取り出して行に適用する。
+    #: 選択肢の *改名* は id で自動追従するので、ここに書くのは主に「削除する選択肢の
+    #: 行き先」。
+    value_remap: Optional[dict[str, Optional[str]]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +443,9 @@ class ImportPresetOut(BaseModel):
     # 1-based, inclusive; 0 = 最後まで（末尾の合計行・注記を切り落とす指定）。
     last_row: int
     id_column: int
+    # 行の照合（'none' 照合しない / 'id' IDで照合 / 'replace' 入れ替え）。
+    # '' はこの設定より前に保存されたもの（読むときに従来の意味へ解決される）。
+    match_mode: str = ""
     mapping: list[Any] = Field(default_factory=list)
     updated_at: datetime
     last_used_at: Optional[datetime] = None
@@ -456,7 +465,77 @@ class ImportPresetSave(BaseModel):
     header_row: int = 0
     last_row: int = 0
     id_column: int = 0
+    match_mode: str = ""
     mapping: list[Any] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# データのお掃除
+# ---------------------------------------------------------------------------
+class CleanupRequest(BaseModel):
+    """何を消すか。None / False は「触らない」。
+
+    しきい値つきのものは「これより古いものを消す」という指定（`None` は無効）。
+    `dry_run` が既定で真 — 履歴も断面も戻せないので、必ず件数を見てから確定する。
+    """
+
+    #: これより古い変更履歴を消す（日数）。
+    row_events_keep_days: Optional[int] = None
+    #: これより古い週次スナップショットを消す（週数）。
+    snapshots_keep_weeks: Optional[int] = None
+    #: 既読の通知を消す。
+    notifications_read: bool = False
+    #: 消した列のセル（`rows.data` に残った、どの列にも属さない値）を消す。
+    orphan_cells: bool = False
+    #: 開始日/完了日の移行前の値のうち、実列に入っているぶんと重複するコピーを消す。
+    legacy_cells: bool = False
+    #: 予定も実績も入っていない工数セルを消す。
+    empty_effort: bool = False
+    #: 新しいほうから何件のバックアップを残すか（残り＝削除）。
+    backups_keep: Optional[int] = None
+    dry_run: bool = True
+
+
+# ---------------------------------------------------------------------------
+# 一括置換
+# ---------------------------------------------------------------------------
+class ReplaceRequest(BaseModel):
+    """一括置換の指定（要望: 列のみ／シート全体の置換）。
+
+    `dry_run` が既定で真なのはわざと — 置換は取り消せないので、画面は必ず一度
+    「何件・どう変わるか」を受け取ってから確定する。
+    """
+
+    #: 列ID（文字列）。省略＝このシートの全列。`"__id__"` は ID(key_value) だけ。
+    column_id: Optional[str] = None
+    find: str
+    replace: str = ""
+    #: セル全体が一致したときだけ置換する（Excel の「完全に同一」）。
+    whole_cell: bool = False
+    case_sensitive: bool = False
+    #: シート全体のときに ID(key_value) も対象にするか。
+    include_key: bool = False
+    #: プルダウンの選択肢も同じ規則で置換する（既定は真）。
+    include_options: bool = True
+    dry_run: bool = True
+
+
+class ReplaceHit(BaseModel):
+    row_key: str
+    column_name: str
+    before: str
+    after: str
+
+
+class ReplaceResult(BaseModel):
+    #: 変わる（変わった）行数とセル数。
+    rows: int
+    cells: int
+    #: 置換したプルダウンの選択肢の数。
+    options: int
+    #: 実際に書き込んだか（dry_run の反対）。
+    applied: bool
+    samples: list[ReplaceHit] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

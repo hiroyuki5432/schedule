@@ -18,10 +18,12 @@ from app.routers import (
     excel,
     export,
     imports,
+    maintenance,
     members,
     milestones,
     notifications,
     org,
+    replace,
     rows,
     search,
     sheets,
@@ -62,6 +64,7 @@ app.include_router(members.router)
 app.include_router(sheets.router)
 app.include_router(columns.router)
 app.include_router(rows.router)
+app.include_router(replace.router)
 app.include_router(effort.router)
 app.include_router(milestones.router)
 app.include_router(snapshots.router)
@@ -72,6 +75,7 @@ app.include_router(imports.router)
 app.include_router(worklog.router)
 app.include_router(notifications.router)
 app.include_router(search.router)
+app.include_router(maintenance.router)
 
 
 @app.get("/api/health", tags=["health"])

@@ -8,11 +8,11 @@
 // 実行は 1トランザクション。途中で失敗したら全部取り消されるので、半分だけ入った
 // 状態にはならない。成功した設定は保存し直されるため、2回目以降は
 // 「ファイルを選ぶ → 取り込む」で済む。
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import * as api from '@/api/client'
-import type { WorkbookPlanItem, WorkbookSheetPlan } from '@/api/client'
+import type { ImportMatchMode, WorkbookPlanItem, WorkbookSheetPlan } from '@/api/client'
 import { ApiError } from '@/lib/http'
 import { Modal } from '@/components/ui/Modal'
 import { Button } from '@/components/ui/Button'
@@ -31,6 +31,19 @@ type Overrides = Record<string, WorkbookPlanItem>
 const NEW_SHEET = 'new'
 const SKIP = 'skip'
 
+/** 行の照合の選び方。新しいシートを作るときは中身が無いので「入れ替え」は出さない。 */
+const MATCH_LABEL: Record<ImportMatchMode, string> = {
+  none: '照合しない',
+  id: 'IDで照合',
+  replace: '入れ替え',
+}
+
+const MATCH_TITLE: Record<ImportMatchMode, string> = {
+  none: 'Excelの1行が、そのまま1行になります（同じIDでもまとまりません）',
+  id: '同じIDの行を探して上書きします（ファイル内の同じIDは1行にまとまります）',
+  replace: 'いまシートにある行を全部消してから取り込みます',
+}
+
 export function ImportWorkbookDialog({ onClose }: Props) {
   const qc = useQueryClient()
   const navigate = useNavigate()
@@ -44,17 +57,15 @@ export function ImportWorkbookDialog({ onClose }: Props) {
 
   const sheetsQ = useQuery({ queryKey: ['sheets'], queryFn: api.getSheets, staleTime: 60_000 })
 
-  // Re-analysing means re-parsing the whole workbook, so the plan settles for a
-  // moment before it is sent — otherwise every keystroke in 見出し行 re-uploads.
+  // 再解析はブック全体を読み直すので、**押されたときだけ**やる。以前は入力が止まる
+  // たびに走らせていて、見出し行を1文字打つ・取り込み先を選ぶ、そのたびに画面が
+  // 「読み込み中…」に切り替わって落ち着かなかった（要望: ボタンでやればいい）。
   const planItems = useMemo(() => Object.values(overrides), [overrides])
   const [settledPlan, setSettledPlan] = useState<WorkbookPlanItem[]>([])
-  useEffect(() => {
-    const t = setTimeout(() => setSettledPlan(planItems), 350)
-    return () => clearTimeout(t)
-  }, [planItems])
-  // True while an edit has not been re-analysed yet — running now would use the
-  // numbers from before the change.
+  // 変更したのに、まだ確認しなおしていない状態。件数は変更前のものなので、実行の前に
+  // 必ず確認しなおしてもらう。
   const stale = JSON.stringify(planItems) !== JSON.stringify(settledPlan)
+  const recheck = () => setSettledPlan(planItems)
 
   const fileKey = file ? `${file.name}:${file.size}:${file.lastModified}` : ''
   const insp = useQuery({
@@ -71,9 +82,10 @@ export function ImportWorkbookDialog({ onClose }: Props) {
     (a, r) => ({
       created: a.created + r.new_rows,
       updated: a.updated + r.updated_rows,
+      deleted: a.deleted + r.deleted_rows,
       invalid: a.invalid + r.invalid,
     }),
-    { created: 0, updated: 0, invalid: 0 },
+    { created: 0, updated: 0, deleted: 0, invalid: 0 },
   )
 
   const patch = (worksheet: string, p: Partial<WorkbookPlanItem>) =>
@@ -92,6 +104,7 @@ export function ImportWorkbookDialog({ onClose }: Props) {
         header_row: r.header_row,
         last_row: r.last_row,
         id_column: r.id_column,
+        match_mode: r.match_mode,
         // Omit when empty — an empty list would mean "take no columns at all",
         // where leaving it out means "use the saved / by-name defaults".
         ...(r.mapping?.length
@@ -113,7 +126,8 @@ export function ImportWorkbookDialog({ onClose }: Props) {
         )
       })
       toast.show(
-        `一括取り込み完了：${r.results.length} シート（新規 ${r.created} / 更新 ${r.updated}）`,
+        `一括取り込み完了：${r.results.length} シート（新規 ${r.created} / 更新 ${r.updated}` +
+          `${r.deleted ? ` / 削除 ${r.deleted}` : ''}）`,
         'success',
       )
       setDone(r.results)
@@ -200,9 +214,23 @@ export function ImportWorkbookDialog({ onClose }: Props) {
             >
               別のファイルにする
             </button>
-            {(insp.isFetching || stale) && (
-              <span className="ml-auto text-[var(--ink3)]">確認中…</span>
-            )}
+            <span className="ml-auto flex items-center gap-2">
+              {insp.isFetching ? (
+                <span className="text-[var(--ink3)]">確認中…</span>
+              ) : stale ? (
+                <span className="text-[#A8442B]">
+                  変更しました。件数は「確認しなおす」を押すと更新されます。
+                </span>
+              ) : null}
+              <Button
+                variant={stale ? undefined : 'outline'}
+                size="sm"
+                disabled={insp.isFetching || run.isPending}
+                onClick={recheck}
+              >
+                確認しなおす
+              </Button>
+            </span>
           </div>
 
           {insp.isError && (
@@ -236,6 +264,9 @@ export function ImportWorkbookDialog({ onClose }: Props) {
                     </th>
                     <th className="w-[86px] border-b border-[var(--line)] px-2 py-1.5 text-left">
                       最終行
+                    </th>
+                    <th className="w-[132px] border-b border-[var(--line)] px-2 py-1.5 text-left">
+                      行の照合
                     </th>
                     <th className="w-[130px] border-b border-[var(--line)] px-2 py-1.5 text-left">
                       取り込み内容
@@ -274,6 +305,11 @@ export function ImportWorkbookDialog({ onClose }: Props) {
                   <span className="ml-2">
                     新規 {totals.created} 行 / 更新 {totals.updated} 行
                   </span>
+                  {totals.deleted > 0 && (
+                    <span className="ml-2 text-[#A8442B]">
+                      削除 {totals.deleted} 行（入れ替え）
+                    </span>
+                  )}
                   {totals.invalid > 0 && (
                     <span className="ml-2 text-[#A8442B]">
                       読めない値 {totals.invalid} 件（空欄になります）
@@ -288,6 +324,7 @@ export function ImportWorkbookDialog({ onClose }: Props) {
               </Button>
               <Button
                 size="sm"
+                title={stale ? '先に「確認しなおす」を押してください' : undefined}
                 disabled={active.length === 0 || run.isPending || insp.isFetching || stale}
                 onClick={() => {
                   setError(null)
@@ -340,9 +377,11 @@ function PlanRow({
   const weekGrid = ov?.has_week_grid ?? row.has_week_grid
   const headerRow = ov?.header_row ?? row.header_row
   const lastRow = ov?.last_row ?? row.last_row
+  const matchMode = ov?.match_mode ?? row.match_mode
   const targetName = ov?.target_sheet_name ?? row.target_sheet_name
   const skipped = action === SKIP || !!row.error
   const excluded = row.available_rows - row.total_rows
+  const idColumn = ov?.id_column ?? row.id_column
   // One control for the whole decision: a sheet id, 新規作成, or 取り込まない.
   const value =
     action === SKIP ? SKIP : action === NEW_SHEET ? NEW_SHEET : String(targetId ?? NEW_SHEET)
@@ -446,6 +485,32 @@ function PlanRow({
         )}
       </td>
 
+      <td className="border-b border-[var(--line)] px-2 py-1.5 align-top">
+        {skipped ? (
+          <span className="text-[var(--ink3)]">—</span>
+        ) : (
+          <Select
+            value={matchMode}
+            title={MATCH_TITLE[matchMode]}
+            className="h-7 w-full px-2 py-0 text-[11.5px]"
+            onChange={(e) => {
+              const m = e.target.value as ImportMatchMode
+              // 照合しない／入れ替えなら ID列は要らない（内部のIDを自動で振る）。
+              onPatch({ match_mode: m, id_column: m === 'id' ? Math.max(0, idColumn) : -1 })
+            }}
+          >
+            {(action === NEW_SHEET
+              ? (['none', 'id'] as ImportMatchMode[])
+              : (['none', 'id', 'replace'] as ImportMatchMode[])
+            ).map((m) => (
+              <option key={m} value={m}>
+                {MATCH_LABEL[m]}
+              </option>
+            ))}
+          </Select>
+        )}
+      </td>
+
       <td className="border-b border-[var(--line)] px-2 py-1.5 align-top tabular-nums">
         {skipped ? (
           <span className="text-[var(--ink3)]">—</span>
@@ -453,6 +518,9 @@ function PlanRow({
           <>
             <span className="text-[var(--green-d)]">新規 {row.new_rows}</span>
             {row.updated_rows > 0 && <span className="ml-1.5">更新 {row.updated_rows}</span>}
+            {row.deleted_rows > 0 && (
+              <span className="ml-1.5 text-[#A8442B]">削除 {row.deleted_rows}</span>
+            )}
             <span className="block text-[10.5px] text-[var(--ink3)]">{row.column_count} 列</span>
           </>
         )}

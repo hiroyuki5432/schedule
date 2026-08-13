@@ -88,6 +88,7 @@ def save_preset(
     preset.header_row = body.header_row
     preset.last_row = body.last_row
     preset.id_column = body.id_column
+    preset.match_mode = excel.resolve_match_mode(body.match_mode, body.id_column)
     preset.mapping = _clean_mapping(body.mapping)
     db.commit()
     db.refresh(preset)
@@ -182,6 +183,14 @@ def _resolve(
         # source, so it rides along with everything else.
         "last_row": preset.last_row if preset else 0,
         "id_column": preset.id_column if preset else 0,
+        # 行の照合。前回の設定があればそのときのモード。記録の無い（この設定より前に
+        # 保存された）ものと、設定の無いワークシートは、これまでどおり「ID列で照合」に
+        # 解決する — 一括取り込みは同じファイルを繰り返し流す場所なので、既定を黙って
+        # 「照合しない」に変えると、取り込み直すたびに行が倍になってしまう。画面には
+        # 照合の列が出るので、まとめたくないときはその場で切り替えられる。
+        "match_mode": excel.resolve_match_mode(
+            preset.match_mode if preset else "", preset.id_column if preset else 0
+        ),
         # Empty means "not recorded" → fall back to the by-name defaults. An empty
         # list would otherwise import the IDs and none of the values.
         "mapping": (_clean_mapping(preset.mapping) if preset else None) or None,
@@ -201,6 +210,8 @@ def _resolve(
                     plan[key] = int(override[key])
                 except (TypeError, ValueError):
                     pass
+        if str(override.get("match_mode") or "") in excel.MATCH_MODES:
+            plan["match_mode"] = override["match_mode"]
         if override.get("has_week_grid") is not None:
             plan["has_week_grid"] = bool(override["has_week_grid"])
             plan["week_grid_explicit"] = True
@@ -253,6 +264,7 @@ def inspect_workbook(
             "column_count": 0,
             "new_rows": 0,
             "updated_rows": 0,
+            "deleted_rows": 0,
             "blank_ids": 0,
             "duplicate_ids": 0,
             "invalid": 0,
@@ -306,7 +318,13 @@ def _analyse(
         )
         taken = [c for c in cols if c["target"]]
         entry["column_count"] = len(taken)
-        entry.update(excel.upsert_counts(db, sheet, data_rows, id_column))
+        entry.update(
+            excel.upsert_counts(db, sheet, data_rows, id_column, settings["match_mode"])
+        )
+        if entry["deleted_rows"]:
+            entry["warnings"].append(
+                f"取り込む前に、いまある {entry['deleted_rows']} 行を削除します（入れ替え）"
+            )
         # A saved mapping can outlive the column it points at (renamed / deleted /
         # turned into 計算列). Those are skipped on import either way — the point of
         # saying so is that the setting is now stale.
@@ -332,8 +350,15 @@ def _analyse(
         )
         taken = [c for c in cols if c["selected"]]
         entry["column_count"] = len(taken)
-        entry["new_rows"] = len(data_rows)
         entry.update(excel.id_column_counts(data_rows, id_column))
+        # 新しいシートなので照合する相手はいないが、「IDで照合」だとファイルの中で
+        # 同じIDの行どうしが1行にまとまる。件数はその結果を出す（プレビューと実際が
+        # 食い違わないように）。
+        entry["new_rows"] = len(data_rows) - (
+            entry["duplicate_ids"]
+            if settings["match_mode"] == "id" and id_column >= 0
+            else 0
+        )
 
     entry["invalid"] = sum(c["invalid"] for c in taken)
     for c in taken:
@@ -341,7 +366,12 @@ def _analyse(
             entry["warnings"].append(
                 f"「{c['header']}」に読めない値が {c['invalid']} 件（空欄で取り込まれます）"
             )
-    if id_column < 0:
+    if settings["match_mode"] != "id":
+        # 照合しない／入れ替え：Excel の1行がそのまま1行になる。IDが重なっていても
+        # まとまらないので、ここで警告することは何もない。
+        if id_column < 0 and settings["match_mode"] == "none":
+            entry["warnings"].append("すべて新規行として追加されます（IDは自動採番）")
+    elif id_column < 0:
         entry["warnings"].append("ID列の指定がないため、すべて新規行として追加されます")
     else:
         if entry["blank_ids"]:
@@ -406,7 +436,7 @@ def run_workbook(
                 ensure_schedule_columns(db, sheet, commit=False)
                 counts = excel.import_rows_with_mapping(
                     db, user, sheet, header, data_rows, settings["id_column"],
-                    settings["mapping"], commit=False,
+                    settings["mapping"], commit=False, match_mode=settings["match_mode"],
                 )
                 res = {"sheet_id": sheet.id, "name": sheet.name, "columns": 0, **counts}
             else:
@@ -421,6 +451,7 @@ def run_workbook(
                     id_column=settings["id_column"],
                     selection=settings["mapping"],
                     commit=False,
+                    match_mode=settings["match_mode"],
                 )
             if save_presets:
                 # Store the RESOLVED picks, not the plan's `None`: a first run that
@@ -450,6 +481,7 @@ def run_workbook(
         "results": results,
         "created": sum(r["created"] for r in results),
         "updated": sum(r["updated"] for r in results),
+        "deleted": sum(r.get("deleted", 0) for r in results),
     }
 
 
@@ -484,6 +516,7 @@ def _remember(
     preset.header_row = settings["header_row"]
     preset.last_row = settings["last_row"]
     preset.id_column = settings["id_column"]
+    preset.match_mode = settings["match_mode"]
     effective = selection if selection is not None else settings["mapping"]
     if effective:
         preset.mapping = effective

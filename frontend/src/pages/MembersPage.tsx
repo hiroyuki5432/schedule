@@ -13,6 +13,7 @@ import { Avatar } from '@/components/ui/Avatar'
 import { TableSkeleton } from '@/components/ui/Skeleton'
 import { ImportWorkbookDialog } from '@/components/import/ImportWorkbookDialog'
 import { BackupCard } from '@/components/BackupCard'
+import { MaintenanceCard } from '@/components/MaintenanceCard'
 import { ApiError } from '@/lib/http'
 import { cn } from '@/lib/format'
 import { toast } from '@/lib/toast'
@@ -76,6 +77,8 @@ export function MembersPage() {
         {isAdmin && <BulkImportCard />}
 
         {isAdmin && <BackupCard />}
+
+        {isAdmin && <MaintenanceCard />}
 
         {isAdmin && <OrgDataDangerCard />}
 

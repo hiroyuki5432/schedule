@@ -8,7 +8,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import * as api from '@/api/client'
-import type { ImportColumnInfo, ImportColumnRole } from '@/api/client'
+import type { ImportColumnInfo, ImportColumnRole, ImportMatchMode } from '@/api/client'
 import type { ColumnType } from '@/types/api'
 import { ApiError } from '@/lib/http'
 import { Input } from '@/components/ui/Input'
@@ -78,7 +78,10 @@ export function ImportSheetWizard({
   const [headerRow, setHeaderRow] = useState(0) // 0 = 自動判定
   const [lastRow, setLastRow] = useState(0) // 0 = 最後まで
   const [tailFrom, setTailFrom] = useState(0) // 0 = 末尾から自動
-  const [idColumn, setIdColumn] = useState(0)
+  // 既定は「照合しない」＝ Excelの1行がそのまま1行。1列目が同じ行があっても
+  // まとめない（要望）。ID列も既定は自動採番で、1列目は普通の列として取り込む。
+  const [matchMode, setMatchMode] = useState<ImportMatchMode>('none')
+  const [idColumn, setIdColumn] = useState(AUTO_ID)
   const [picks, setPicks] = useState<Pick[]>([])
   const [error, setError] = useState<string | null>(null)
 
@@ -177,6 +180,7 @@ export function ImportSheetWizard({
         headerRow: insp.data?.header_row,
         lastRow,
         idColumn,
+        matchMode,
         columns: chosen,
       })
       // Save this as the worksheet's 取り込み設定, pointed at the sheet that was
@@ -195,6 +199,7 @@ export function ImportSheetWizard({
             header_row: insp.data.header_row,
             last_row: lastRow,
             id_column: idColumn,
+            match_mode: matchMode,
             mapping: chosen,
           })
           .catch(() => {})
@@ -261,14 +266,26 @@ export function ImportSheetWizard({
             setHeaderRow(0)
             setLastRow(0)
             setTailFrom(0)
-            setIdColumn(0)
+            setIdColumn(AUTO_ID)
           }}
           onHeaderRow={setHeaderRow}
           onLastRow={setLastRow}
           onTailFrom={setTailFrom}
           idColumn={idColumn}
           onIdColumn={setIdColumn}
-          note="ID列（薄い黄色）が同じ行は1行にまとまります。"
+          matchMode={matchMode}
+          onMatchMode={(m) => {
+            setMatchMode(m)
+            // 新しいシートなので「入れ替え」は無い。IDで照合するときだけ列が要る。
+            if (m === 'id') setIdColumn((cur) => (cur < 0 ? 0 : cur))
+            else setIdColumn(AUTO_ID)
+          }}
+          matchModes={['none', 'id']}
+          note={
+            matchMode === 'id'
+              ? 'ID列（薄い黄色）が同じ行は1行にまとまります。'
+              : 'ID列を選ぶと、その値が行のIDになります（選ばなければ自動採番）。'
+          }
         />
       )}
 
@@ -295,6 +312,7 @@ export function ImportSheetWizard({
           checking={check.isFetching}
           chosen={chosen}
           idColumn={idColumn}
+          matchMode={matchMode}
           dataPreview={dataPreview}
           name={name}
           onName={setName}
@@ -480,6 +498,7 @@ function StepPreview({
   checking,
   chosen,
   idColumn,
+  matchMode,
   dataPreview,
   name,
   onName,
@@ -490,6 +509,7 @@ function StepPreview({
   checking: boolean
   chosen: { index: number; name: string; type: ColumnType | '' }[]
   idColumn: number
+  matchMode: ImportMatchMode
   dataPreview: { row: number; cells: string[] }[]
   name: string
   onName: (v: string) => void
@@ -499,6 +519,11 @@ function StepPreview({
   const warnings: string[] = []
   if (idColumn === AUTO_ID) {
     warnings.push('ID列を指定していないため、行のIDは自動採番されます。')
+  } else if (matchMode === 'none') {
+    if (src.duplicate_ids > 0)
+      warnings.push(
+        `同じIDの行が ${src.duplicate_ids} 行ありますが、まとめずに別々の行として取り込みます。`,
+      )
   } else {
     if (src.blank_ids > 0)
       warnings.push(`IDが空の行が ${src.blank_ids} 行あります（自動採番されます）。`)

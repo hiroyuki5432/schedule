@@ -63,6 +63,9 @@ def update_column(
 ) -> Column:
     column = get_column_for_user(db, column_id, user)
     fields = payload.model_dump(exclude_unset=True)
+    # 列の属性ではない指定は、setattr に回す前に取り出す。
+    # 「この値の行をどこにあてがうか」— 選択肢を削るときの行き先（None＝空にする）。
+    explicit_remap: dict[str, str | None] = fields.pop("value_remap", None) or {}
 
     # When a dropdown's option values are renamed, follow the change through to the
     # stored data so existing rows keep their (renamed) value (要望: リスト名を変えても
@@ -103,17 +106,26 @@ def update_column(
     if fields.get("type") == "date":
         _normalize_date_values(db, column)
 
-    if rename_map:
+    # 改名の追従（id で一致した選択肢）と、画面で指定された付け替えをまとめて1回で
+    # 適用する。明示の指定が勝つ — 「この値は空にする」と言われたら、たまたま同じ値の
+    # 改名が走っていてもそちらを優先する。
+    remap: dict[str, str | None] = {**rename_map, **explicit_remap}
+    if remap:
         col_key = str(column.id)
         rows = db.execute(
             select(Row).where(Row.sheet_id == column.sheet_id)
         ).scalars()
         for r in rows:
             cur = (r.data or {}).get(col_key)
-            if cur in rename_map:
-                data = dict(r.data or {})
-                data[col_key] = rename_map[cur]
-                r.data = data
+            if not isinstance(cur, str) or cur not in remap:
+                continue
+            data = dict(r.data or {})
+            new_value = remap[cur]
+            if new_value in (None, ""):
+                data.pop(col_key, None)
+            else:
+                data[col_key] = new_value
+            r.data = data
 
     db.commit()
     db.refresh(column)

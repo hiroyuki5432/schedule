@@ -19,6 +19,7 @@ import { DropdownOptionsEditor } from '@/components/settings/DropdownOptionsEdit
 import { StatusRuleBuilder } from '@/components/settings/StatusRuleBuilder'
 import { LookupConfigEditor } from '@/components/settings/LookupConfigEditor'
 import { FormulaConfigEditor } from '@/components/settings/FormulaConfigEditor'
+import { ReplaceDialog } from '@/components/settings/ReplaceDialog'
 import { ExcelToolbar } from '@/components/ExcelToolbar'
 import { isComputed } from '@/lib/computed'
 import { PlusIcon } from '@/components/ui/icons'
@@ -54,6 +55,7 @@ export function SheetSettingsPage() {
   const detailQ = useSheetDetail(sheetId)
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [replacing, setReplacing] = useState(false)
   const selected = columns.find((c) => String(c.id) === String(selectedId)) ?? null
   const [tab, setTab] = usePersistentState<TabKey>('view:sheetSettings:tab', 'columns')
 
@@ -107,6 +109,14 @@ export function SheetSettingsPage() {
         subtitle={sheet?.name ?? '—'}
       />
 
+      {replacing && (
+        <ReplaceDialog
+          sheetId={sheetId}
+          columns={columns}
+          onClose={() => setReplacing(false)}
+        />
+      )}
+
       <div className="flex min-h-0 flex-1 flex-col overflow-auto px-[22px] pb-6">
         <Tabs tabs={tabs} active={tab} onChange={setTab} className="mb-4" />
 
@@ -141,6 +151,16 @@ export function SheetSettingsPage() {
                     onDone={invalidate}
                     onCreated={setSelectedId}
                   />
+                </div>
+                {/* 表記ゆれの直しは列をまたぐことが多い（要望: 列のみ／シートの
+                    一括置換）。ダイアログの中で「この列だけ」にも絞れる。 */}
+                <div className="flex items-center gap-2 border-t border-[var(--line)] px-5 py-3">
+                  <Button size="sm" variant="outline" onClick={() => setReplacing(true)}>
+                    ⇄ 値の一括置換…
+                  </Button>
+                  <span className="text-[11.5px] text-[var(--ink3)]">
+                    シート全体、または1つの列の値をまとめて置換します（先に件数を確認できます）。
+                  </span>
                 </div>
               </CardBody>
             </Card>

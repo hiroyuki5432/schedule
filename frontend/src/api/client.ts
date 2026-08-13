@@ -117,7 +117,16 @@ export const createColumn = (
 
 export const updateColumn = (
   id: string,
-  body: Partial<{ name: string; type: ColumnType; config: ColumnConfig; order: number }>,
+  body: Partial<{
+    name: string
+    type: ColumnType
+    config: ColumnConfig
+    order: number
+    /** 「いまこの値が入っている行をどこにあてがうか」。プルダウンの選択肢を消すとき、
+     *  その値の行を別の値へ寄せる（null = 空にする）。列の属性ではなく、保存と同時に
+     *  行へ適用される指示。 */
+    value_remap: Record<string, string | null>
+  }>,
 ) => http.patch<Column>(`/api/columns/${id}`, body)
 
 export const deleteColumn = (id: string) => http.del<void>(`/api/columns/${id}`)
@@ -226,6 +235,8 @@ export const importXlsx = (sheetId: string, file: File, plan: Partial<ImportPlan
 export interface ImportResult {
   created: number
   updated: number
+  /** 「入れ替え」で取り込み前に消した行数。入れ替え以外では返らない。 */
+  deleted?: number
   notes?: string[]
 }
 
@@ -259,6 +270,7 @@ export interface ImportRowsInspection {
   last_row: number
   sheet_last_row: number
   id_column: number
+  match_mode: ImportMatchMode
   total_rows: number
   /** Data rows below the header with NO cut applied. */
   available_rows: number
@@ -269,6 +281,8 @@ export interface ImportRowsInspection {
   targets: { key: string; label: string; type: string; role: string }[]
   new_rows: number
   updated_rows: number
+  /** 「入れ替え」のときに消える、いまシートにある行数。 */
+  deleted_rows: number
   blank_ids: number
   duplicate_ids: number
 }
@@ -284,6 +298,12 @@ export const inspectImportRowsXlsx = (
     `/api/sheets/${sheetId}/import.xlsx/inspect`,
     importForm(file, plan),
   )
+
+/** 行の照合のしかた（要望: 1列目が被るだけで1行にまとめないでほしい）。
+ *  - `none`    … 照合しない。Excelの1行＝アプリの1行（ウィザードの既定）
+ *  - `id`      … ID列で既存の行を探して更新する（同じIDは1行になる）
+ *  - `replace` … 取り込む前にシートの行を全部消す（入れ替え） */
+export type ImportMatchMode = 'none' | 'id' | 'replace'
 
 /** How a header column will be treated on a schedule sheet. */
 export type ImportColumnRole = 'attr' | 'week' | 'progress' | 'deps' | 'milestone'
@@ -343,6 +363,8 @@ export interface ImportPlan {
   tailFrom?: number
   /** 0-based; -1 = no ID column (keys are auto-numbered). */
   idColumn?: number
+  /** 行の照合。省略すると従来どおり「ID列があれば照合」に解決される。 */
+  matchMode?: ImportMatchMode
   /** `expr` only matters for `type: 'formula'` — the `[列名]` expression the
    *  column computes (translated from the Excel formula on import). */
   columns?: { index: number; name: string; type: ColumnType | ''; expr?: string }[]
@@ -358,6 +380,7 @@ function importForm(file: File, plan: Partial<ImportPlan>): FormData {
   if (plan.lastRow) form.append('last_row', String(plan.lastRow))
   if (plan.tailFrom) form.append('tail_from', String(plan.tailFrom))
   if (plan.idColumn !== undefined) form.append('id_column', String(plan.idColumn))
+  if (plan.matchMode) form.append('match_mode', plan.matchMode)
   if (plan.columns) form.append('columns', JSON.stringify(plan.columns))
   return form
 }
@@ -493,6 +516,7 @@ export interface ImportPreset {
   /** Last worksheet row to take, 1-based inclusive; 0 = 最後まで. */
   last_row: number
   id_column: number
+  match_mode: ImportMatchMode
   mapping: { index: number; name: string; type: string }[]
   updated_at: string
   last_used_at: string | null
@@ -508,6 +532,7 @@ export interface ImportPresetSave {
   header_row?: number
   last_row?: number
   id_column?: number
+  match_mode?: ImportMatchMode
   mapping?: { index: number; name: string; type: ColumnType | '' }[]
 }
 
@@ -536,12 +561,15 @@ export interface WorkbookSheetPlan {
   last_row: number
   sheet_last_row: number
   id_column: number
+  match_mode: ImportMatchMode
   mapping: { index: number; name: string; type: string }[] | null
   total_rows: number
   available_rows: number
   column_count: number
   new_rows: number
   updated_rows: number
+  /** 「入れ替え」で消える行数（それ以外は 0）。 */
+  deleted_rows: number
   blank_ids: number
   duplicate_ids: number
   invalid: number
@@ -565,6 +593,7 @@ export interface WorkbookPlanItem {
   header_row?: number
   last_row?: number
   id_column?: number
+  match_mode?: ImportMatchMode
   /** `expr` only matters for `type: 'formula'` — the `[列名]` expression the
    *  column computes (translated from the Excel formula on import). */
   columns?: { index: number; name: string; type: ColumnType | ''; expr?: string }[]
@@ -594,10 +623,100 @@ export const importWorkbook = (file: File, plan: WorkbookPlanItem[], savePresets
       columns: number
       created: number
       updated: number
+      deleted?: number
     }[]
     created: number
     updated: number
+    deleted: number
   }>('/api/import/workbook', workbookForm(file, plan, savePresets))
+
+// ---- 一括置換（列のみ / シート全体） ----
+
+/** 置換の指定。`column_id` を省くとシートの全列。`'__id__'` は ID(key_value) だけ。
+ *  `dry_run` が既定で true — 先に「何件・どう変わるか」を見てから確定する。 */
+export interface ReplaceInput {
+  column_id?: string | null
+  find: string
+  replace?: string
+  /** セル全体が一致したときだけ置換する（Excel の「完全に同一」）。 */
+  whole_cell?: boolean
+  case_sensitive?: boolean
+  /** シート全体のとき、ID(key_value) も置換の対象にする。 */
+  include_key?: boolean
+  /** プルダウンの選択肢も同じ規則で置換する（既定 true）。 */
+  include_options?: boolean
+  dry_run?: boolean
+}
+
+export interface ReplaceResult {
+  rows: number
+  cells: number
+  options: number
+  applied: boolean
+  samples: { row_key: string; column_name: string; before: string; after: string }[]
+}
+
+export const replaceValues = (sheetId: string, body: ReplaceInput) =>
+  http.post<ReplaceResult>(
+    `/api/sheets/${sheetId}/replace`,
+    body as unknown as Record<string, unknown>,
+  )
+
+// ---- データのお掃除（管理者のみ） ----
+
+export interface MaintenanceUsage {
+  /** DB全体のバイト数（Postgres のみ／取れないときは null）。 */
+  database_bytes: number | null
+  tables: { name: string; label: string; rows: number; bytes: number | null }[]
+  cleanable: {
+    row_events_total: number
+    row_events_old: number
+    row_events_keep_days: number
+    snapshots_total: number
+    snapshots_old: number
+    snapshots_keep_weeks: number
+    notifications_read: number
+    /** 消した列の値（`rows.data` に残ったまま画面に出ないセル）。 */
+    orphan_cells: number
+    orphan_rows: number
+    /** 開始日/完了日を列に移す前の値のうち、列と重複しているコピー。 */
+    legacy_cells: number
+    legacy_rows: number
+    empty_effort: number
+    backups_total: number
+    backups_old: number
+    backups_keep: number
+    backups_bytes: number
+    backups_old_bytes: number
+  }
+}
+
+export interface CleanupInput {
+  row_events_keep_days?: number | null
+  snapshots_keep_weeks?: number | null
+  notifications_read?: boolean
+  orphan_cells?: boolean
+  legacy_cells?: boolean
+  empty_effort?: boolean
+  backups_keep?: number | null
+  dry_run?: boolean
+}
+
+export const getMaintenanceUsage = (params: {
+  rowEventsKeepDays: number
+  snapshotsKeepWeeks: number
+  backupsKeep: number
+}) =>
+  http.get<MaintenanceUsage>(
+    `/api/maintenance/usage?row_events_keep_days=${params.rowEventsKeepDays}` +
+      `&snapshots_keep_weeks=${params.snapshotsKeepWeeks}&backups_keep=${params.backupsKeep}`,
+  )
+
+export const runMaintenanceCleanup = (body: CleanupInput) =>
+  http.post<{ dry_run: boolean; deleted: Record<string, number>; total: number }>(
+    '/api/maintenance/cleanup',
+    body as unknown as Record<string, unknown>,
+  )
 
 // ---- バックアップ / リストア (グループ管理・管理者のみ) ----
 
