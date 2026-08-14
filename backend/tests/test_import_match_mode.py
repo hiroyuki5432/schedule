@@ -54,7 +54,11 @@ def _import(client, sheet_id: int, data: dict):
 
 
 def test_duplicate_first_column_stays_separate_rows(auth_client):
-    """照合しない: 同じ「設計」が2行あっても、2行のまま入る。"""
+    """照合しない: 同じ「設計」が2行あっても、2行のまま入る。
+
+    そのうえで **ID列の値は消さずに行のIDとして残す** — 元のIDで参照(LOOKUP)や
+    先行タスクを紐付けたいので（要望）。照合に使わないだけで、値は捨てない。
+    """
     sid = make_sheet(auth_client, "DUP")
     col = _add_text_column(auth_client, sid, "作業名")
 
@@ -74,6 +78,43 @@ def test_duplicate_first_column_stays_separate_rows(auth_client):
     rows = auth_client.get(f"/api/sheets/{sid}/rows").json()
     assert len(rows) == 3
     assert [x["data"][str(col)] for x in rows] == ["画面Aの設計", "画面Bの設計", "画面Aの実装"]
+    # 元のIDがそのまま（重複したままでも）残っている。
+    assert [x["key_value"] for x in rows] == ["設計", "設計", "製造"]
+
+
+def test_blank_ids_are_numbered_without_touching_the_others(auth_client):
+    """ID列に空欄が混じっていても、埋まっている行のIDはそのまま。空欄だけ採番する。"""
+    sid = make_sheet(auth_client, "BLANK")
+    _add_text_column(auth_client, sid, "作業名")
+
+    r = auth_client.post(
+        f"/api/sheets/{sid}/import.xlsx",
+        files={
+            "file": (
+                "b.xlsx",
+                _xlsx(
+                    [
+                        ["工程", "作業名"],
+                        ["A-1", "あ"],
+                        [None, "い"],
+                        ["A-2", "う"],
+                    ]
+                ),
+                _MEDIA,
+            )
+        },
+        data={
+            "header_row": "1",
+            "id_column": "0",
+            "match_mode": "none",
+            "columns": json.dumps([{"index": 1, "name": "作業名"}]),
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    keys = [x["key_value"] for x in auth_client.get(f"/api/sheets/{sid}/rows").json()]
+    assert keys[0] == "A-1" and keys[2] == "A-2"
+    assert keys[1] and keys[1] not in ("A-1", "A-2")
 
 
 def test_no_id_column_gives_every_row_its_own_internal_id(auth_client):

@@ -13,7 +13,7 @@ import type { ImportMatchMode, ImportRowsColumn } from '@/api/client'
 import { ApiError } from '@/lib/http'
 import { Select } from '@/components/ui/Select'
 import { WizardShell, colLetter } from '@/components/import/WizardShell'
-import { AUTO_ID, SourceStep } from '@/components/import/SourceStep'
+import { SourceStep } from '@/components/import/SourceStep'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/format'
 
@@ -53,9 +53,11 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
   const [lastRow, setLastRow] = useState(0) // 0 = 最後まで
   const [tailFrom, setTailFrom] = useState(0) // 0 = 末尾から自動
   // 既定は「照合しない」＝ Excelの1行がそのまま1行になる（要望: 1列目が被るだけで
-  // 1行にまとめないでほしい）。それに合わせて ID列も既定は自動採番。
+  // 1行にまとめないでほしい）。ID列は照合しないときも既定どおり先頭列のまま —
+  // 照合に使わないだけで、**その値は行のIDとして残す**（要望: もともとのIDで紐付け
+  // したいので消さないでほしい）。IDの無い表だけ「自動採番」を選ぶ。
   const [matchMode, setMatchMode] = useState<ImportMatchMode>('none')
-  const [idColumn, setIdColumn] = useState(AUTO_ID)
+  const [idColumn, setIdColumn] = useState(0)
   /** Excel column index → target (sheet column name / reserved header). '' = 除外 */
   const [mapping, setMapping] = useState<Record<number, string>>({})
   /** The saved mapping, once applied — sent to inspect so the server proposes it. */
@@ -276,7 +278,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
               setHeaderRow(0)
               setLastRow(0)
               setTailFrom(0)
-              setIdColumn(AUTO_ID)
+              setIdColumn(0)
               setMatchMode('none')
             }}
           >
@@ -294,7 +296,7 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
             setHeaderRow(0)
             setLastRow(0)
             setTailFrom(0)
-            setIdColumn(AUTO_ID)
+            setIdColumn(0)
             setMatchMode('none')
             // The saved mapping is by column position — it means nothing on
             // another worksheet, so switching drops it.
@@ -309,15 +311,15 @@ export function ImportRowsWizard({ sheetId, file, onClose }: Props) {
           matchMode={matchMode}
           onMatchMode={(m) => {
             setMatchMode(m)
-            // 照合しない／入れ替えなら ID列は要らない（内部のIDを自動で振る）。
-            // 逆に「IDで照合」に切り替えたら、照合する列が要る。
+            // ID列の指定はそのまま残す。照合しないときも、ID列の値は行のIDとして
+            // 使う（照合に使わないだけ）。「IDで照合」に切り替えたときだけ、照合する
+            // 列が無いと成立しないので先頭列を補う。
             if (m === 'id') setIdColumn((cur) => (cur < 0 ? 0 : cur))
-            else setIdColumn(AUTO_ID)
           }}
           note={
             matchMode === 'id'
               ? 'ID列（薄い黄色）が既存のタスクと一致する行は上書き、無い行は新規追加になります。'
-              : 'ID列を選ぶと、その値が行のIDになります（選ばなければ自動採番）。'
+              : 'ID列（薄い黄色）の値がそのまま行のIDになります（空欄の行だけ自動採番）。'
           }
         />
       )}
@@ -433,13 +435,18 @@ function PreviewStep({
     warnings.push(
       `いまシートにある ${src.deleted_rows} 行を削除してから取り込みます（工数・◇・進捗も消えます）。`,
     )
-  } else if (matchMode === 'none') {
-    if (idColumn < 0)
+  }
+  if (matchMode !== 'id') {
+    if (idColumn < 0) {
       warnings.push('すべての行が新しいタスクとして追加されます（IDは自動採番）。')
-    else if (src.duplicate_ids > 0)
-      warnings.push(
-        `同じIDの行が ${src.duplicate_ids} 行ありますが、まとめずに別々の行として追加します。`,
-      )
+    } else {
+      if (src.blank_ids > 0)
+        warnings.push(`IDが空の行が ${src.blank_ids} 行あります（その行だけ自動採番されます）。`)
+      if (src.duplicate_ids > 0)
+        warnings.push(
+          `同じIDの行が ${src.duplicate_ids} 行あります。まとめずに別々の行として追加し、IDもそのまま残します（参照(LOOKUP)や先行タスクは、同じIDのうち先頭の行に当たります）。`,
+        )
+    }
   } else if (idColumn < 0) {
     warnings.push('ID列を指定していないため、すべての行が新規タスクとして追加されます。')
   } else {

@@ -39,7 +39,7 @@ const MATCH_LABEL: Record<ImportMatchMode, string> = {
 }
 
 const MATCH_TITLE: Record<ImportMatchMode, string> = {
-  none: 'Excelの1行が、そのまま1行になります（同じIDでもまとまりません）',
+  none: 'Excelの1行が、そのまま1行になります（ID列の値は残り、同じIDでもまとまりません）',
   id: '同じIDの行を探して上書きします（ファイル内の同じIDは1行にまとまります）',
   replace: 'いまシートにある行を全部消してから取り込みます',
 }
@@ -495,8 +495,9 @@ function PlanRow({
             className="h-7 w-full px-2 py-0 text-[11.5px]"
             onChange={(e) => {
               const m = e.target.value as ImportMatchMode
-              // 照合しない／入れ替えなら ID列は要らない（内部のIDを自動で振る）。
-              onPatch({ match_mode: m, id_column: m === 'id' ? Math.max(0, idColumn) : -1 })
+              // ID列の指定はそのまま。照合しないときも ID列の値は行のIDとして残す
+              // （要望: もともとのIDで紐付けしたい）。照合するときだけ列を補う。
+              onPatch({ match_mode: m, id_column: m === 'id' ? Math.max(0, idColumn) : idColumn })
             }}
           >
             {(action === NEW_SHEET

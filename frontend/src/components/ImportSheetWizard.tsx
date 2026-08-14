@@ -78,10 +78,12 @@ export function ImportSheetWizard({
   const [headerRow, setHeaderRow] = useState(0) // 0 = 自動判定
   const [lastRow, setLastRow] = useState(0) // 0 = 最後まで
   const [tailFrom, setTailFrom] = useState(0) // 0 = 末尾から自動
-  // 既定は「照合しない」＝ Excelの1行がそのまま1行。1列目が同じ行があっても
-  // まとめない（要望）。ID列も既定は自動採番で、1列目は普通の列として取り込む。
+  // 既定は「照合しない」＝ Excelの1行がそのまま1行。1列目が同じ行があってもまとめない
+  // （要望）。ID列は既定どおり先頭列のまま — 照合に使わないだけで、**その値は行のIDと
+  // して残す**（要望: もともとのIDで紐付けしたいので消さないでほしい）。IDの無い表だけ
+  // 「自動採番」を選ぶ（そのとき1列目は普通の列として取り込める）。
   const [matchMode, setMatchMode] = useState<ImportMatchMode>('none')
-  const [idColumn, setIdColumn] = useState(AUTO_ID)
+  const [idColumn, setIdColumn] = useState(0)
   const [picks, setPicks] = useState<Pick[]>([])
   const [error, setError] = useState<string | null>(null)
 
@@ -266,7 +268,7 @@ export function ImportSheetWizard({
             setHeaderRow(0)
             setLastRow(0)
             setTailFrom(0)
-            setIdColumn(AUTO_ID)
+            setIdColumn(0)
           }}
           onHeaderRow={setHeaderRow}
           onLastRow={setLastRow}
@@ -276,15 +278,15 @@ export function ImportSheetWizard({
           matchMode={matchMode}
           onMatchMode={(m) => {
             setMatchMode(m)
-            // 新しいシートなので「入れ替え」は無い。IDで照合するときだけ列が要る。
+            // ID列の指定はそのまま残す（照合に使わないだけで、値は行のIDになる）。
+            // 新しいシートなので「入れ替え」は無い。
             if (m === 'id') setIdColumn((cur) => (cur < 0 ? 0 : cur))
-            else setIdColumn(AUTO_ID)
           }}
           matchModes={['none', 'id']}
           note={
             matchMode === 'id'
               ? 'ID列（薄い黄色）が同じ行は1行にまとまります。'
-              : 'ID列を選ぶと、その値が行のIDになります（選ばなければ自動採番）。'
+              : 'ID列（薄い黄色）の値がそのまま行のIDになります（空欄の行だけ自動採番）。'
           }
         />
       )}
@@ -520,9 +522,11 @@ function StepPreview({
   if (idColumn === AUTO_ID) {
     warnings.push('ID列を指定していないため、行のIDは自動採番されます。')
   } else if (matchMode === 'none') {
+    if (src.blank_ids > 0)
+      warnings.push(`IDが空の行が ${src.blank_ids} 行あります（その行だけ自動採番されます）。`)
     if (src.duplicate_ids > 0)
       warnings.push(
-        `同じIDの行が ${src.duplicate_ids} 行ありますが、まとめずに別々の行として取り込みます。`,
+        `同じIDの行が ${src.duplicate_ids} 行あります。まとめずに別々の行として取り込み、IDもそのまま残します（参照(LOOKUP)や先行タスクは、同じIDのうち先頭の行に当たります）。`,
       )
   } else {
     if (src.blank_ids > 0)

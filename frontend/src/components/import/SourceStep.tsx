@@ -64,9 +64,9 @@ const MATCH_LABEL: Record<ImportMatchMode, string> = {
 }
 
 const MATCH_HELP: Record<ImportMatchMode, string> = {
-  none: 'Excelの1行が、そのままこのアプリの1行になります。1列目が同じ行があっても、まとまりません。',
+  none: 'Excelの1行が、そのままこのアプリの1行になります。ID列の値はそのまま行のIDとして残るので（同じIDが並んでいてもまとまりません）、そのIDで参照(LOOKUP)や先行タスクの紐付けができます。ID列を選ばなかった行・空欄の行だけ自動で採番します。',
   id: '同じIDの行を探して上書きします。ファイルの中に同じIDが複数あると、1行にまとまります。',
-  replace: 'いまシートに入っている行を全部消してから取り込みます。手で足した行・工数・◇も消えます。',
+  replace: 'いまシートに入っている行を全部消してから取り込みます（手で足した行・工数・◇も消えます）。IDは「照合しない」と同じで、ID列の値がそのまま残ります。',
 }
 
 export function SourceStep({
