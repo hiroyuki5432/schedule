@@ -152,6 +152,22 @@ def is_formula(value) -> bool:
     return isinstance(value, str) and value.startswith("=")
 
 
+#: ファイルの中にだけ現れる目印。Excel の画面には出ないので、読むときも見せるときも外す。
+#:
+#: * `_xlfn.` … Excel 2007 より後に増えた関数（XLOOKUP など）に付く。ファイルには
+#:   `=_xlfn.XLOOKUP(…)` と書かれているが、Excel 上の表示は `=XLOOKUP(…)`。
+#: * `_xlws.` … ワークシート専用の関数に付く同種の目印（`_xlfn._xlws.FILTER` など）。
+#: * 関数名の前の `@` … 「暗黙の共通部分」の目印（`=@XLOOKUP(…)`）。**`[@列名]` の `@` は
+#:   構造化参照の一部なので消してはいけない** — 直前が `[` のものは残す。
+_INTERNALS_RE = re.compile(r"_xl(?:fn|ws)\.")
+_IMPLICIT_AT_RE = re.compile(r"(?<!\[)@(?=[A-Za-z_])")
+
+
+def strip_excel_internals(src: str) -> str:
+    """`=_xlfn.XLOOKUP(…)` → `=XLOOKUP(…)`。読む前と、画面に出す前に通す。"""
+    return _IMPLICIT_AT_RE.sub("", _INTERNALS_RE.sub("", src))
+
+
 # --------------------------------------------------------------------------- #
 # 構造化参照（テーブルの書き方）
 # --------------------------------------------------------------------------- #
@@ -283,7 +299,8 @@ def translate_formula(
 
     `worksheet` と `tables` を渡すと、テーブルの書き方（`[@数量]`）も翻訳できる。
     """
-    src = formula[1:] if formula.startswith("=") else formula
+    src = strip_excel_internals(formula)
+    src = src[1:] if src.startswith("=") else src
     if not src.strip():
         raise Untranslatable("空の数式です")
 
@@ -431,7 +448,7 @@ def _strip_wrappers(src: str) -> str:
 
 def _call_args(src: str, fn: str) -> list[str] | None:
     """`src` がちょうど `fn(...)` の呼び出しなら、その引数。違えば None。"""
-    m = re.match(rf"^\s*(?:_xlfn\.)?{fn}\s*\((.*)\)\s*$", src, re.IGNORECASE | re.DOTALL)
+    m = re.match(rf"^\s*{fn}\s*\((.*)\)\s*$", src, re.IGNORECASE | re.DOTALL)
     # 中身が閉じ切っていなければ、`fn(…)` 全体ではなく式の一部（`XLOOKUP(…)+XLOOKUP(…)`）。
     if not m or not _is_balanced(m.group(1)):
         return None
@@ -532,7 +549,8 @@ def extract_lookup(
     取得列を返す」もの。この形にぴったり当てはまる式だけを引き受け、外れたら
     Untranslatable にする（近似一致・複数条件・配列を返すものなど）。
     """
-    src = _strip_wrappers(formula[1:] if formula.startswith("=") else formula)
+    src = strip_excel_internals(formula)
+    src = _strip_wrappers(src[1:] if src.startswith("=") else src)
     index_by_name = {}
     for i, nm in names_by_index.items():
         index_by_name.setdefault(nm.strip().casefold(), i)
@@ -658,7 +676,9 @@ def translate_column(
     if not cells:
         return Translation(expr=None, reason=None, sample=None, formula_cells=0)
 
-    sample = str(cells[0][1])
+    # 画面に出す「元の Excel 数式」。`_xlfn.` のような内部の目印は、Excel でそう
+    # 見えたことが一度も無いので出さない（利用者には意味が分からない）。
+    sample = strip_excel_internals(str(cells[0][1]))
     exprs: set[str] = set()
     reason: str | None = None
     for row, raw in cells:

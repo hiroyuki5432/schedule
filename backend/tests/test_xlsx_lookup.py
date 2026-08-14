@@ -186,6 +186,132 @@ def test_lookup_column_can_be_forced_back_to_a_value(auth_client):
 
 
 # --------------------------------------------------------------------------- #
+# 名前がずれているとき — ウィザードで手で結びつける
+# --------------------------------------------------------------------------- #
+def _renamed_master(client) -> tuple[int, str]:
+    """Excel の「マスタ」とは名前の違うシート＋列を用意する。"""
+    r = client.post("/api/sheets", json={"name": "部品マスター", "has_week_grid": False})
+    sid = r.json()["id"]
+    c = client.post(
+        f"/api/sheets/{sid}/columns", json={"name": "品目名称", "type": "text"}
+    )
+    return sid, str(c.json()["id"])
+
+
+def test_a_name_mismatch_is_reported_not_guessed(auth_client):
+    """似ているだけの名前を勝手に当てない — 理由を出して、選んでもらう。"""
+    _renamed_master(auth_client)
+    by_header = _inspect(auth_client, _detail_workbook(as_table=True))
+    lk = by_header["品名"]["formula"]["lookup"]
+    assert lk["ready"] is False
+    # Excel 側が何と書いていたかは返す（画面で対応づけるときの手がかり）。
+    assert lk["target_worksheet"] == "マスタ"
+    assert lk["match_column"] == "品番" and lk["return_column"] == "品名"
+
+
+def test_a_hand_picked_target_is_used(auth_client):
+    """ウィザードで選んだ参照先が、そのまま参照列になる。"""
+    sid, name_col = _renamed_master(auth_client)
+    r = auth_client.post(
+        "/api/sheets/import.xlsx",
+        files={"file": ("in.xlsx", _detail_workbook(as_table=True), _MEDIA)},
+        data={
+            "name": "明細3",
+            "has_week_grid": "false",
+            "sheet_name": "明細",
+            "columns": json.dumps(
+                [
+                    {"index": 1, "name": "数量", "type": "number"},
+                    {
+                        "index": 2,
+                        "name": "品名",
+                        "type": "lookup",
+                        "lookup": {
+                            "sheet_id": sid,
+                            "local_index": 0,      # Excel の A列（＝ID列）で引く
+                            "match_key_column_id": "__id__",
+                            "return_column_id": name_col,
+                        },
+                    },
+                ]
+            ),
+        },
+    )
+    assert r.status_code == 201, r.text
+    detail = auth_client.get(f"/api/sheets/{r.json()['sheet_id']}").json()
+    col = next(c for c in detail["columns"] if c["name"] == "品名")
+    assert col["type"] == "lookup"
+    assert col["config"] == {
+        "target_sheet_id": sid,
+        "local_key_column_id": "__id__",
+        "match_key_column_id": "__id__",
+        "return_column_id": name_col,
+    }
+
+
+def test_a_target_column_that_does_not_exist_is_refused(auth_client):
+    """画面が言っているだけの指定は信用しない — 実在しない列なら参照列にしない。"""
+    sid, _name_col = _renamed_master(auth_client)
+    r = auth_client.post(
+        "/api/sheets/import.xlsx",
+        files={"file": ("in.xlsx", _detail_workbook(as_table=True), _MEDIA)},
+        data={
+            "name": "明細4",
+            "has_week_grid": "false",
+            "sheet_name": "明細",
+            "columns": json.dumps(
+                [
+                    {
+                        "index": 2,
+                        "name": "品名",
+                        "type": "lookup",
+                        "lookup": {
+                            "sheet_id": sid,
+                            "local_index": 0,
+                            "match_key_column_id": "__id__",
+                            "return_column_id": "999999",   # そんな列は無い
+                        },
+                    }
+                ]
+            ),
+        },
+    )
+    assert r.status_code == 201, r.text
+    detail = auth_client.get(f"/api/sheets/{r.json()['sheet_id']}").json()
+    col = next(c for c in detail["columns"] if c["name"] == "品名")
+    # 参照列にはせず、値の列として取り込む（Excel にあった値まで消さない）。
+    assert col["type"] != "lookup"
+
+
+# --------------------------------------------------------------------------- #
+# ファイルの中にだけある目印（_xlfn.）
+# --------------------------------------------------------------------------- #
+def test_xlfn_prefixed_xlookup_is_read_and_not_shown(auth_client):
+    """Excel は XLOOKUP を `_xlfn.XLOOKUP` としてファイルに書く。
+
+    画面には一度もそう出ないので、読むときは無視し、見せるときも外す。
+    """
+    master_id = _import_master(auth_client)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "明細"
+    ws.append(["品番", "品名"])
+    for i in range(1, 4):
+        ws.append([f"P{i:03d}", f"=_xlfn.XLOOKUP(A{i + 1},マスタ!$A:$A,マスタ!$B:$B)"])
+    ms = wb.create_sheet("マスタ")
+    ms.append(["品番", "品名", "単価"])
+    for i in range(1, 4):
+        ms.append([f"P{i:03d}", f"部品{i}", 100 * i])
+
+    by_header = _inspect(auth_client, _save(wb))
+    info = by_header["品名"]
+    assert info["type"] == "lookup"
+    assert info["formula"]["lookup"]["sheet_id"] == master_id
+    # 「_xlfn.」は利用者に見せない。
+    assert info["formula"]["sample"] == "=XLOOKUP(A2,マスタ!$A:$A,マスタ!$B:$B)"
+
+
+# --------------------------------------------------------------------------- #
 # テーブルで書かれた、ふつうの数式
 # --------------------------------------------------------------------------- #
 def _table_arithmetic_workbook() -> io.BytesIO:

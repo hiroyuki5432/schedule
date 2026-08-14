@@ -1818,6 +1818,14 @@ def create_sheet_with_selection(
     }
 
 
+def _points_at_a_real_column(col_id: str, target_cols: set[str]) -> bool:
+    """参照先の指定が、そのシートに本当にある列か。
+
+    `__id__` は列ではなく行のキー値なので、列の一覧には無くて正しい。
+    """
+    return col_id == LOOKUP_ID_KEY or col_id in target_cols
+
+
 def _create_lookup_columns(
     db: Session,
     user: User,
@@ -1835,6 +1843,10 @@ def _create_lookup_columns(
 
     参照先が解決できないときは、参照列にせず **値の列として作る**。中身の分からない
     参照列を置いても永久に空欄になるだけで、元の Excel にあった値まで消えてしまうので。
+
+    参照先はウィザードで手で選べる（名前がずれていて自動では結びつかないとき）ので、
+    ここに届く指定は「画面が言っているだけ」の値。**自分のグループのシートか／その
+    シートに本当にある列か** を、必ずこちらで確かめてから書く。
     """
     if not pending:
         return
@@ -1846,6 +1858,14 @@ def _create_lookup_columns(
     sheet_ids = set(
         db.execute(select(Sheet.id).where(Sheet.org_id == user.org_id)).scalars()
     )
+    # 参照先シートごとの、実在する列ID。手で選んだ指定を確かめるのに使う。
+    wanted = {(it.get("lookup") or {}).get("sheet_id") for it, _o in pending}
+    cols_by_sheet: dict[int, set[str]] = {sid: set() for sid in wanted & sheet_ids}
+    if cols_by_sheet:
+        for col in db.execute(
+            select(Column).where(Column.sheet_id.in_(list(cols_by_sheet)))
+        ).scalars():
+            cols_by_sheet[col.sheet_id].add(str(col.id))
 
     for it, order in pending:
         cfg = it.get("lookup") or {}
@@ -1856,7 +1876,12 @@ def _create_lookup_columns(
         else:
             local_col = by_name.get(label_by_index.get(local_index, ""))
             local_key = str(local_col.id) if local_col is not None else ""
-        target_ok = cfg.get("sheet_id") in sheet_ids
+
+        target_cols = cols_by_sheet.get(cfg.get("sheet_id"))
+        target_ok = target_cols is not None and all(
+            _points_at_a_real_column(cfg.get(k, ""), target_cols)
+            for k in ("match_key_column_id", "return_column_id")
+        )
         if local_key and target_ok:
             ctype = "lookup"
             config: dict = {

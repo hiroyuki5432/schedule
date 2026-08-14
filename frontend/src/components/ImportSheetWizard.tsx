@@ -20,6 +20,7 @@ import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Button } from '@/components/ui/Button'
 import { WizardShell, colLetter } from '@/components/import/WizardShell'
+import { LookupTargetDialog } from '@/components/import/LookupTargetDialog'
 import { AUTO_ID, SourceStep } from '@/components/import/SourceStep'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/format'
@@ -351,6 +352,19 @@ function StepColumns({
   onPick: (index: number, patch: Partial<Pick>) => void
   onAll: (selected: boolean) => void
 }) {
+  // 参照先ダイアログを開いている列（Excel の列位置）。
+  const [lookupFor, setLookupFor] = useState<number | null>(null)
+
+  // 参照のキーに選べる列。ID列は行のキー値になるので別扱い（サーバ側で '__id__'）。
+  const localOptions = picks
+    .filter((p) => p.index === idColumn || (p.selected && p.name.trim() !== ''))
+    .map((p) => ({
+      index: p.index,
+      label:
+        `${colLetter(p.index)}: ${info.get(p.index)?.header || p.name}` +
+        (p.index === idColumn ? '（ID列）' : ''),
+    }))
+
   return (
     <div>
       <div className="mb-2 flex items-center justify-between">
@@ -432,9 +446,10 @@ function StepColumns({
                         {/* 「数式」は、Excel の式をこのアプリの式に翻訳できた列だけに
                             出す。翻訳できない式を数式列にしても計算できないので。 */}
                         {c?.formula?.expr && <option value="formula">{TYPE_LABEL.formula}</option>}
-                        {/* 「参照」は、XLOOKUP の指す先がこのアプリの中で見つかった
-                            列だけ。見つからない参照列を作っても永久に空欄になる。 */}
-                        {c?.formula?.lookup?.ready && (
+                        {/* 「参照」は、XLOOKUP の指す先が決まっている列だけ。自動で
+                            見つかったか、下の「参照先を選ぶ…」で手で決めたか。行き先の
+                            無い参照列を作っても永久に空欄になる。 */}
+                        {(c?.formula?.lookup?.ready || p.lookup) && (
                           <option value="lookup">{TYPE_LABEL.lookup}</option>
                         )}
                         {TYPE_OPTIONS.map((t) => (
@@ -457,7 +472,19 @@ function StepColumns({
                         formula={c.formula}
                         asFormula={p.type === 'formula'}
                         asLookup={p.type === 'lookup'}
+                        pickedLookup={p.lookup}
                       />
+                    )}
+                    {c?.formula?.lookup && (
+                      <button
+                        type="button"
+                        onClick={() => setLookupFor(p.index)}
+                        className="mt-0.5 text-[10.5px] text-[var(--green-d)] underline-offset-2 hover:underline"
+                      >
+                        {p.lookup || c.formula.lookup.ready
+                          ? '⚙ 参照先を変える…'
+                          : '⚙ 参照先を選ぶ…'}
+                      </button>
                     )}
                     {role === 'milestone' && (
                       <span className="block text-[var(--ink3)]">
@@ -471,6 +498,21 @@ function StepColumns({
           </tbody>
         </table>
       </div>
+
+      {lookupFor !== null && info.get(lookupFor) && (
+        <LookupTargetDialog
+          info={info.get(lookupFor)!}
+          localOptions={localOptions}
+          value={picks.find((p) => p.index === lookupFor)?.lookup}
+          onClose={() => setLookupFor(null)}
+          onSave={(next) => {
+            // 選び終わったら型も「参照」にする — わざわざ設定したのに型が別のままだと
+            // 反映されず、設定が効いていないように見える。
+            onPick(lookupFor, { lookup: next, type: 'lookup' })
+            setLookupFor(null)
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -496,12 +538,30 @@ function FormulaNote({
   formula,
   asFormula,
   asLookup,
+  pickedLookup,
 }: {
   formula: NonNullable<ImportColumnInfo['formula']>
   asFormula: boolean
   asLookup: boolean
+  /** 手で選び直した参照先（あれば、自動の結果より優先して説明する）。 */
+  pickedLookup?: ImportColumnPick['lookup']
 }) {
   const lk = formula.lookup
+  // 手で選んだときは、参照先の名前をここでは持っていない（列IDだけ）。設定できている
+  // ことだけを言い、中身はダイアログで確認してもらう。
+  if (pickedLookup) {
+    return (
+      <span className="mt-0.5 block text-[10.5px] leading-relaxed text-[var(--ink3)]">
+        Excelの数式 <code className="text-[var(--ink2)]">{formula.sample}</code>（
+        {formula.cells}セル）→{' '}
+        {asLookup ? (
+          <span className="text-[var(--green-d)]">参照先を設定済み（参照列として作ります）</span>
+        ) : (
+          <>いまの結果を値として取り込みます（型を「{TYPE_LABEL.lookup}」にすると参照列）。</>
+        )}
+      </span>
+    )
+  }
   if (lk?.ready) {
     return (
       <span className="mt-0.5 block text-[10.5px] leading-relaxed text-[var(--ink3)]">
