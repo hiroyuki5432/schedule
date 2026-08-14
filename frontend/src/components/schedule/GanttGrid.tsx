@@ -1818,6 +1818,8 @@ function HeadCell({
   sortDir,
   onClick,
   filterActive,
+  titleText,
+  wrap,
 }: {
   children: React.ReactNode
   className?: string
@@ -1828,24 +1830,42 @@ function HeadCell({
   onClick?: () => void
   /** Show a filled funnel when this column has an active filter. */
   filterActive?: boolean
+  /** Full column name, put FIRST in the tooltip so a title too long for the
+   *  column can still be read on hover (要望: 並べ替えの説明しか出なくて見えない). */
+  titleText?: string
+  /** Let the title wrap to two lines instead of being cut on one. Only the
+   *  attribute columns turn this on — the 予定計/実績計 heads are short fixed
+   *  labels that read better on a single line. */
+  wrap?: boolean
 }) {
-  const base =
-    'flex h-full flex-shrink-0 items-center overflow-hidden text-ellipsis whitespace-nowrap px-2.5 text-[11px] font-medium text-[var(--ink3)]'
+  const base = cn(
+    'flex h-full flex-shrink-0 items-center px-2.5 text-[11px] font-medium text-[var(--ink3)]',
+    !wrap && 'overflow-hidden text-ellipsis whitespace-nowrap',
+  )
+  const sortHint = 'クリックで並べ替え（昇順→降順→解除）'
   if (onClick) {
     return (
       <button
         type="button"
         onClick={onClick}
-        title="クリックで並べ替え（昇順→降順→解除）"
+        title={titleText ? `${titleText}\n${sortHint}` : sortHint}
         className={cn(
           base,
-          'cursor-pointer select-none hover:text-[var(--ink2)]',
+          'cursor-pointer select-none text-left hover:text-[var(--ink2)]',
           (sortDir || filterActive) && 'text-[var(--ink)]',
           className,
         )}
         style={style}
       >
-        <span className="overflow-hidden text-ellipsis whitespace-nowrap">{children}</span>
+        <span
+          className={
+            wrap
+              ? 'line-clamp-2 min-w-0 break-words leading-[1.25]'
+              : 'overflow-hidden text-ellipsis whitespace-nowrap'
+          }
+        >
+          {children}
+        </span>
         <SortArrow dir={sortDir ?? null} />
         {filterActive && (
           <span className="ml-0.5 text-[9px] leading-none text-[var(--green-d)]" title="絞り込み中">
@@ -1856,7 +1876,7 @@ function HeadCell({
     )
   }
   return (
-    <div className={cn(base, className)} style={style}>
+    <div className={cn(base, className)} style={style} title={titleText}>
       {children}
     </div>
   )
@@ -1938,6 +1958,8 @@ function AttrHead({
         className="min-w-0 flex-1"
         sortDir={sortDir}
         filterActive={!!filter}
+        titleText={col.name}
+        wrap
         onClick={() => onSort(cycleDir(sortDir))}
       >
         {col.name}

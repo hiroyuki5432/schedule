@@ -70,7 +70,10 @@ def test_wizard_import_is_remembered_as_a_preset(auth_client):
 
     saved = _presets(auth_client)["設計スケジュール"]
     assert saved["target_sheet_id"] == sid
-    assert saved["mapping"] == [{"index": 1, "name": "件名", "type": ""}]
+    # 計算列を再現するための expr（数式）/ lookup（参照先）も一緒に保存される。
+    assert saved["mapping"] == [
+        {"index": 1, "name": "件名", "type": "", "expr": "", "lookup": None}
+    ]
 
     # Saving again for the same worksheet REPLACES it (one setting per worksheet).
     auth_client.post(

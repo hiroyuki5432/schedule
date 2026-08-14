@@ -261,13 +261,18 @@ def read_source(file: UploadFile, sheet_name: str, header_row: int, last_row: in
 def read_source_with_formulas(
     file: UploadFile, sheet_name: str, header_row: int, last_row: int = 0
 ):
-    """`read_source` に加えて、同じ範囲の **数式** も返す。
+    """`read_source` に加えて、同じ範囲の **数式** と、ブックの **テーブル定義** も返す。
 
     値と数式は openpyxl の別々の読み込みでしか取れない（`data_only` は開くときに決まる）
-    ので、アップロードのバイト列を1回だけ読んで2回開く。返り値の最後は
-    ``[(ワークシート行番号, 生セル), …]`` の行リストで、値側の `data_rows` と同じ
-    行だけが同じ順で並ぶ。
+    ので、アップロードのバイト列を1回だけ読んで2回開く。返り値の後ろ2つは
+
+    * ``[(ワークシート行番号, 生セル), …]`` の行リスト（値側の `data_rows` と同じ行だけが
+      同じ順で並ぶ）
+    * ``{テーブル名: TableDef}``（`[@数量]` のような書き方を読むために要る。
+      :mod:`app.xlsx_tables` 参照）
     """
+    from app.xlsx_tables import read_tables
+
     data = upload_bytes(file)
     wb = workbook_from_bytes(data)
     ws, grid, hr, header, data_rows = slice_worksheet(wb, sheet_name, header_row, last_row)
@@ -287,4 +292,22 @@ def read_source_with_formulas(
         if row is None or not any(not is_blank(v) for v in row):
             continue
         formula_rows.append((i + 1, fgrid[i] if i < len(fgrid) else ()))
-    return wb, ws, grid, hr, header, data_rows, formula_rows
+    return wb, ws, grid, hr, header, data_rows, formula_rows, read_tables(data)
+
+
+def worksheet_header_names(wb, sheet_name: str, header_row: int = 0) -> dict[int, str]:
+    """**別の** ワークシートの見出し（列位置 → 見出し名）。
+
+    XLOOKUP が `マスタ!$C:$C` のように列番地で書かれているとき、C列が何という列なのかは
+    参照先の見出し行を読まないと分からない。見出しの手前だけ読めば足りるので、上から
+    数行だけ見る。`header_row`（1始まり）が分からなければこれまでと同じ推測を使う。
+    """
+    try:
+        ws = pick_worksheet(wb, sheet_name)
+    except HTTPException:
+        return {}
+    rows = list(ws.iter_rows(min_row=1, max_row=HEADER_SCAN_ROWS, values_only=True))
+    if not rows:
+        return {}
+    hr = header_row if 0 < header_row <= len(rows) else auto_header_row(rows)
+    return {i: cell_text(v) for i, v in enumerate(rows[hr - 1]) if cell_text(v)}

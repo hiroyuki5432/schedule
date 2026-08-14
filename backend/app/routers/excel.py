@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from app import xlsx_formula, xlsx_import as xlsx
 from app.db import get_db
 from app.deps import get_sheet_for_user
-from app.models import Column, EffortEntry, Row, RowMilestone, Sheet, User
+from app.models import Column, EffortEntry, ImportPreset, Row, RowMilestone, Sheet, User
 from app.schedule_service import ensure_schedule_columns, sched_columns
 from app.date_values import is_date_placeholder, normalize_date_text, parse_date_value
 from app.schemas import COMPUTED_COLUMN_TYPES
@@ -43,6 +43,10 @@ _XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
 
 PROGRESS_HEADER = "進捗(%)"
 DEPS_HEADER = "先行タスク(ID)"
+
+#: 参照(LOOKUP)の設定で「列ではなく行のID（key_value）」を指す合図。frontend の
+#: `lib/lookup.ts` の ID_KEY と同じ値でなければならない。
+LOOKUP_ID_KEY = "__id__"
 
 #: 取り込みで「行をどう照合するか」。
 #:   'none'    … 照合しない。Excel の1行＝アプリの1行（既定）。同じIDが並んでいても
@@ -524,13 +528,15 @@ def import_rows_with_mapping(
 
 
 def _effective_selection(kept: list[dict]) -> list[dict]:
-    """The resolved picks in the `[{index, name, type, expr}]` shape a preset stores."""
+    """The resolved picks in the `[{index, name, type, expr, lookup}]` shape a preset
+    stores. 計算列（数式・参照）は中身まで残さないと、次回そこがただの値の列に戻る。"""
     return [
         {
             "index": it["index"],
             "name": it["label"],
             "type": it.get("type") or "",
             "expr": it.get("expr") or "",
+            "lookup": it.get("lookup") or None,
         }
         for it in kept
     ]
@@ -1155,9 +1161,36 @@ def _parse_selection(raw: str) -> list[dict] | None:
                 "type": str(it.get("type") or "").strip(),
                 # 数式列のとき、`[列名]` 形式の式。ウィザードが翻訳結果を送り返す。
                 "expr": str(it.get("expr") or "").strip(),
+                # 参照列のとき、XLOOKUP から起こした参照先（同じくウィザードが返す）。
+                "lookup": _clean_lookup(it.get("lookup")),
             }
         )
     return out
+
+
+def _clean_lookup(raw) -> dict | None:
+    """ウィザードが返してきた参照先の指定を、使う4つだけに絞る。
+
+    `local_index` は **Excel の列位置**。取り込み後の列IDはこの時点ではまだ存在しない
+    （列を作るのはこれから）ので、位置で受け取って作成後に結び直す。
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        sheet_id = int(raw.get("sheet_id"))
+        local_index = int(raw.get("local_index"))
+    except (TypeError, ValueError):
+        return None
+    match_id = str(raw.get("match_key_column_id") or "").strip()
+    return_id = str(raw.get("return_column_id") or "").strip()
+    if not match_id or not return_id:
+        return None
+    return {
+        "sheet_id": sheet_id,
+        "local_index": local_index,
+        "match_key_column_id": match_id,
+        "return_column_id": return_id,
+    }
 
 
 def _default_selection(
@@ -1167,13 +1200,18 @@ def _default_selection(
     has_week_grid: bool,
     member_names: set[str],
     formula_rows: list[tuple[int, tuple]] | None = None,
+    *,
+    worksheet: str = "",
+    tables: dict | None = None,
+    resolve_lookup=None,
 ) -> list[dict]:
     """What the wizard proposes (and what an unattended import uses): every named
     column except the ID one, with its type inferred. ◇予定/◇実績 are left out —
     a brand-new sheet has no milestone template to hang them on.
 
-    A column whose Excel cells are a translatable formula becomes a 数式列 — keeping
-    the calculation instead of the frozen numbers it happened to produce."""
+    A column whose Excel cells are a translatable formula becomes a 数式列, and one
+    holding a resolvable XLOOKUP/VLOOKUP becomes a 参照列 — keeping the calculation
+    instead of the frozen values it happened to produce."""
     names_by_index = {
         i: _cell_text(raw) for i, raw in enumerate(header) if _cell_text(raw)
     }
@@ -1187,13 +1225,20 @@ def _default_selection(
             continue
         ctype = ""
         expr = ""
+        lookup = None
         if role == "attr":
-            formula = _column_formula(formula_rows, idx, names_by_index)
+            formula = _column_formula(
+                formula_rows, idx, names_by_index,
+                worksheet=worksheet, tables=tables, resolve_lookup=resolve_lookup,
+            )
+            resolved = (formula or {}).get("lookup")
             if formula and formula.get("expr"):
                 ctype, expr = "formula", formula["expr"]
+            elif resolved and resolved.get("ready"):
+                ctype, lookup = "lookup", resolved
             else:
                 ctype, _cfg = _infer_type(_column_values(data_rows, idx), member_names)
-        sel.append({"index": idx, "name": nm, "type": ctype, "expr": expr})
+        sel.append({"index": idx, "name": nm, "type": ctype, "expr": expr, "lookup": lookup})
     return sel
 
 
@@ -1239,9 +1284,9 @@ def inspect_import_xlsx(
     would NOT survive the conversion. Pass `columns` (the same JSON the import
     takes) to re-check the counts against the user's own choices before committing.
     """
-    wb, ws, grid, hr, header, data_rows, formula_rows = xlsx.read_source_with_formulas(
-        file, sheet_name, header_row, last_row
-    )
+    (
+        wb, ws, grid, hr, header, data_rows, formula_rows, tables
+    ) = xlsx.read_source_with_formulas(file, sheet_name, header_row, last_row)
     return {
         "worksheets": xlsx.worksheets_of(wb),
         "sheet_name": ws.title,
@@ -1263,6 +1308,9 @@ def inspect_import_xlsx(
             has_week_grid,
             _parse_selection(columns),
             formula_rows,
+            worksheet=str(ws.title or ""),
+            tables=tables,
+            wb=wb,
         ),
         **id_column_counts(data_rows, id_column),
     }
@@ -1277,6 +1325,10 @@ def new_sheet_column_info(
     has_week_grid: bool,
     chosen: list[dict] | None,
     formula_rows: list[tuple[int, tuple]] | None = None,
+    *,
+    worksheet: str = "",
+    tables: dict | None = None,
+    wb=None,
 ) -> list[dict]:
     """Per-Excel-column analysis for a BRAND NEW sheet: the role the header plays,
     the guessed (or chosen) column type, sample values, inferred dropdown options
@@ -1285,7 +1337,11 @@ def new_sheet_column_info(
     When `formula_rows` is given (the same rows read with `data_only=False`), each
     column also reports whether its cells are Excel FORMULAS and, if they translate,
     the equivalent `[列名]` expression — so the wizard can offer 数式列 instead of
-    freezing today's numbers into text (要望: Excelの数式もいい感じに取り込む)."""
+    freezing today's numbers into text (要望: Excelの数式もいい感じに取り込む).
+
+    A column whose formula is an XLOOKUP/VLOOKUP gets a `lookup` block instead: the
+    sheet and columns it would point at, or the reason it cannot be wired up yet
+    (要望: XLOOKUP使ってたらうまくLOOKUPを自動生成してほしい)."""
     member_names = set(_members_by_name(db, user.org_id).keys())
     by_index = {it["index"]: it for it in (chosen or [])}
 
@@ -1294,6 +1350,15 @@ def new_sheet_column_info(
     names_by_index = {
         idx: _cell_text(raw) for idx, raw in enumerate(header) if _cell_text(raw)
     }
+    resolve_lookup = (
+        (
+            lambda spec: _resolve_lookup(
+                db, user, spec, wb=wb, names_by_index=names_by_index, worksheet=worksheet
+            )
+        )
+        if wb is not None
+        else None
+    )
 
     cols: list[dict] = []
     for idx, raw_name in enumerate(header):
@@ -1306,18 +1371,29 @@ def new_sheet_column_info(
         else:
             inferred, cfg = "", {}
 
-        formula = _column_formula(formula_rows, idx, names_by_index)
-        # 翻訳できた列は、既定を「数式」にする。ここが "いい感じ" の中身 — 何もしなければ
-        # 計算結果が焼き付いた文字列になり、元の列を直しても追従しない。
-        if formula and formula.get("expr") and role == "attr" and not picked:
-            inferred = "formula"
+        formula = _column_formula(
+            formula_rows, idx, names_by_index,
+            worksheet=worksheet, tables=tables, resolve_lookup=resolve_lookup,
+        )
+        lookup = (formula or {}).get("lookup")
+        # 翻訳できた列は、既定を「数式」／「参照」にする。ここが "いい感じ" の中身 —
+        # 何もしなければ計算結果が焼き付いた文字列になり、元を直しても追従しない。
+        if role == "attr" and not picked:
+            if formula and formula.get("expr"):
+                inferred = "formula"
+            elif lookup and lookup.get("ready"):
+                inferred = "lookup"
 
         ctype = (picked or {}).get("type") or inferred
-        if ctype not in _IMPORTABLE_TYPES and ctype != "formula":
+        if ctype not in _IMPORTABLE_TYPES and ctype not in COMPUTED_COLUMN_TYPES:
             ctype = inferred
         filled = [v for v in values if not _is_blank(v)]
-        # 数式列は値を保存しないので、型が合わない件数の話は関係ない。
-        bad = [] if ctype == "formula" else _invalid_values(values, role, ctype, member_names)
+        # 計算列（数式・参照）は値を保存しないので、型が合わない件数の話は関係ない。
+        bad = (
+            []
+            if ctype in COMPUTED_COLUMN_TYPES
+            else _invalid_values(values, role, ctype, member_names)
+        )
         selected = (
             idx in by_index
             if chosen is not None
@@ -1345,6 +1421,10 @@ def _column_formula(
     formula_rows: list[tuple[int, tuple]] | None,
     idx: int,
     names_by_index: dict[int, str],
+    *,
+    worksheet: str = "",
+    tables: dict | None = None,
+    resolve_lookup=None,
 ) -> dict | None:
     """この Excel 列が数式かどうかと、翻訳できるなら `[列名]` 式。数式が無ければ None。
 
@@ -1353,21 +1433,156 @@ def _column_formula(
       expr    … 翻訳できた式（None なら翻訳不可）
       reason  … 翻訳できなかった理由
       sample  … 元の Excel 数式の例（画面に出して納得してもらうため）
-      cached  … 計算結果が Excel に保存されているか。False のときは「値として取り込む」
-                を選ぶと空になるので、警告を出す必要がある。
+      lookup  … XLOOKUP/VLOOKUP を参照列に読み替えられたときの中身（:func:`_resolve_lookup`）
+
+    `resolve_lookup` は「Excel の言葉で書かれた参照先」をアプリのシート／列に結びつける
+    関数。DB を見る必要があるので呼び出し側から渡してもらう。
     """
     if not formula_rows:
         return None
     cells = [(row, xlsx.cell_at(r, idx)) for row, r in formula_rows]
-    tr = xlsx_formula.translate_column(cells, names_by_index)
+    tr = xlsx_formula.translate_column(
+        cells, names_by_index, worksheet=worksheet, tables=tables
+    )
     if tr.formula_cells == 0:
         return None
-    return {
+    out = {
         "cells": tr.formula_cells,
         "expr": tr.expr,
         "reason": tr.reason,
         "sample": tr.sample,
     }
+    if tr.lookup is not None and resolve_lookup is not None:
+        resolved = resolve_lookup(tr.lookup)
+        out["lookup"] = resolved
+        # 参照としては読めたが結びつけられなかった、というのがいちばん多い。理由は
+        # 「XLOOKUP に対応していない」ではなく「参照先が無い」なので、そちらを出す。
+        if not resolved.get("ready"):
+            out["reason"] = resolved.get("reason") or out["reason"]
+    return out
+
+
+def _resolve_lookup(
+    db: Session,
+    user: User,
+    spec: xlsx_formula.LookupSpec,
+    *,
+    wb,
+    names_by_index: dict[int, str],
+    worksheet: str = "",
+) -> dict:
+    """XLOOKUP から起こした参照先を、このアプリのシートID・列IDに結びつける。
+
+    Excel 側は「マスタ というワークシートの 品番 列」としか言っていない。アプリ側で
+    それに当たるのは —
+
+    1. その **ワークシートを取り込んだ先** のシート（取り込み設定に記録がある）。
+       これがいちばん確か: 「このワークシートはこのシートに入れた」と本人が決めた記録。
+    2. 同じ名前のシート。
+
+    どちらも見つからなければ、参照列は作れない（作っても永久に空欄になる）。その場合は
+    理由だけ返して、値としての取り込みに任せる。黙って空の参照列を作るより良い。
+    """
+    out: dict = {
+        "local_index": spec.local_index,
+        "local_column": names_by_index.get(spec.local_index) or "",
+        "target_worksheet": spec.target_worksheet,
+        "match_column": spec.match_column or "",
+        "return_column": spec.return_column or "",
+        "sheet_id": None,
+        "sheet_name": "",
+        "match_key_column_id": "",
+        "return_column_id": "",
+        "ready": False,
+        "reason": None,
+    }
+    if not out["local_column"]:
+        out["reason"] = "探すキーになる列が取り込み対象にありません"
+        return out
+    if worksheet and spec.target_worksheet == worksheet:
+        # 自分自身を引いている式。参照列は「別のシートから引く」ものなので当てはまらない
+        # （同じシート内で完結する話なら、そもそも参照ではなく普通の列でよい）。
+        out["reason"] = "同じワークシートの中を参照しています（参照列にはできません）"
+        return out
+
+    preset = db.execute(
+        select(ImportPreset).where(
+            ImportPreset.org_id == user.org_id,
+            ImportPreset.worksheet_name == spec.target_worksheet,
+        )
+    ).scalar_one_or_none()
+
+    sheet = None
+    if preset is not None and preset.target_sheet_id is not None:
+        sheet = db.get(Sheet, preset.target_sheet_id)
+        if sheet is not None and sheet.org_id != user.org_id:
+            sheet = None
+    if sheet is None:
+        sheet = db.execute(
+            select(Sheet).where(
+                Sheet.org_id == user.org_id, Sheet.name == spec.target_worksheet
+            )
+        ).scalars().first()
+    if sheet is None:
+        out["reason"] = (
+            f"参照先の「{spec.target_worksheet}」に当たるシートがまだありません"
+            "（先にそのワークシートを取り込むと、参照列にできます）"
+        )
+        return out
+    out["sheet_id"] = sheet.id
+    out["sheet_name"] = sheet.name
+
+    # 列番地（`マスタ!$C:$C`）で書かれていると列名が分からないので、参照先の見出し行を読む。
+    target_headers = xlsx.worksheet_header_names(
+        wb, spec.target_worksheet, preset.header_row if preset else 0
+    )
+    # `or` で書かないこと — A列（位置0）が「指定なし」に化ける。
+    def header_at(pos: int | None) -> str:
+        return target_headers.get(pos, "") if pos is not None else ""
+
+    match_name = spec.match_column or header_at(spec.match_index)
+    return_name = spec.return_column or header_at(spec.return_index)
+    out["match_column"], out["return_column"] = match_name, return_name
+    if not match_name or not return_name:
+        out["reason"] = "参照先の列名が分かりませんでした（見出しのない列を指しています）"
+        return out
+
+    # 取り込みのとき ID列 にした列は、シートの列ではなく行のID（key_value）になっている
+    # ので、名前で探しても見つからない。XLOOKUP がマスタを引くときに照合するのは
+    # たいていその列なので、ここを拾えないと「参照先の列がありません」ばかりになる。
+    #
+    # どの列を ID にしたかは取り込み設定に残っている。残っていなければ、取り込みの既定
+    # （先頭列）を採る — 実際にその設定で取り込まれたはずなので。
+    id_index = preset.id_column if preset is not None else 0
+    id_header = target_headers.get(id_index, "") if id_index >= 0 else ""
+
+    cols = list(
+        db.execute(select(Column).where(Column.sheet_id == sheet.id)).scalars()
+    )
+    by_name = {(c.name or "").strip().casefold(): c for c in cols}
+
+    def resolve(name: str) -> str:
+        col = by_name.get(name.strip().casefold())
+        if col is not None:
+            return str(col.id)
+        if id_header and name.strip().casefold() == id_header.strip().casefold():
+            return LOOKUP_ID_KEY
+        return ""
+
+    out["match_key_column_id"] = resolve(match_name)
+    out["return_column_id"] = resolve(return_name)
+    missing = [
+        nm
+        for nm, got in ((match_name, out["match_key_column_id"]), (return_name, out["return_column_id"]))
+        if not got
+    ]
+    if missing:
+        out["reason"] = (
+            f"「{sheet.name}」に " + "・".join(f"「{m}」" for m in missing) + " という列がありません"
+        )
+        return out
+    out["ready"] = True
+    return out
 
 
 def id_column_counts(data_rows: list[tuple], id_column: int) -> dict:
@@ -1418,13 +1633,14 @@ def import_new_sheet_xlsx(
     date columns, since a new sheet has no milestone template yet).
     """
     (
-        _wb,
+        wb,
         ws,
         _grid_rows,
         _hr,
         header,
         data_rows,
         formula_rows,
+        tables,
     ) = xlsx.read_source_with_formulas(file, sheet_name, header_row, last_row)
     result = create_sheet_with_selection(
         db,
@@ -1438,6 +1654,8 @@ def import_new_sheet_xlsx(
         selection=_parse_selection(columns),
         formula_rows=formula_rows,
         match_mode=match_mode,
+        tables=tables,
+        wb=wb,
     )
     result.pop("selection", None)  # internal — only the 一括取り込み needs it
     return result
@@ -1457,6 +1675,8 @@ def create_sheet_with_selection(
     commit: bool = True,
     formula_rows: list[tuple[int, tuple]] | None = None,
     match_mode: str = "",
+    tables: dict | None = None,
+    wb=None,
 ) -> dict:
     """Create a sheet from an already-sliced worksheet and fill it.
 
@@ -1464,7 +1684,8 @@ def create_sheet_with_selection(
     several sheets from one workbook inside a single transaction (`commit=False`).
 
     `formula_rows` (the same rows read with `data_only=False`) lets a column that
-    holds an Excel formula become a 数式列 instead of the numbers it produced.
+    holds an Excel formula become a 数式列 instead of the numbers it produced;
+    `tables` + `wb` additionally let an XLOOKUP/VLOOKUP column become a 参照列.
     """
     if not any(not _is_blank(v) for v in header):
         raise HTTPException(
@@ -1473,8 +1694,23 @@ def create_sheet_with_selection(
 
     member_names = set(_members_by_name(db, user.org_id).keys())
     if selection is None:
+        names_by_index = {
+            i: _cell_text(raw) for i, raw in enumerate(header) if _cell_text(raw)
+        }
         selection = _default_selection(
-            header, data_rows, id_column, has_week_grid, member_names, formula_rows
+            header, data_rows, id_column, has_week_grid, member_names, formula_rows,
+            worksheet=worksheet_title,
+            tables=tables,
+            resolve_lookup=(
+                (
+                    lambda spec: _resolve_lookup(
+                        db, user, spec, wb=wb, names_by_index=names_by_index,
+                        worksheet=worksheet_title,
+                    )
+                )
+                if wb is not None
+                else None
+            ),
         )
     selection = [it for it in selection if it["index"] != id_column and 0 <= it["index"] < len(header)]
 
@@ -1509,6 +1745,9 @@ def create_sheet_with_selection(
 
     created_cols = 0
     order = len(existing_names)
+    # 参照列は「同じシートのキー列」を指すので、その列が出来てからでないと設定を書けない。
+    # 場所（order）だけ先に取っておいて、本体は下の2周目で作る。
+    pending_lookups: list[tuple[dict, int]] = []
     for it in kept:
         idx, nm = it["index"], it["label"]
         role = _header_role(header[idx], has_week_grid)
@@ -1516,9 +1755,17 @@ def create_sheet_with_selection(
         if role in ("week", "progress", "deps") or nm in existing_names:
             continue
         values = _column_values(data_rows, idx)
-        # 数式列は「取り込める型」の一覧には入らない（値を保存しないので）が、選択としては
-        # 正当。式が空なら普通の推定に落とす — 式の無い数式列は永久に空欄になるだけなので。
+        # 計算列（数式・参照）は「取り込める型」の一覧には入らない（値を保存しないので）が、
+        # 選択としては正当。中身が空なら普通の推定に落とす — 式や参照先の無い計算列は
+        # 永久に空欄になるだけなので。
         wants_formula = it["type"] == "formula" and bool(it.get("expr"))
+        wants_lookup = it["type"] == "lookup" and bool(it.get("lookup"))
+        if wants_lookup:
+            existing_names.add(nm)
+            pending_lookups.append((it, order))
+            order += 1
+            created_cols += 1
+            continue
         ctype = "formula" if wants_formula else (it["type"] if it["type"] in _IMPORTABLE_TYPES else "")
         if wants_formula:
             config = {"expr": it["expr"]}
@@ -1544,6 +1791,9 @@ def create_sheet_with_selection(
         order += 1
         created_cols += 1
     db.flush()
+    _create_lookup_columns(
+        db, user, sheet, pending_lookups, kept, id_column, data_rows, member_names
+    )
 
     out_header, out_rows = _synthesize(data_rows, kept, id_column)
     # 新しいシートなので照合する相手はいない。効くのは「同じファイル内で ID が重なった
@@ -1566,6 +1816,70 @@ def create_sheet_with_selection(
         "selection": _effective_selection(kept),
         **result,
     }
+
+
+def _create_lookup_columns(
+    db: Session,
+    user: User,
+    sheet: Sheet,
+    pending: list[tuple[dict, int]],
+    kept: list[dict],
+    id_column: int,
+    data_rows: list[tuple],
+    member_names: set[str],
+) -> None:
+    """XLOOKUP から起こした参照列を作る（他の列を作り終えた **あと** に呼ぶ）。
+
+    参照列の設定は「このシートのどの列をキーにするか」を列IDで持つので、キーになる列が
+    実在してからでないと書けない。Excel の列位置 → さっき作った列、と結び直すのがここ。
+
+    参照先が解決できないときは、参照列にせず **値の列として作る**。中身の分からない
+    参照列を置いても永久に空欄になるだけで、元の Excel にあった値まで消えてしまうので。
+    """
+    if not pending:
+        return
+    by_name = {
+        (c.name or ""): c
+        for c in db.execute(select(Column).where(Column.sheet_id == sheet.id)).scalars()
+    }
+    label_by_index = {it["index"]: it["label"] for it in kept}
+    sheet_ids = set(
+        db.execute(select(Sheet.id).where(Sheet.org_id == user.org_id)).scalars()
+    )
+
+    for it, order in pending:
+        cfg = it.get("lookup") or {}
+        local_index = cfg.get("local_index")
+        # キー列は、ID列そのもの（行の key_value）か、いま作った普通の列のどちらか。
+        if local_index == id_column:
+            local_key = LOOKUP_ID_KEY
+        else:
+            local_col = by_name.get(label_by_index.get(local_index, ""))
+            local_key = str(local_col.id) if local_col is not None else ""
+        target_ok = cfg.get("sheet_id") in sheet_ids
+        if local_key and target_ok:
+            ctype = "lookup"
+            config: dict = {
+                "target_sheet_id": cfg["sheet_id"],
+                "local_key_column_id": local_key,
+                "match_key_column_id": cfg["match_key_column_id"],
+                "return_column_id": cfg["return_column_id"],
+            }
+        else:
+            ctype, config = _infer_type(
+                _column_values(data_rows, it["index"]), member_names
+            )
+        db.add(
+            Column(
+                sheet_id=sheet.id,
+                name=it["label"],
+                type=ctype,
+                order=order,
+                is_key=False,
+                config=config,
+            )
+        )
+    db.flush()
 
 
 def _gen_key(db: Session, sheet: Sheet) -> str:

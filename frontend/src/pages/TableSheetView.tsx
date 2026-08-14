@@ -929,7 +929,12 @@ const TableRowView = memo(function TableRowView({
   )
 })
 
-/** Clickable column header that toggles asc → desc → none. */
+/** Clickable column header that toggles asc → desc → none.
+ *
+ *  The title wraps to TWO lines before it is cut, and the tooltip always leads
+ *  with the full column name (要望: タイトルが長すぎると文字が見えないのに、マウスを
+ *  あてても並べ替えの説明しか出ない). Two lines is the cap on purpose — the header is
+ *  sticky, so letting it grow with the longest name would eat the visible rows. */
 function SortHeader({
   label,
   dir,
@@ -943,13 +948,13 @@ function SortHeader({
     <button
       type="button"
       onClick={onClick}
-      title="クリックで並べ替え（昇順→降順→解除）"
+      title={`${label}\nクリックで並べ替え（昇順→降順→解除）`}
       className={
-        'flex min-w-0 items-center overflow-hidden font-medium hover:text-[var(--ink2)]' +
+        'flex min-w-0 items-start text-left font-medium hover:text-[var(--ink2)]' +
         (dir ? ' text-[var(--ink)]' : '')
       }
     >
-      <span className="truncate">{label}</span>
+      <span className="line-clamp-2 min-w-0 break-words leading-[1.25]">{label}</span>
       <SortArrow dir={dir} />
     </button>
   )

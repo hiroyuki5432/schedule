@@ -322,12 +322,56 @@ export interface ImportColumnInfo {
   invalid: number
   invalid_samples: string[]
   /** Present only when the Excel column holds formulas. `expr` is the translated
-   *  `[列名]` expression, or null with `reason` explaining why it stayed values. */
+   *  `[列名]` expression, or null with `reason` explaining why it stayed values.
+   *  `lookup` is filled instead when the formula is an XLOOKUP/VLOOKUP. */
   formula?: {
     cells: number
     expr: string | null
     reason: string | null
     sample: string | null
+    lookup?: ImportLookupInfo
+  }
+}
+
+/** An XLOOKUP/VLOOKUP column read back as 参照(LOOKUP) settings.
+ *
+ *  `ready` means every piece resolved to something that exists in this app, so the
+ *  column can be created as a 参照列. Otherwise `reason` says what is missing —
+ *  usually that the master worksheet has not been imported yet. */
+export interface ImportLookupInfo {
+  /** 0-based Excel column this row's key comes from, and its header. */
+  local_index: number
+  local_column: string
+  /** Worksheet the formula points at, and the app sheet it resolved to. */
+  target_worksheet: string
+  sheet_id: number | null
+  sheet_name: string
+  match_column: string
+  return_column: string
+  /** Column ids in the target sheet ('__id__' = the row's ID/key_value). */
+  match_key_column_id: string
+  return_column_id: string
+  ready: boolean
+  reason: string | null
+}
+
+/** One column as the wizard sends it back.
+ *
+ *  `expr` only matters for `type: 'formula'` — the `[列名]` expression the column
+ *  computes (translated from the Excel formula on import). `lookup` is the same
+ *  for `type: 'lookup'`: where the XLOOKUP/VLOOKUP pointed. `local_index` is an
+ *  EXCEL column position, not a column id — the app's columns do not exist yet at
+ *  this point, so the server binds it after creating them. */
+export interface ImportColumnPick {
+  index: number
+  name: string
+  type: ColumnType | ''
+  expr?: string
+  lookup?: {
+    sheet_id: number
+    local_index: number
+    match_key_column_id: string
+    return_column_id: string
   }
 }
 
@@ -365,9 +409,8 @@ export interface ImportPlan {
   idColumn?: number
   /** 行の照合。省略すると従来どおり「ID列があれば照合」に解決される。 */
   matchMode?: ImportMatchMode
-  /** `expr` only matters for `type: 'formula'` — the `[列名]` expression the
-   *  column computes (translated from the Excel formula on import). */
-  columns?: { index: number; name: string; type: ColumnType | ''; expr?: string }[]
+  /** See `ImportColumnPick`. */
+  columns?: ImportColumnPick[]
 }
 
 function importForm(file: File, plan: Partial<ImportPlan>): FormData {
@@ -594,9 +637,8 @@ export interface WorkbookPlanItem {
   last_row?: number
   id_column?: number
   match_mode?: ImportMatchMode
-  /** `expr` only matters for `type: 'formula'` — the `[列名]` expression the
-   *  column computes (translated from the Excel formula on import). */
-  columns?: { index: number; name: string; type: ColumnType | ''; expr?: string }[]
+  /** See `ImportColumnPick`. */
+  columns?: ImportColumnPick[]
 }
 
 function workbookForm(file: File, plan?: WorkbookPlanItem[], savePresets?: boolean): FormData {

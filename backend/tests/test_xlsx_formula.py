@@ -107,7 +107,18 @@ def test_column_where_rows_disagree():
 
 
 def test_column_stops_at_the_first_untranslatable_row():
-    got = translate_column([(2, "=C2*D2"), (3, "=VLOOKUP(C3,A:B,2,0)")], NAMES)
+    got = translate_column([(2, "=C2*D2"), (3, "=SUMIF(A:A,C3,D:D)")], NAMES)
     assert got.expr is None
     assert "対応していない関数" in (got.reason or "")
     assert got.sample == "=C2*D2"
+
+
+def test_a_mixed_column_is_not_pulled_into_a_lookup():
+    """掛け算の行と LOOKUP の行が混ざった列は、参照列の話にしない。
+
+    ここで「XLOOKUP の形ではありません」と言い出すと、本当の理由（1つの列定義に
+    まとめられない）が画面から消えてしまう。
+    """
+    got = translate_column([(2, "=C2*D2"), (3, "=VLOOKUP(C3,A:B,2,0)")], NAMES)
+    assert got.expr is None and got.lookup is None
+    assert "対応していない関数" in (got.reason or "")

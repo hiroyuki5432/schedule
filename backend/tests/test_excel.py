@@ -673,7 +673,11 @@ def test_a_date_cell_is_stored_as_a_plain_date_whatever_was_typed(auth_client):
 # Excel の数式を数式列として取り込む（要望: Excelの数式もいい感じに取り込む）
 # --------------------------------------------------------------------------- #
 def _formula_workbook() -> io.BytesIO:
-    """単価・数量・金額(=C*D)・備考(=VLOOKUP,翻訳不可) の4列。"""
+    """単価・数量・金額(=C*D)・備考(=SUMIF,翻訳不可) の4列。
+
+    「翻訳できない式」の例に LOOKUP は使えない — XLOOKUP/VLOOKUP は参照列として拾う
+    ようになったので、翻訳できない例としては別物になった（test_xlsx_lookup.py 参照）。
+    """
     wb = Workbook()
     ws = wb.active
     ws.append(["ID", "単価", "数量", "金額", "備考"])
@@ -682,7 +686,7 @@ def _formula_workbook() -> io.BytesIO:
         ws.cell(row=r, column=2, value=100 * (r - 1))
         ws.cell(row=r, column=3, value=r)
         ws.cell(row=r, column=4, value=f"=B{r}*C{r}")
-        ws.cell(row=r, column=5, value=f"=VLOOKUP(B{r},X:Y,2,FALSE)")
+        ws.cell(row=r, column=5, value=f"=SUMIF(B:B,B{r},C:C)")
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)

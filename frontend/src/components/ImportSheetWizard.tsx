@@ -8,7 +8,12 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import * as api from '@/api/client'
-import type { ImportColumnInfo, ImportColumnRole, ImportMatchMode } from '@/api/client'
+import type {
+  ImportColumnInfo,
+  ImportColumnPick,
+  ImportColumnRole,
+  ImportMatchMode,
+} from '@/api/client'
 import type { ColumnType } from '@/types/api'
 import { ApiError } from '@/lib/http'
 import { Input } from '@/components/ui/Input'
@@ -39,6 +44,8 @@ interface Pick {
   type: ColumnType | ''
   /** 数式列のときの `[列名]` 式（Excelの数式から翻訳したもの）。 */
   expr?: string
+  /** 参照列のときの参照先（XLOOKUP/VLOOKUP から起こしたもの）。 */
+  lookup?: ImportColumnPick['lookup']
 }
 
 const STEPS = ['シートと見出し行', '取り込む列', 'プレビュー']
@@ -58,6 +65,7 @@ const TYPE_LABEL: Record<string, string> = {
   dropdown: 'プルダウン',
   member: '担当者',
   formula: '数式（計算のまま）',
+  lookup: '参照（LOOKUP）',
 }
 
 const TYPE_OPTIONS: ColumnType[] = ['text', 'number', 'date', 'dropdown', 'member']
@@ -124,6 +132,7 @@ export function ImportSheetWizard({
         name: c.header,
         type: c.type,
         expr: c.formula?.expr ?? undefined,
+        lookup: lookupPick(c),
       })),
     )
   }, [insp.data])
@@ -143,6 +152,7 @@ export function ImportSheetWizard({
           name: p.name.trim(),
           type: p.type,
           ...(p.type === 'formula' && p.expr ? { expr: p.expr } : {}),
+          ...(p.type === 'lookup' && p.lookup ? { lookup: p.lookup } : {}),
         })),
     [picks, idColumn],
   )
@@ -422,6 +432,11 @@ function StepColumns({
                         {/* 「数式」は、Excel の式をこのアプリの式に翻訳できた列だけに
                             出す。翻訳できない式を数式列にしても計算できないので。 */}
                         {c?.formula?.expr && <option value="formula">{TYPE_LABEL.formula}</option>}
+                        {/* 「参照」は、XLOOKUP の指す先がこのアプリの中で見つかった
+                            列だけ。見つからない参照列を作っても永久に空欄になる。 */}
+                        {c?.formula?.lookup?.ready && (
+                          <option value="lookup">{TYPE_LABEL.lookup}</option>
+                        )}
                         {TYPE_OPTIONS.map((t) => (
                           <option key={t} value={t}>
                             {TYPE_LABEL[t]}
@@ -437,7 +452,13 @@ function StepColumns({
                     {c && c.filled === 0 && (
                       <span className="text-[var(--ink3)]">値が入っていません</span>
                     )}
-                    {c?.formula && <FormulaNote formula={c.formula} asFormula={p.type === 'formula'} />}
+                    {c?.formula && (
+                      <FormulaNote
+                        formula={c.formula}
+                        asFormula={p.type === 'formula'}
+                        asLookup={p.type === 'lookup'}
+                      />
+                    )}
                     {role === 'milestone' && (
                       <span className="block text-[var(--ink3)]">
                         マイルストン列。取り込むと通常の列になります
@@ -454,18 +475,52 @@ function StepColumns({
   )
 }
 
+/** 参照列として作れる列の、送り返す用の指定。作れないなら undefined。 */
+function lookupPick(c: ImportColumnInfo): ImportColumnPick['lookup'] {
+  const lk = c.formula?.lookup
+  if (!lk?.ready || lk.sheet_id == null) return undefined
+  return {
+    sheet_id: lk.sheet_id,
+    local_index: lk.local_index,
+    match_key_column_id: lk.match_key_column_id,
+    return_column_id: lk.return_column_id,
+  }
+}
+
 /** Excel の数式が入っていた列に添える説明。
  *
  *  取り込みは既定で「計算結果」を値として書き込むので、何も言わないと、元の列を直しても
- *  動かない“焼き付いた数字”になる。翻訳できたときは何の式になるかを見せ、できなかった
- *  ときは理由を出して、値のまま入ることを納得してもらう。 */
+ *  動かない“焼き付いた数字”になる。翻訳できたときは何の式・何の参照になるかを見せ、
+ *  できなかったときは理由を出して、値のまま入ることを納得してもらう。 */
 function FormulaNote({
   formula,
   asFormula,
+  asLookup,
 }: {
   formula: NonNullable<ImportColumnInfo['formula']>
   asFormula: boolean
+  asLookup: boolean
 }) {
+  const lk = formula.lookup
+  if (lk?.ready) {
+    return (
+      <span className="mt-0.5 block text-[10.5px] leading-relaxed text-[var(--ink3)]">
+        Excelの数式 <code className="text-[var(--ink2)]">{formula.sample}</code>（
+        {formula.cells}セル）
+        {asLookup ? (
+          <>
+            {' → '}
+            <code className="text-[var(--green-d)]">
+              「{lk.sheet_name}」を {lk.local_column} で引いて {lk.return_column} を表示
+            </code>
+            （参照列。参照先を直すとこちらも変わります）
+          </>
+        ) : (
+          <> → いまの結果を値として取り込みます（参照先を直しても変わりません）。</>
+        )}
+      </span>
+    )
+  }
   if (formula.expr) {
     return (
       <span className="mt-0.5 block text-[10.5px] leading-relaxed text-[var(--ink3)]">
@@ -485,8 +540,8 @@ function FormulaNote({
   }
   return (
     <span className="mt-0.5 block text-[10.5px] leading-relaxed text-[#8A5A1E]">
-      Excelの数式 <code>{formula.sample}</code>（{formula.cells}セル）は、この列の式に
-      できません（{formula.reason}）。計算結果を値として取り込みます。
+      Excelの数式 <code>{formula.sample}</code>（{formula.cells}セル）は、この列の
+      {lk ? '参照' : '式'}にできません（{formula.reason}）。計算結果を値として取り込みます。
     </span>
   )
 }

@@ -108,7 +108,11 @@ def delete_preset(
 
 
 def _clean_mapping(raw: list) -> list[dict]:
-    """`[{index, name, type}]` — anything else in the payload is dropped."""
+    """`[{index, name, type, expr, lookup}]` — anything else in the payload is dropped.
+
+    計算列は `expr`（数式）／`lookup`（参照先）まで持って初めて再現できる。ここで
+    落とすと、同じブックを流し直したときに数式列・参照列がただの値の列に戻ってしまう。
+    """
     out: list[dict] = []
     for it in raw or []:
         if not isinstance(it, dict):
@@ -122,6 +126,8 @@ def _clean_mapping(raw: list) -> list[dict]:
                 "index": idx,
                 "name": str(it.get("name") or "").strip(),
                 "type": str(it.get("type") or "").strip(),
+                "expr": str(it.get("expr") or "").strip(),
+                "lookup": excel._clean_lookup(it.get("lookup")),
             }
         )
     return out

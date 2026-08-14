@@ -118,7 +118,9 @@ export function ColumnHeaderMenu({
       className="fixed z-[100] flex flex-col overflow-hidden rounded-[11px] border border-[var(--line)] bg-[var(--surface)] p-2.5 text-left shadow-lg"
       style={{ top: pos.top, left: pos.left, width: MENU_W, maxHeight: pos.maxH }}
     >
-      <div className="mb-1.5 truncate px-1 text-[12px] font-semibold text-[var(--ink)]">
+      {/* 見出しが列幅に収まらないときの逃げ道その2 — ここは幅に縛られないので、
+          長い列名でも全部読める（要望: タイトルが見えるようにしてほしい）。 */}
+      <div className="mb-1.5 flex-shrink-0 break-words px-1 text-[12px] font-semibold text-[var(--ink)]">
         {colName}
       </div>
 
