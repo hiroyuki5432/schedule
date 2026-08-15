@@ -75,9 +75,16 @@ def _rels(zf: zipfile.ZipFile, part: str) -> dict[str, str]:
         xml = zf.read(rel_path)
     except KeyError:
         return {}
+    except Exception:
+        # 壊れた1枚のために、ブック全体のテーブルを諦めない（無傷のシートは読める）。
+        return {}
     base = posixpath.dirname(part)
     out: dict[str, str] = {}
-    for rel in ET.fromstring(xml).findall(f"{_PKG_REL}Relationship"):
+    try:
+        rels = ET.fromstring(xml).findall(f"{_PKG_REL}Relationship")
+    except ET.ParseError:
+        return {}
+    for rel in rels:
         rid, target = rel.get("Id"), rel.get("Target") or ""
         if not rid or not target or target.startswith(("http:", "https:")):
             continue

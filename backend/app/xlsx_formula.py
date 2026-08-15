@@ -84,9 +84,14 @@ class Untranslatable(Exception):
 class NotALookup(Untranslatable):
     """そもそも LOOKUP 1つで出来ている式ではない、というだけの合図。
 
-    `=[@数量]*XLOOKUP(…)` のように LOOKUP を **含む** 式はここに来る。断る理由としては
-    「XLOOKUP の形ではありません」より「対応していない関数です：XLOOKUP」（数式列として
-    落ちた理由）のほうが分かりやすいので、呼び出し側はこれを見て黙る。
+    `=[@数量]*XLOOKUP(…)` のように LOOKUP を **含む** 式はここに来る。
+
+    以前はこれを黙って握りつぶし、数式列として落ちた理由（「対応していない関数です：
+    XLOOKUP」）だけを出していた。だが画面から見ると、XLOOKUP なのに参照先を選ぶ入口が
+    出ない列・出る列がある、という説明のつかない差になってしまう（要望: XLOOKUP も参照が
+    選べるものと選べないものがある。なぜ？）。いまは :func:`_column_lookup` がここを
+    捕まえて「LOOKUP は入っているが、この形からは自動で読み取れなかった」という理由に
+    言い換える — 手で参照先を選べば済む話なので、そう言えるようにしておく。
     """
 
 
@@ -127,6 +132,12 @@ class Translation:
     formula_cells: int
     #: 参照列にできるときの中身（XLOOKUP / VLOOKUP）。
     lookup: LookupSpec | None = None
+    #: この列のセルに XLOOKUP / VLOOKUP が1つでも書いてあったか。
+    #:
+    #: `lookup` が入るかどうか（＝キー列・照合列・取得列に **分解できたか**）とは別物。
+    #: 分解できなくても「参照先を手で選ぶ」入口は出したいので、画面はこちらを見る。
+    #: 分解できなかった理由は `reason` に入っている。
+    has_lookup: bool = False
 
 
 def col_letters_to_index(letters: str) -> int:
@@ -152,6 +163,34 @@ def is_formula(value) -> bool:
     return isinstance(value, str) and value.startswith("=")
 
 
+#: 式の中で「その行のID（key_value）」を指す名前。`lib/computed.ts` の ID_REF と同じ。
+ID_REF = "ID"
+
+_EXPR_REF_RE = re.compile(r"\[([^\[\]]*)\]")
+
+
+def expr_refs(expr: str) -> set[str]:
+    """`[単価]*[数量]` → {'単価', '数量'}。式が参照している列名。
+
+    列名に `[ ]` は入れられない（:func:`_ref` が断る）ので、単純に括弧の中を拾えばよい。
+    取り込む直前に「その名前の列が本当に作られるか」を検算するために使う。
+    """
+    return {m.group(1) for m in _EXPR_REF_RE.finditer(expr or "")}
+
+
+def _ref(name: str) -> str:
+    """列名を式の中の参照 `[列名]` にする。
+
+    `lib/formula.ts` のトークナイザは `[` を最初の `]` で閉じるので、**列名自体に
+    `[` や `]` が入っていると式として読めない**（見出し `数量[個]` → `[数量[個]]*100` →
+    画面は「列名は [ ] で囲んでください」で全セルがエラー）。エスケープの書き方が無い
+    以上、そういう列を参照する式は作れない。ここで断れば、値としての取り込みに落ちる。
+    """
+    if "[" in name or "]" in name:
+        raise Untranslatable(f"列名に [ ] が入っているため、式の中で参照できません：{name}")
+    return f"[{name}]"
+
+
 #: ファイルの中にだけ現れる目印。Excel の画面には出ないので、読むときも見せるときも外す。
 #:
 #: * `_xlfn.` … Excel 2007 より後に増えた関数（XLOOKUP など）に付く。ファイルには
@@ -164,8 +203,41 @@ _IMPLICIT_AT_RE = re.compile(r"(?<!\[)@(?=[A-Za-z_])")
 
 
 def strip_excel_internals(src: str) -> str:
-    """`=_xlfn.XLOOKUP(…)` → `=XLOOKUP(…)`。読む前と、画面に出す前に通す。"""
-    return _IMPLICIT_AT_RE.sub("", _INTERNALS_RE.sub("", src))
+    """`=_xlfn.XLOOKUP(…)` → `=XLOOKUP(…)`。読む前と、画面に出す前に通す。
+
+    **文字列リテラルの中には手を触れない。** 式全体に正規表現をかけていたときは
+    `=B2&"@example.com"` が `=B2&"example.com"` になり、メールアドレスを組み立てる式が
+    黙って壊れていた。しかも画面に出す「元の Excel 数式」も壊れたあとの姿だったので、
+    利用者が気づく手立てが無かった。目印が現れるのは関数名の位置だけなので、
+    引用符の外だけを直す。
+
+    Excel は文字列の中の `"` を `""` と書く。1文字ずつ見て `"` で状態を切り替えれば、
+    `""` は「閉じてすぐ開く」となって結果的に正しく中に留まる。
+    """
+    out: list[str] = []
+    outside: list[str] = []
+    in_str = False
+
+    def flush() -> None:
+        if outside:
+            chunk = "".join(outside)
+            out.append(_IMPLICIT_AT_RE.sub("", _INTERNALS_RE.sub("", chunk)))
+            outside.clear()
+
+    for ch in src:
+        if in_str:
+            out.append(ch)
+            if ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            flush()
+            out.append(ch)
+            in_str = True
+            continue
+        outside.append(ch)
+    flush()
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -289,6 +361,7 @@ def translate_formula(
     *,
     worksheet: str = "",
     tables: dict[str, TableDef] | None = None,
+    id_index: int | None = None,
 ) -> str:
     """1セルの Excel 数式を `[列名]` 式に翻訳する。できなければ Untranslatable。
 
@@ -307,6 +380,30 @@ def translate_formula(
     index_by_name = {}
     for i, nm in names_by_index.items():
         index_by_name.setdefault(nm.strip().casefold(), i)
+
+    # `[ID]` は「ID という名前の列」と「行のキー値」を区別できない。`computed.ts` は
+    # 列名を先に見るので、ID という列が実在すると `[ID]` はそちらを読む。取り違えたまま
+    # 黙って別の値を出すことになるので、その並びでは ID列 を式から参照させない。
+    id_name_taken = any(
+        i != id_index and nm.strip().casefold() == ID_REF.casefold()
+        for i, nm in names_by_index.items()
+    )
+
+    def emit(idx: int) -> str:
+        """列位置 → 式の中の参照。
+
+        **ID列だけは特別**。取り込むと、その列は「シートの列」ではなく **行のID
+        （key_value）** になるので、見出しの名前で参照する式を作ると存在しない列を指す
+        （画面に `#「品番」という列がありません` と出て、列まるごと使いものにならない）。
+        式エンジンは `[ID]` で行のキー値を読めるので、そちらに翻訳する。
+        """
+        if id_index is not None and idx == id_index:
+            if id_name_taken:
+                raise Untranslatable(
+                    "「ID」という名前の列があるため、ID列（行のキー）を式から参照できません"
+                )
+            return _ref(ID_REF)
+        return _ref(names_by_index[idx])
 
     out: list[str] = []
     pos = 0
@@ -337,7 +434,7 @@ def translate_formula(
 
         if kind == "sref":
             out.append(
-                _translate_sref(text, index_by_name, names_by_index, worksheet, tables)
+                _translate_sref(text, index_by_name, emit, worksheet, tables)
             )
             continue
 
@@ -358,10 +455,9 @@ def translate_formula(
             if row != data_row:
                 raise Untranslatable(f"別の行を参照しています：{text}")
             idx = col_letters_to_index(letters)
-            name = names_by_index.get(idx)
-            if not name:
+            if not names_by_index.get(idx):
                 raise Untranslatable(f"取り込まない列を参照しています：{text}")
-            out.append(f"[{name}]")
+            out.append(emit(idx))
             continue
 
         if kind == "range":
@@ -378,10 +474,9 @@ def translate_formula(
                 a, b = b, a
             parts: list[str] = []
             for i in range(a, b + 1):
-                name = names_by_index.get(i)
-                if not name:
+                if not names_by_index.get(i):
                     raise Untranslatable(f"取り込まない列を含む範囲です：{text}")
-                parts.append(f"[{name}]")
+                parts.append(emit(i))
             out.append(",".join(parts))
             continue
 
@@ -405,7 +500,7 @@ def translate_formula(
 def _translate_sref(
     text: str,
     index_by_name: dict[str, int],
-    names_by_index: dict[int, str],
+    emit,
     worksheet: str,
     tables: dict[str, TableDef] | None,
 ) -> str:
@@ -422,7 +517,7 @@ def _translate_sref(
     idx = index_by_name.get(sref.columns[0].strip().casefold())
     if idx is None:
         raise Untranslatable(f"取り込まない列を参照しています：{text}")
-    return f"[{names_by_index[idx]}]"
+    return emit(idx)
 
 
 # --------------------------------------------------------------------------- #
@@ -432,15 +527,30 @@ def _translate_sref(
 #: 「見つからなければ空」なので、意味はほぼ変わらない。
 _WRAPPERS = ("IFERROR", "IFNA")
 
+#: 逃げ先として「意味がほぼ変わらない」と言い切れるもの＝ただの定数。
+_CONST_RE = re.compile(
+    r'^\s*(?:"(?:[^"]|"")*"|-?\d+(?:\.\d+)?|TRUE|FALSE)?\s*$', re.IGNORECASE
+)
+
 
 def _strip_wrappers(src: str) -> str:
-    """`IFERROR(XLOOKUP(...), "")` → `XLOOKUP(...)`。"""
+    """`IFERROR(XLOOKUP(...), "")` → `XLOOKUP(...)`。
+
+    剥がしてよいのは **逃げ先が定数のときだけ**。参照列は「見つからなければ空」なので、
+    `""` や `0` を返す式なら意味はほぼ変わらない。
+
+    だが `IFERROR(XLOOKUP(A2,…), XLOOKUP(B2,…))`（別の列でもう一度探す）まで剥がすと、
+    2つめを黙って捨てた別物の列になる。しかも参照として素直に読めてしまうので
+    `reason` も出ず、「きれいに参照列にできました」と嘘をつくことになる。定数でなければ
+    剥がさない — 剥がさなければ `XLOOKUP(…)` 単体には見えないので `NotALookup` に落ち、
+    「式の一部として使われています」と正直に言える。
+    """
     for _ in range(3):  # 二重三重に包む人もいる。念のため数回だけ剥がす。
         m = re.match(rf"^\s*({'|'.join(_WRAPPERS)})\s*\((.*)\)\s*$", src, re.IGNORECASE | re.DOTALL)
         if not m or not _is_balanced(m.group(2)):
             return src.strip()
         args = _split_top_level(m.group(2))
-        if len(args) < 2:
+        if len(args) < 2 or not all(_CONST_RE.fullmatch(a) for a in args[1:]):
             return src.strip()
         src = args[0]
     return src.strip()
@@ -460,9 +570,19 @@ def _is_exact_zero(arg: str) -> bool:
 
 
 def _same_row_index(
-    arg: str, data_row: int, index_by_name: dict[str, int]
+    arg: str,
+    data_row: int,
+    index_by_name: dict[str, int],
+    worksheet: str = "",
+    tables: dict[str, TableDef] | None = None,
 ) -> int | None:
-    """引数が「同じ行のセル」なら、その列位置（0始まり）。違えば None。"""
+    """引数が「**このシートの** 同じ行のセル」なら、その列位置（0始まり）。違えば None。
+
+    テーブル名が付いた構造化参照（`マスタ[@品番]`）は、名前が同じでも **別の表の列**。
+    ここでテーブル名を見ないと、`XLOOKUP(マスタ[@品番], …)` のキーが黙ってこのシートの
+    「品番」列にすり替わる。数式列側（:func:`_translate_sref`）は前から確認していたので、
+    参照列側だけ抜けていた。
+    """
     arg = arg.strip()
     m = re.fullmatch(r"\$?([A-Z]{1,3})\$?(\d+)", arg)
     if m:
@@ -472,6 +592,11 @@ def _same_row_index(
             sref = parse_structured_ref(arg)
         except ValueError:
             return None
+        if sref.table:
+            table = (tables or {}).get(sref.table)
+            # 知らないテーブル名も断る。取り込むシートのテーブルだと確認できないので。
+            if table is None or (worksheet and table.worksheet != worksheet):
+                return None
         if sref.this_row and len(sref.columns) == 1:
             return index_by_name.get(sref.columns[0].strip().casefold())
     return None
@@ -487,6 +612,13 @@ class _Array:
     #: 列名が分かるとき（テーブル参照）だけ。位置だけ分かることもある。
     column: str | None
     table: TableDef | None
+    #: 行の範囲（`$A$2:$A$99` の 2 と 99）。列まるごと／テーブルなら None。
+    #:
+    #: 照合する範囲と取ってくる範囲が **同じ行を指しているか** を確かめるために要る。
+    #: `XLOOKUP(A2, マスタ!$A$2:$A$10, マスタ!$B$3:$B$11)` は Excel では1行ずれた値を
+    #: 返すが、行を読み捨てていたときは「揃った参照」として通してしまっていた。
+    first_row: int | None = None
+    last_row: int | None = None
 
 
 def _parse_array(
@@ -523,7 +655,7 @@ def _parse_array(
 
     m = re.fullmatch(
         rf"(?:(?P<sheet>'[^']*'|{_NAME})!)?"
-        r"\$?(?P<c1>[A-Z]{1,3})(?:\$?\d+)?:\$?(?P<c2>[A-Z]{1,3})(?:\$?\d+)?",
+        r"\$?(?P<c1>[A-Z]{1,3})(?:\$?(?P<r1>\d+))?:\$?(?P<c2>[A-Z]{1,3})(?:\$?(?P<r2>\d+))?",
         arg,
     )
     if not m:
@@ -532,7 +664,11 @@ def _parse_array(
     a, b = col_letters_to_index(m.group("c1")), col_letters_to_index(m.group("c2"))
     if a > b:
         a, b = b, a
-    return _Array(ws, a, b, None, None)
+    r1 = int(m.group("r1")) if m.group("r1") else None
+    r2 = int(m.group("r2")) if m.group("r2") else None
+    if r1 is not None and r2 is not None and r1 > r2:
+        r1, r2 = r2, r1
+    return _Array(ws, a, b, None, None, r1, r2)
 
 
 def extract_lookup(
@@ -564,11 +700,36 @@ def extract_lookup(
     raise NotALookup("XLOOKUP / VLOOKUP の形ではありません")
 
 
-def _local_or_fail(arg: str, data_row: int, index_by_name: dict[str, int]) -> int:
-    idx = _same_row_index(arg, data_row, index_by_name)
+def _local_or_fail(
+    arg: str,
+    data_row: int,
+    index_by_name: dict[str, int],
+    worksheet: str = "",
+    tables: dict[str, TableDef] | None = None,
+) -> int:
+    idx = _same_row_index(arg, data_row, index_by_name, worksheet, tables)
     if idx is None:
         raise Untranslatable(f"探す値が同じ行の列ではありません：{arg.strip()}")
     return idx
+
+
+def _same_rows_or_fail(match: "_Array", ret: "_Array") -> None:
+    """照合する範囲と取ってくる範囲が、同じ行を指しているか。
+
+    `XLOOKUP(A2, マスタ!$A$2:$A$10, マスタ!$B$3:$B$11)` は Excel では **1行ずれた値** を
+    返す（意図的にそう書く人はまずいない＝たいてい書き間違い）。参照列にすると
+    「品番で引いて、1つ下の行の品名」という式は表せないので、揃っていなければ断る。
+
+    どちらかが列まるごと（`$A:$A`）やテーブル参照なら、行の範囲という概念が無いので
+    比べない。
+    """
+    if match.first_row is None or ret.first_row is None:
+        return
+    if (match.first_row, match.last_row) != (ret.first_row, ret.last_row):
+        raise Untranslatable(
+            "照合する範囲と取ってくる範囲の行がずれています"
+            f"（{match.first_row}〜{match.last_row} と {ret.first_row}〜{ret.last_row}）"
+        )
 
 
 def _from_xlookup(
@@ -580,6 +741,14 @@ def _from_xlookup(
 ) -> LookupSpec:
     if len(args) < 3:
         raise Untranslatable("XLOOKUP の引数が足りません")
+    # 第4引数（見つからなかったときの値）。参照列はもともと「見つからなければ空」なので、
+    # 定数を入れているだけなら意味はほぼ変わらない。だが `XLOOKUP(…,…,…,XLOOKUP(…))`
+    # のように **別の探し方を書いている** ものを黙って捨てると、まるで違う列になる。
+    # `_strip_wrappers`（IFERROR）と同じ基準で断る。
+    if len(args) >= 4 and not _CONST_RE.fullmatch(args[3]):
+        raise Untranslatable(
+            "見つからなかったときの値に式が書かれています（定数以外は参照列にできません）"
+        )
     # 第5引数（一致モード）。0 = 完全一致。それ以外は意味が変わるので引き受けない。
     if len(args) >= 5 and not _is_exact_zero(args[4]):
         raise Untranslatable("完全一致（一致モード 0）以外の XLOOKUP は扱えません")
@@ -587,7 +756,7 @@ def _from_xlookup(
     if len(args) >= 6 and args[5].strip().startswith("-"):
         raise Untranslatable("末尾から探す XLOOKUP は扱えません")
 
-    local = _local_or_fail(args[0], data_row, index_by_name)
+    local = _local_or_fail(args[0], data_row, index_by_name, worksheet, tables)
     match = _parse_array(args[1], worksheet, tables)
     ret = _parse_array(args[2], worksheet, tables)
     if match is None or ret is None:
@@ -596,6 +765,7 @@ def _from_xlookup(
         raise Untranslatable("参照する範囲が1列ではありません")
     if match.worksheet != ret.worksheet:
         raise Untranslatable("照合する表と取得する表が別のワークシートです")
+    _same_rows_or_fail(match, ret)
     return LookupSpec(
         local_index=local,
         target_worksheet=match.worksheet,
@@ -620,7 +790,7 @@ def _from_vlookup(
     if not exact:
         raise Untranslatable("完全一致（第4引数 FALSE）以外の VLOOKUP は扱えません")
 
-    local = _local_or_fail(args[0], data_row, index_by_name)
+    local = _local_or_fail(args[0], data_row, index_by_name, worksheet, tables)
     area = _parse_array(args[1], worksheet, tables)
     if area is None:
         raise Untranslatable("参照する範囲を読み取れませんでした")
@@ -661,6 +831,7 @@ def translate_column(
     *,
     worksheet: str = "",
     tables: dict[str, TableDef] | None = None,
+    id_index: int | None = None,
 ) -> Translation:
     """1列ぶん。`formulas` は (ワークシート行番号, セルの生値) の並び。
 
@@ -685,7 +856,8 @@ def translate_column(
         try:
             exprs.add(
                 translate_formula(
-                    str(raw), row, names_by_index, worksheet=worksheet, tables=tables
+                    str(raw), row, names_by_index,
+                    worksheet=worksheet, tables=tables, id_index=id_index,
                 )
             )
         except Untranslatable as e:
@@ -700,7 +872,9 @@ def translate_column(
             expr=exprs.pop(), reason=None, sample=sample, formula_cells=len(cells)
         )
 
-    lookup, lookup_reason = _column_lookup(cells, names_by_index, worksheet, tables)
+    lookup, lookup_reason, has_lookup = _column_lookup(
+        cells, names_by_index, worksheet, tables
+    )
     return Translation(
         expr=None,
         # 参照列として読めたなら、数式列として落ちた話（「対応していない関数です：
@@ -710,7 +884,12 @@ def translate_column(
         sample=sample,
         formula_cells=len(cells),
         lookup=lookup,
+        has_lookup=has_lookup,
     )
+
+
+#: セルのどこかに XLOOKUP / VLOOKUP と書いてあるか。式全体の形は問わない。
+_LOOKUP_RE = re.compile(r"\b(X|V)LOOKUP\b", re.IGNORECASE)
 
 
 def _column_lookup(
@@ -718,18 +897,31 @@ def _column_lookup(
     names_by_index: dict[int, str],
     worksheet: str,
     tables: dict[str, TableDef] | None,
-) -> tuple[LookupSpec | None, str | None]:
-    """列全体が「同じ1つの参照」になるかどうか。(設定, 断った理由) を返す。
+) -> tuple[LookupSpec | None, str | None, bool]:
+    """列全体が「同じ1つの参照」になるかどうか。
 
-    **全部** の行が LOOKUP のときだけ引き受ける。掛け算の行と LOOKUP の行が混ざって
-    いる列は、そもそも1つの列定義にできない — そこで参照の話を持ち出すと、本当の理由
-    （行によって式が違う／対応していない関数）が見えなくなる。
+    (設定, 断った理由, LOOKUPを含むか) を返す。自動で分解できるのは **全部** の行が
+    「LOOKUP 1つだけ」で書かれているときだけ。それ以外は設定を作らないが、LOOKUP が
+    入っていること自体は3つめで必ず伝える — 画面はそれを見て「参照先を手で選ぶ」入口を
+    出す。ここで黙ってしまうと、利用者から見て「XLOOKUP なのに参照を選べない列がある」
+    という理由の分からない差になる（要望）。
+
+    断り文句は **実態に合わせる**。以前は分解に失敗した多くの場合で、数式列として落ちた
+    ときの理由「対応していない関数です：XLOOKUP」がそのまま出ていた。XLOOKUP を使った
+    本人にはまるで的外れなので、何が引っかかったのかをここで言い直す。
     """
-    looks_like = all(
-        re.search(r"\b(X|V)LOOKUP\b", str(v), re.IGNORECASE) for _row, v in cells
-    )
-    if not looks_like:
-        return None, None
+    hits = [bool(_LOOKUP_RE.search(str(v))) for _row, v in cells]
+    if not any(hits):
+        return None, None, False
+    if not all(hits):
+        # 掛け算の行と LOOKUP の行が混ざっている列。1つの列定義では表せないが、
+        # 参照列にしたいなら手で選べばよいので、入口は出す。
+        return (
+            None,
+            f"一部の行（{len(cells)}行中{sum(hits)}行）だけが XLOOKUP / VLOOKUP です。"
+            "行ごとに意味が違うので、自動では1つの参照にまとめられません",
+            True,
+        )
     specs: set[tuple] = set()
     spec: LookupSpec | None = None
     for row, raw in cells:
@@ -738,9 +930,17 @@ def _column_lookup(
                 str(raw), row, names_by_index, worksheet=worksheet, tables=tables
             )
         except NotALookup:
-            return None, None
+            # `=[@数量]*XLOOKUP(…)` / `=XLOOKUP(…)&"個"` のように、LOOKUP が式の
+            # 部品になっている。参照列は「引いてきた値をそのまま入れる」列なので、
+            # 前後の計算まで引き受けることはできない。
+            return (
+                None,
+                "XLOOKUP / VLOOKUP が式の一部として使われています"
+                "（引いた値をそのまま入れる式だけ、自動で参照にできます）",
+                True,
+            )
         except Untranslatable as e:
-            return None, str(e)
+            return None, str(e), True
         specs.add(
             (
                 spec.local_index,
@@ -752,5 +952,5 @@ def _column_lookup(
             )
         )
         if len(specs) > 1:
-            return None, "行によって参照先が違うため、1つの参照列にまとめられません"
-    return spec, None
+            return None, "行によって参照先が違うため、1つの参照列にまとめられません", True
+    return spec, None, True

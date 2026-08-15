@@ -475,13 +475,18 @@ function StepColumns({
                         pickedLookup={p.lookup}
                       />
                     )}
-                    {c?.formula?.lookup && (
+                    {/* 「参照先を選ぶ…」は XLOOKUP/VLOOKUP が **書いてある** 列すべてに
+                        出す。以前は読み取れた（＝分解できた）列だけに出していたので、
+                        `=[@数量]*XLOOKUP(…)` のような式の列ではボタンごと消え、
+                        利用者からは「選べる列と選べない列がある」としか見えなかった。
+                        読み取れなかった理由は FormulaNote とダイアログの上部に出す。 */}
+                    {c?.formula?.has_lookup && !isId && !reserved && (
                       <button
                         type="button"
                         onClick={() => setLookupFor(p.index)}
                         className="mt-0.5 text-[10.5px] text-[var(--green-d)] underline-offset-2 hover:underline"
                       >
-                        {p.lookup || c.formula.lookup.ready
+                        {p.lookup || c.formula.lookup?.ready
                           ? '⚙ 参照先を変える…'
                           : '⚙ 参照先を選ぶ…'}
                       </button>
@@ -591,6 +596,15 @@ function FormulaNote({
             {' → '}
             <code className="text-[var(--green-d)]">{formula.expr}</code>{' '}
             として計算し続けます。
+            {/* 一部の行だけ数式の列。列の型は1つなので、手入力の値は計算値で
+                上書きされる＝消える。目に見えている値が黙って消えるのがいちばん
+                気づけないので、件数を出して選び直せるようにする。 */}
+            {!formula.covers_all_rows && (
+              <span className="block text-[#8A5A1E]">
+                手で入力されている {formula.replaced_values} 行は、計算値に置き換わります
+                （元の値は取り込まれません）。値のまま入れるなら型を変えてください。
+              </span>
+            )}
           </>
         ) : (
           <> → いまの計算結果を値として取り込みます（元の列を直しても変わりません）。</>
@@ -598,10 +612,14 @@ function FormulaNote({
       </span>
     )
   }
+  // 自動では結びつかなかった列。**なぜ** を必ず出す — 理由が出ないと、参照になる列と
+  // ならない列の差が利用者から見て説明できない。LOOKUP が書いてある列なら、手で選べば
+  // 参照列にできることも併せて言う。
   return (
     <span className="mt-0.5 block text-[10.5px] leading-relaxed text-[#8A5A1E]">
       Excelの数式 <code>{formula.sample}</code>（{formula.cells}セル）は、この列の
-      {lk ? '参照' : '式'}にできません（{formula.reason}）。計算結果を値として取り込みます。
+      {formula.has_lookup ? '参照' : '式'}にできません（{formula.reason}）。計算結果を値として取り込みます。
+      {formula.has_lookup && '参照列にするなら、下の「参照先を選ぶ…」で指定してください。'}
     </span>
   )
 }
@@ -665,7 +683,22 @@ function StepPreview({
     .filter((n, i, all) => all.indexOf(n) !== i)
   if (dupNames.length) warnings.push(`列名が重複しています：${[...new Set(dupNames)].join('、')}`)
   if (chosen.some((c) => c.name === 'ID')) {
-    warnings.push('列名「ID」はID列の予約名です。別の名前に変えないとその列は取り込まれません。')
+    warnings.push(
+      '列名「ID」は、数式の中で「行のID」を指す名前と同じです。この列は取り込まれますが、' +
+        'ID列を参照する数式は作れません（別の名前にすると解消します）。',
+    )
+  }
+
+  // 数式列にすると手入力の値が計算値で上書きされる列。列一覧でも注記しているが、
+  // 「そのまま取り込める内容です」で終わらせないよう、確認画面にも出す。
+  for (const c of chosen) {
+    const f = byIndex.get(c.index)?.formula
+    if (c.type === 'formula' && f && !f.covers_all_rows && f.replaced_values > 0) {
+      warnings.push(
+        `「${c.name}」は一部の行だけが数式です。数式列にすると、手で入力されている ` +
+          `${f.replaced_values} 行が計算値に置き換わります（元の値は取り込まれません）。`,
+      )
+    }
   }
 
   const rows = dataPreview.slice(0, 8)
@@ -713,15 +746,23 @@ function StepPreview({
                 <td className="border-b border-r border-[var(--line)] px-2 py-1 text-[var(--ink2)]">
                   {idColumn === AUTO_ID ? '—' : (r.cells[idColumn] ?? '')}
                 </td>
-                {chosen.map((c) => (
-                  <td
-                    key={c.index}
-                    className="max-w-[180px] truncate border-b border-[var(--line)] px-2 py-1"
-                    title={r.cells[c.index] ?? ''}
-                  >
-                    {r.cells[c.index] ?? ''}
-                  </td>
-                ))}
+                {chosen.map((c) => {
+                  // 計算列は Excel の値を保存しない。ここに元の値を出すと、実際には
+                  // 消える値をプレビューが見せることになり、表と結果が食い違う。
+                  const computed = c.type === 'formula' || c.type === 'lookup'
+                  return (
+                    <td
+                      key={c.index}
+                      className={cn(
+                        'max-w-[180px] truncate border-b border-[var(--line)] px-2 py-1',
+                        computed && 'text-[var(--ink3)]',
+                      )}
+                      title={computed ? '取り込み後に自動計算されます' : (r.cells[c.index] ?? '')}
+                    >
+                      {computed ? '（自動計算）' : (r.cells[c.index] ?? '')}
+                    </td>
+                  )
+                })}
               </tr>
             ))}
           </tbody>

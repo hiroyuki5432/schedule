@@ -329,6 +329,18 @@ export interface ImportColumnInfo {
     expr: string | null
     reason: string | null
     sample: string | null
+    /** XLOOKUP / VLOOKUP と書いてある列か。`lookup`（＝キー列・照合列・取得列に
+     *  **分解できた** とき）とは別物で、分解できなくても立つ。
+     *
+     *  「参照先を選ぶ…」を出す条件はこちら。`lookup` を条件にすると、式の書き方
+     *  しだいでボタンが出たり出なかったりして、利用者からは理由の分からない差に
+     *  見える（要望: XLOOKUP も参照が選べるものと選べないものがある）。分解できな
+     *  かった理由は `reason` に入っている。 */
+    has_lookup: boolean
+    /** 列の全行が数式か。false = 一部の行は手入力の値。 */
+    covers_all_rows: boolean
+    /** 数式列にした場合に計算値で置き換わる（＝消える）手入力の行数。 */
+    replaced_values: number
     lookup?: ImportLookupInfo
   }
 }
@@ -337,7 +349,10 @@ export interface ImportColumnInfo {
  *
  *  `ready` means every piece resolved to something that exists in this app, so the
  *  column can be created as a 参照列. Otherwise `reason` says what is missing —
- *  usually that the master worksheet has not been imported yet. */
+ *  usually that the master worksheet has not been imported yet.
+ *
+ *  式の形が想定外で分解できなかった列には、そもそもこれが付かない（`has_lookup` だけ
+ *  立つ）。中途半端に空欄だらけの値を入れるより、無いほうが画面で扱いやすい。 */
 export interface ImportLookupInfo {
   /** 0-based Excel column this row's key comes from, and its header. */
   local_index: number

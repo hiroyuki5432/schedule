@@ -8,6 +8,11 @@
 // といった具合に、少しずつずれている。ずれた瞬間に参照列を作れなくなるのは不便なので、
 // **Excel がどう書いていたか** を見せたうえで、その場で選び直せるようにする。
 //
+// 名前のずれだけでなく、**式の形が想定外で自動では読み取れなかった** 列もここに来る
+// （要望: XLOOKUP も参照が選べるものと選べないものがある。なぜ？）。読み取れた分は初期値
+// として使い、読み取れなければ空のまま選んでもらう。分かっていない項目を「？」で埋めない
+// のが方針 — 読めているふりをすると、選び直す手がかりにならない。
+//
 // ここで選ぶのは「参照先」だけで、列を作るのは取り込みの実行時。列IDがまだ無いので、
 // このシート側のキーは列IDではなく **Excel の列位置** で持つ（サーバが作成後に結び直す）。
 import { useEffect, useState } from 'react'
@@ -22,7 +27,7 @@ import type { Column } from '@/types/api'
 type LookupPick = NonNullable<ImportColumnPick['lookup']>
 
 interface Props {
-  /** 設定する列（Excel の見出しと、読み取れた XLOOKUP の中身）。 */
+  /** 設定する列（Excel の見出し・数式と、読み取れていれば XLOOKUP の中身）。 */
   info: ImportColumnInfo
   /** キーに選べる、このシート側の列（Excel の列位置 → 見出し）。 */
   localOptions: { index: number; label: string }[]
@@ -44,8 +49,11 @@ export function LookupTargetDialog({ info, localOptions, value, onSave, onClose 
         ? String(lk.sheet_id)
         : '',
   )
-  const [localIndex, setLocalIndex] = useState<number>(
-    value?.local_index ?? lk?.local_index ?? (localOptions[0]?.index ?? -1),
+  // 読み取れなかった列では、キーを **既定で埋めない**。localOptions[0]（多くの場合ID列）
+  // を初期値にしていると、ID列で引くのが正しくないブックで、気づかないまま「この設定に
+  // する」を押せてしまう。空にしておけば必ず一度は目を通すことになる。
+  const [localIndex, setLocalIndex] = useState<number | null>(
+    value?.local_index ?? lk?.local_index ?? null,
   )
   const [matchId, setMatchId] = useState<string>(
     value?.match_key_column_id ?? lk?.match_key_column_id ?? '',
@@ -72,7 +80,7 @@ export function LookupTargetDialog({ info, localOptions, value, onSave, onClose 
     setReturnId((cur) => (cur ? cur : byName(lk?.return_column)))
   }, [sheetId, colsQ.data, lk?.match_column, lk?.return_column])
 
-  const ready = !!sheetId && !!matchId && !!returnId && localIndex >= -1
+  const ready = !!sheetId && !!matchId && !!returnId && localIndex !== null
   const localLabel =
     localOptions.find((o) => o.index === localIndex)?.label ?? '（未選択）'
   const nameOf = (id: string) =>
@@ -80,16 +88,32 @@ export function LookupTargetDialog({ info, localOptions, value, onSave, onClose 
 
   return (
     <Modal title={`「${info.header}」の参照先`} onClose={onClose} widthClass="w-[440px]">
-      {/* Excel 側が何と書いていたか。名前がずれているとき、どこを直せばいいかの手がかり。 */}
+      {/* Excel 側が何と書いていたか。名前がずれているとき、どこを直せばいいかの手がかり。
+          ただし式の形が想定外だと、読み取れているのは数式そのものだけ、ということがある
+          （`=[@数量]*XLOOKUP(…)`、一部の行だけ XLOOKUP、キーが `A2&B2` など）。その場合に
+          「「？」で照合し「？」を取得」と出すのは、読めているふりでしかない — 素の数式を
+          見せて「ここからは読み取れなかった」と言うほうが、次に何をすればいいか分かる。 */}
       <div className="mb-3 rounded-[10px] bg-[var(--line2)] px-3 py-2 text-[11px] leading-relaxed text-[var(--ink2)]">
         Excelの数式 <code className="text-[var(--ink)]">{info.formula?.sample}</code>
         <br />
-        ワークシート「{lk?.target_worksheet}」の「{lk?.match_column || '？'}」で照合し、「
-        {lk?.return_column || '？'}」を取得しています。
-        {lk && !lk.ready && (
-          <span className="mt-1 block text-[#8A5A1E]">
-            自動では結びつけられませんでした（{lk.reason}）。下で選んでください。
-          </span>
+        {lk && lk.target_worksheet && lk.match_column && lk.return_column ? (
+          <>
+            ワークシート「{lk.target_worksheet}」の「{lk.match_column}」で照合し、「
+            {lk.return_column}」を取得しています。
+            {!lk.ready && (
+              <span className="mt-1 block text-[#8A5A1E]">
+                自動では結びつけられませんでした（{lk.reason}）。下で選んでください。
+              </span>
+            )}
+          </>
+        ) : (
+          <>
+            {lk?.target_worksheet && <>ワークシート「{lk.target_worksheet}」を参照しています。</>}
+            <span className="mt-1 block text-[#8A5A1E]">
+              この数式からは、どの列で照合してどの列を取得するのかを読み取れませんでした
+              {info.formula?.reason ? `（${info.formula.reason}）` : ''}。下で選んでください。
+            </span>
+          </>
         )}
       </div>
 
@@ -98,9 +122,12 @@ export function LookupTargetDialog({ info, localOptions, value, onSave, onClose 
           このシートのキー（Excelのどの列で引くか）
           <Select
             className="mt-1 w-full"
-            value={String(localIndex)}
-            onChange={(e) => setLocalIndex(Number(e.target.value))}
+            value={localIndex === null ? '' : String(localIndex)}
+            onChange={(e) =>
+              setLocalIndex(e.target.value === '' ? null : Number(e.target.value))
+            }
           >
+            <option value="">（未選択）</option>
             {localOptions.map((o) => (
               <option key={o.index} value={o.index}>
                 {o.label}
@@ -169,7 +196,7 @@ export function LookupTargetDialog({ info, localOptions, value, onSave, onClose 
 
         {/* 選んだ内容を1行の日本語で読み返せるように。選び違いはここで気づく。 */}
         <div className="rounded-[10px] border border-[var(--line)] px-3 py-2 text-[11.5px] text-[var(--ink2)]">
-          {ready ? (
+          {ready && localIndex !== null ? (
             <>
               <span className="text-[var(--ink)]">{localLabel}</span> の値で「
               {sheets.find((s) => String(s.id) === sheetId)?.name}」の{' '}
@@ -177,7 +204,9 @@ export function LookupTargetDialog({ info, localOptions, value, onSave, onClose 
               <span className="text-[var(--ink)]">{nameOf(returnId)}</span> を表示します。
             </>
           ) : (
-            <span className="text-[var(--ink3)]">対象シートと2つの列を選んでください。</span>
+            <span className="text-[var(--ink3)]">
+              キーの列・対象シート・2つの対象列を選んでください。
+            </span>
           )}
         </div>
       </div>
@@ -190,14 +219,15 @@ export function LookupTargetDialog({ info, localOptions, value, onSave, onClose 
           type="button"
           size="sm"
           disabled={!ready}
-          onClick={() =>
+          onClick={() => {
+            if (localIndex === null) return
             onSave({
               sheet_id: Number(sheetId),
               local_index: localIndex,
               match_key_column_id: matchId,
               return_column_id: returnId,
             })
-          }
+          }}
         >
           この設定にする
         </Button>

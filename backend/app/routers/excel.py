@@ -1168,6 +1168,56 @@ def _parse_selection(raw: str) -> list[dict] | None:
     return out
 
 
+#: 列名の上限（Column.name）。ここで切られた名前で列が作られる。
+_NAME_MAX = 80
+
+
+def formula_names_by_index(
+    header: tuple, has_week_grid: bool, id_column: int, chosen: list[dict] | None
+) -> dict[int, str]:
+    """数式の中の A1 参照を置き換えるための「列位置 → **実際に作られる列名**」。
+
+    ここが式の正しさそのもの。載せてよいのは **本当にシートの列になる見出しだけ** で、
+    名前は **取り込み後に付く名前** でなければならない。ずれると、式は作られるのに
+    参照先の列が無く、その列は全行 `#「◯◯」という列がありません` になる。
+
+    実際に踏まれた食い違いは4つあった:
+
+    * ウィザードで列名を打ち直した（`単価` → `価格`）— 見出しの名前で式を組んでいた
+    * 取り込む列のチェックを外した — 列にならないのに参照していた
+    * 見出しが80字を超える — 列名は切り詰められるのに、式は元の長さで参照していた
+    * 見出しが重複している — 列は1本しか作られないのに、2つ目も参照できるつもりでいた
+
+    週次工数 / 進捗 / 先行タスク / マイルストン は「列」にならないので載せない。
+
+    **ID列だけは例外で、見出しの名前のまま載せる。** 列にはならないが、`=A2*2` や
+    `[@品番]` が「どの列を指しているか」を突き止めるのに要るため。式に出力するときは
+    `[ID]`（行のキー値）に翻訳される（:func:`xlsx_formula.translate_formula` の `emit`）
+    ので、ここに載っている名前がそのまま式に出ることはない。
+    """
+    picked = {it["index"]: it for it in (chosen or [])}
+    out: dict[int, str] = {}
+    taken: set[str] = set()
+    for idx, raw in enumerate(header):
+        head = _cell_text(raw)
+        if not head:
+            continue
+        if idx == id_column:
+            out[idx] = head          # 特定用（式には出ない）
+            continue
+        if _header_role(raw, has_week_grid) != "attr":
+            continue
+        if chosen is not None and idx not in picked:
+            continue          # 取り込まない列
+        name = ((picked.get(idx, {}).get("name") or head).strip())[:_NAME_MAX].strip()
+        # 先に出たほうが列になる（後から来た同名は作られない）ので、後勝ちにしない。
+        if not name or name in taken:
+            continue
+        taken.add(name)
+        out[idx] = name
+    return out
+
+
 def _clean_lookup(raw) -> dict | None:
     """ウィザードが返してきた参照先の指定を、使う4つだけに絞る。
 
@@ -1212,9 +1262,7 @@ def _default_selection(
     A column whose Excel cells are a translatable formula becomes a 数式列, and one
     holding a resolvable XLOOKUP/VLOOKUP becomes a 参照列 — keeping the calculation
     instead of the frozen values it happened to produce."""
-    names_by_index = {
-        i: _cell_text(raw) for i, raw in enumerate(header) if _cell_text(raw)
-    }
+    names_by_index = formula_names_by_index(header, has_week_grid, id_column, None)
     sel: list[dict] = []
     for idx, raw_name in enumerate(header):
         if idx == id_column or _is_blank(raw_name):
@@ -1230,6 +1278,7 @@ def _default_selection(
             formula = _column_formula(
                 formula_rows, idx, names_by_index,
                 worksheet=worksheet, tables=tables, resolve_lookup=resolve_lookup,
+                id_column=id_column,
             )
             resolved = (formula or {}).get("lookup")
             if formula and formula.get("expr"):
@@ -1341,15 +1390,15 @@ def new_sheet_column_info(
 
     A column whose formula is an XLOOKUP/VLOOKUP gets a `lookup` block instead: the
     sheet and columns it would point at, or the reason it cannot be wired up yet
-    (要望: XLOOKUP使ってたらうまくLOOKUPを自動生成してほしい)."""
+    (要望: XLOOKUP使ってたらうまくLOOKUPを自動生成してほしい). 式の形が想定外で分解
+    できなかった列には `lookup` が付かないが、`has_lookup` は必ず立つ — ウィザードは
+    それを見て「参照先を手で選ぶ」入口を出す（:func:`_column_formula`）。"""
     member_names = set(_members_by_name(db, user.org_id).keys())
     by_index = {it["index"]: it for it in (chosen or [])}
 
-    # 数式の中の A1 参照を列名に置き換えるための対応表。取り込む列だけを載せる
-    # （取り込まない列を参照している式は、翻訳しても値が出ないので弾く）。
-    names_by_index = {
-        idx: _cell_text(raw) for idx, raw in enumerate(header) if _cell_text(raw)
-    }
+    # 数式の中の A1 参照を置き換えるための対応表。**実際に作られる列名** で作る
+    # （:func:`formula_names_by_index`）。ここがずれると、参照先の無い式ができる。
+    names_by_index = formula_names_by_index(header, has_week_grid, id_column, chosen)
     resolve_lookup = (
         (
             lambda spec: _resolve_lookup(
@@ -1374,14 +1423,24 @@ def new_sheet_column_info(
         formula = _column_formula(
             formula_rows, idx, names_by_index,
             worksheet=worksheet, tables=tables, resolve_lookup=resolve_lookup,
+            id_column=id_column,
         )
         lookup = (formula or {}).get("lookup")
+        # 数式が入っているのが **一部の行だけ** の列。残りは手で打った値なので、数式列に
+        # すると計算値で上書きされて消える。列の型は1つしか持てない以上どちらかを捨てる
+        # しかないが、**捨てるほうを既定にはしない** — 目に見えて入っている値が黙って
+        # 消えるのが、いちばん気づけない壊れ方なので。
+        if formula:
+            formula["covers_all_rows"] = formula["cells"] >= len(data_rows)
+            formula["replaced_values"] = max(0, len(data_rows) - formula["cells"])
+        partial = bool(formula) and not formula["covers_all_rows"]
+
         # 翻訳できた列は、既定を「数式」／「参照」にする。ここが "いい感じ" の中身 —
         # 何もしなければ計算結果が焼き付いた文字列になり、元を直しても追従しない。
         if role == "attr" and not picked:
-            if formula and formula.get("expr"):
+            if formula and formula.get("expr") and not partial:
                 inferred = "formula"
-            elif lookup and lookup.get("ready"):
+            elif lookup and lookup.get("ready") and not partial:
                 inferred = "lookup"
 
         ctype = (picked or {}).get("type") or inferred
@@ -1425,15 +1484,23 @@ def _column_formula(
     worksheet: str = "",
     tables: dict | None = None,
     resolve_lookup=None,
+    id_column: int | None = None,
 ) -> dict | None:
     """この Excel 列が数式かどうかと、翻訳できるなら `[列名]` 式。数式が無ければ None。
 
     返す辞書はそのままウィザードに渡る:
-      cells   … 数式セルの数
-      expr    … 翻訳できた式（None なら翻訳不可）
-      reason  … 翻訳できなかった理由
-      sample  … 元の Excel 数式の例（画面に出して納得してもらうため）
-      lookup  … XLOOKUP/VLOOKUP を参照列に読み替えられたときの中身（:func:`_resolve_lookup`）
+      cells      … 数式セルの数
+      expr       … 翻訳できた式（None なら翻訳不可）
+      reason     … 翻訳できなかった理由
+      sample     … 元の Excel 数式の例（画面に出して納得してもらうため）
+      has_lookup … XLOOKUP/VLOOKUP が書いてあった列か（読み替えられたかとは別）
+      lookup     … 参照列に読み替えられたときの中身（:func:`_resolve_lookup`）
+
+    `has_lookup` と `lookup` を分けているのが肝。`lookup` は「キー列・照合列・取得列に
+    分解できた」ときにしか入らないので、これを入口の条件にすると、式の書き方しだいで
+    「参照先を選ぶ」ボタンが出たり出なかったりする（要望: XLOOKUP も参照が選べるものと
+    選べないものがある。なぜ？）。画面が入口を出す条件は `has_lookup` — 分解できた分は
+    初期値として使い、できなければ理由を見せて手で選んでもらう。
 
     `resolve_lookup` は「Excel の言葉で書かれた参照先」をアプリのシート／列に結びつける
     関数。DB を見る必要があるので呼び出し側から渡してもらう。
@@ -1442,7 +1509,10 @@ def _column_formula(
         return None
     cells = [(row, xlsx.cell_at(r, idx)) for row, r in formula_rows]
     tr = xlsx_formula.translate_column(
-        cells, names_by_index, worksheet=worksheet, tables=tables
+        cells, names_by_index, worksheet=worksheet, tables=tables,
+        # ID列は「シートの列」にならず行のID（key_value）になるので、それを指す式は
+        # 列名ではなく `[ID]` に翻訳させる。
+        id_index=id_column if (id_column is not None and id_column >= 0) else None,
     )
     if tr.formula_cells == 0:
         return None
@@ -1451,6 +1521,7 @@ def _column_formula(
         "expr": tr.expr,
         "reason": tr.reason,
         "sample": tr.sample,
+        "has_lookup": tr.has_lookup,
     }
     if tr.lookup is not None and resolve_lookup is not None:
         resolved = resolve_lookup(tr.lookup)
@@ -1518,11 +1589,25 @@ def _resolve_lookup(
         if sheet is not None and sheet.org_id != user.org_id:
             sheet = None
     if sheet is None:
-        sheet = db.execute(
-            select(Sheet).where(
-                Sheet.org_id == user.org_id, Sheet.name == spec.target_worksheet
+        # 同じ名前のシートは作れてしまう。1本に絞れないなら **どれかを黙って選ばない** —
+        # 画面には「マスタ」としか出ないので、どちらに繋がったのか利用者には区別が
+        # つかないし、並び順の保証も無いので同じファイルを流し直すと別のシートを指す
+        # 参照列ができうる。名前で決められないものは、手で選んでもらう。
+        same_name = list(
+            db.execute(
+                select(Sheet)
+                .where(Sheet.org_id == user.org_id, Sheet.name == spec.target_worksheet)
+                .order_by(Sheet.id)
+                .limit(2)
+            ).scalars()
+        )
+        if len(same_name) > 1:
+            out["reason"] = (
+                f"「{spec.target_worksheet}」という名前のシートが複数あります"
+                "（どれを参照するか選んでください）"
             )
-        ).scalars().first()
+            return out
+        sheet = same_name[0] if same_name else None
     if sheet is None:
         out["reason"] = (
             f"参照先の「{spec.target_worksheet}」に当たるシートがまだありません"
@@ -1551,10 +1636,20 @@ def _resolve_lookup(
     # ので、名前で探しても見つからない。XLOOKUP がマスタを引くときに照合するのは
     # たいていその列なので、ここを拾えないと「参照先の列がありません」ばかりになる。
     #
-    # どの列を ID にしたかは取り込み設定に残っている。残っていなければ、取り込みの既定
-    # （先頭列）を採る — 実際にその設定で取り込まれたはずなので。
+    # ただし **どの列を ID にしたかは推測してはいけない**。以前は「取り込み設定に記録が
+    # 無ければ先頭列」と決めつけていたが、単発の取り込みウィザードは設定を保存しないので、
+    # これは例外ではなく常用経路だった。2列目を ID 列にして取り込んだマスタでは、Excel が
+    # 「社内メモで照合」と書いているのに「品番の行IDと照合」する参照列を、警告も出さずに
+    # `ready` で作ってしまう。
+    #
+    # そこで **値で確かめる**。行の key_value と、そのワークシート列の値が本当に重なって
+    # いるなら、その列が ID になったと言い切れる。重ならなければ諦めて、手で選んでもらう。
     id_index = preset.id_column if preset is not None else 0
     id_header = target_headers.get(id_index, "") if id_index >= 0 else ""
+    if id_header and not _column_became_the_id(
+        db, sheet, wb, spec.target_worksheet, preset.header_row if preset else 0, id_index
+    ):
+        id_header = ""
 
     cols = list(
         db.execute(select(Column).where(Column.sheet_id == sheet.id)).scalars()
@@ -1583,6 +1678,38 @@ def _resolve_lookup(
         return out
     out["ready"] = True
     return out
+
+
+#: 「その列が行IDになった」と言い切るのに要る重なりの割合。
+#: 取り込み後に行を足したり消したりしているのが普通なので、完全一致は求めない。
+_ID_MATCH_RATIO = 0.5
+
+
+def _column_became_the_id(
+    db: Session, sheet: Sheet, wb, worksheet: str, header_row: int, index: int
+) -> bool:
+    """ワークシートの `index` 列が、`sheet` の行ID（key_value）になっているか。
+
+    見出しの名前だけでは分からない（どの列を ID 列にして取り込んだかは記録が無いことも
+    ある）ので、**実際の値が重なっているか** で判断する。取り込んだあとに行を足したり
+    消したりしているのが普通なので、半分以上重なっていれば同じ列とみなす。
+
+    重ならなければ False。呼び出し側は「参照先の列が見つからない」として、手で選ぶ道に
+    落とす — 当てずっぽうで行IDに結びつけて、黙って違う列で照合するよりずっとよい。
+    """
+    values = xlsx.worksheet_column_values(wb, worksheet, header_row, index)
+    if not values:
+        return False
+    keys = set(
+        db.execute(
+            select(Row.key_value).where(Row.sheet_id == sheet.id).limit(xlsx.SCAN_ROWS)
+        ).scalars()
+    )
+    keys.discard(None)
+    keys.discard("")
+    if not keys:
+        return False
+    return len(keys & values) >= len(keys) * _ID_MATCH_RATIO
 
 
 def id_column_counts(data_rows: list[tuple], id_column: int) -> dict:
@@ -1694,9 +1821,7 @@ def create_sheet_with_selection(
 
     member_names = set(_members_by_name(db, user.org_id).keys())
     if selection is None:
-        names_by_index = {
-            i: _cell_text(raw) for i, raw in enumerate(header) if _cell_text(raw)
-        }
+        names_by_index = formula_names_by_index(header, has_week_grid, id_column, None)
         selection = _default_selection(
             header, data_rows, id_column, has_week_grid, member_names, formula_rows,
             worksheet=worksheet_title,
@@ -1748,6 +1873,17 @@ def create_sheet_with_selection(
     # 参照列は「同じシートのキー列」を指すので、その列が出来てからでないと設定を書けない。
     # 場所（order）だけ先に取っておいて、本体は下の2周目で作る。
     pending_lookups: list[tuple[dict, int]] = []
+    # この取り込みで **本当に出来る列名**。式の検算に使う。
+    # `expr` は画面から送り返されてくる値なので、こちら側でも必ず確かめる — 画面で列名を
+    # 打ち直したあと、古い名前のままの式が届く、という食い違いが実際に起きていた。
+    will_exist = set(existing_names)
+    for it in kept:
+        role = _header_role(header[it["index"]], has_week_grid)
+        if role not in ("week", "progress", "deps"):
+            will_exist.add(it["label"])
+    if id_column >= 0:
+        will_exist.add(xlsx_formula.ID_REF)   # `[ID]` は行のキー値
+
     for it in kept:
         idx, nm = it["index"], it["label"]
         role = _header_role(header[idx], has_week_grid)
@@ -1758,7 +1894,14 @@ def create_sheet_with_selection(
         # 計算列（数式・参照）は「取り込める型」の一覧には入らない（値を保存しないので）が、
         # 選択としては正当。中身が空なら普通の推定に落とす — 式や参照先の無い計算列は
         # 永久に空欄になるだけなので。
-        wants_formula = it["type"] == "formula" and bool(it.get("expr"))
+        #
+        # 式が「作られない列」を指しているときも同じ扱い（値として取り込む）。読めない式で
+        # 列を作ると、その列は全行エラー表示になり、元の Excel にあった値まで失う。
+        wants_formula = (
+            it["type"] == "formula"
+            and bool(it.get("expr"))
+            and xlsx_formula.expr_refs(it["expr"]) <= will_exist
+        )
         wants_lookup = it["type"] == "lookup" and bool(it.get("lookup"))
         if wants_lookup:
             existing_names.add(nm)

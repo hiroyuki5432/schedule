@@ -106,6 +106,36 @@ def test_column_where_rows_disagree():
     assert "行によって式が違う" in (got.reason or "")
 
 
+# --------------------------------------------------------------------------- #
+# 「黙って違う式になる」たぐいの回帰（検証で見つかったもの）
+# --------------------------------------------------------------------------- #
+def test_string_literals_are_left_alone():
+    """`_xlfn.` / `@` を外す処理が、文字列の中まで書き換えていた。
+
+    `=B2&"@example.com"` が `[単価]&"example.com"` になり、メールアドレスを組み立てる
+    列が黙って壊れていた。しかも画面に出す「元の Excel 数式」も壊れた姿だったので、
+    利用者が気づく手立てが無かった。
+    """
+    from app.xlsx_formula import strip_excel_internals
+
+    assert strip_excel_internals('=C2&"@example.com"') == '=C2&"@example.com"'
+    assert strip_excel_internals('=IF(C2="_xlfn.X",1,2)') == '=IF(C2="_xlfn.X",1,2)'
+    # 式の側の目印はこれまでどおり外れる。
+    assert strip_excel_internals("=_xlfn.XLOOKUP(A2,B:B,C:C)") == "=XLOOKUP(A2,B:B,C:C)"
+    assert tr('=C2&"@example.com"') == '[単価]&"@example.com"'
+
+
+def test_a_column_name_with_brackets_is_refused():
+    """見出し `数量[個]` — `lib/formula.ts` は `[` を最初の `]` で閉じるので式にできない。
+
+    以前は `[数量[個]]*100` という読めない式のまま列を作っていた（バックエンドは式を
+    検証していない）ので、全セルがエラー表示になっていた。
+    """
+    with pytest.raises(Untranslatable) as e:
+        translate_formula("=C2*100", 2, {0: "ID", 2: "数量[個]"})
+    assert "[ ]" in str(e.value)
+
+
 def test_column_stops_at_the_first_untranslatable_row():
     got = translate_column([(2, "=C2*D2"), (3, "=SUMIF(A:A,C3,D:D)")], NAMES)
     assert got.expr is None
@@ -114,11 +144,30 @@ def test_column_stops_at_the_first_untranslatable_row():
 
 
 def test_a_mixed_column_is_not_pulled_into_a_lookup():
-    """掛け算の行と LOOKUP の行が混ざった列は、参照列の話にしない。
+    """掛け算の行と LOOKUP の行が混ざった列は、参照列として自動生成はしない。
 
-    ここで「XLOOKUP の形ではありません」と言い出すと、本当の理由（1つの列定義に
-    まとめられない）が画面から消えてしまう。
+    仕様変更（要望: XLOOKUP も参照が選べるものと選べないものがある。なぜ？）:
+    以前はここで「対応していない関数です：VLOOKUP」— 数式列として落ちたときの理由 —
+    をそのまま出していた。VLOOKUP を書いた本人には的外れなうえ、`has_lookup` が
+    立たないので画面から「参照先を選ぶ…」も消え、理由の分からない差になっていた。
+    いまは実態（一部の行だけ LOOKUP）を返し、手で参照先を選ぶ道は残す。
     """
     got = translate_column([(2, "=C2*D2"), (3, "=VLOOKUP(C3,A:B,2,0)")], NAMES)
     assert got.expr is None and got.lookup is None
-    assert "対応していない関数" in (got.reason or "")
+    assert got.has_lookup is True
+    assert "一部の行" in (got.reason or "")
+
+
+def test_a_lookup_used_as_part_of_an_expression_keeps_the_entry_point():
+    """`=[@数量]*XLOOKUP(…)` — LOOKUP 1つで出来た式ではないが、LOOKUP ではある。"""
+    got = translate_column(
+        [(2, "=D2*VLOOKUP(C2,A:B,2,0)"), (3, "=D3*VLOOKUP(C3,A:B,2,0)")], NAMES
+    )
+    assert got.expr is None and got.lookup is None
+    assert got.has_lookup is True
+    assert "式の一部" in (got.reason or "")
+
+
+def test_a_plain_formula_column_reports_no_lookup():
+    got = translate_column([(2, "=C2*D2"), (3, "=C3*D3")], NAMES)
+    assert got.has_lookup is False

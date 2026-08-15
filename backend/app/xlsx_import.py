@@ -311,3 +311,29 @@ def worksheet_header_names(wb, sheet_name: str, header_row: int = 0) -> dict[int
         return {}
     hr = header_row if 0 < header_row <= len(rows) else auto_header_row(rows)
     return {i: cell_text(v) for i, v in enumerate(rows[hr - 1]) if cell_text(v)}
+
+
+def worksheet_column_values(
+    wb, sheet_name: str, header_row: int, index: int, limit: int = SCAN_ROWS
+) -> set[str]:
+    """**別の** ワークシートの、1列ぶんの値（見出し行より下）。
+
+    「この列が、取り込み先シートの行ID になっているか」を **値で確かめる** ために使う。
+    見出しの名前だけでは、どの列を ID 列にして取り込んだのかは分からない。
+    """
+    try:
+        ws = pick_worksheet(wb, sheet_name)
+    except HTTPException:
+        return set()
+    if index < 0:
+        return set()
+    hr = header_row if header_row > 0 else 1
+    out: set[str] = set()
+    for row in ws.iter_rows(
+        min_row=hr + 1, max_row=hr + limit, min_col=index + 1, max_col=index + 1,
+        values_only=True,
+    ):
+        text = cell_text(row[0]) if row else ""
+        if text:
+            out.add(text)
+    return out

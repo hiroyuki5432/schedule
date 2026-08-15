@@ -4,11 +4,12 @@
 
 ## 0. まず読む順
 1. このファイル（全体像・運用の落とし穴）
-2. [SPEC.md](SPEC.md) — ドメイン仕様の正本（設計判断の経緯）
-3. [STATUS.md](STATUS.md) — 実装チェックリスト（done/残）
-4. [docs/API.md](docs/API.md) — REST 契約
-5. [mockup/schedule.html](mockup/schedule.html) — デザイン基準（単体HTML）
-6. [DEPLOY.md](DEPLOY.md) — 本番デプロイ（GitHub Actions → GHCR → EC2/Compose、host nginxでHTTPS終端）
+2. [CLAUDE.md](CLAUDE.md) — 触る前のチェックリスト（テストの走らせ方・Excel取り込みで実際に壊した13件）
+3. [SPEC.md](SPEC.md) — ドメイン仕様の正本（設計判断の経緯）
+4. [STATUS.md](STATUS.md) — 実装チェックリスト（done/残）
+5. [docs/API.md](docs/API.md) — REST 契約
+6. [mockup/schedule.html](mockup/schedule.html) — デザイン基準（単体HTML）
+7. [DEPLOY.md](DEPLOY.md) — 本番デプロイ（GitHub Actions → GHCR → EC2/Compose、host nginxでHTTPS終端）
 
 ## 1. 何のアプリか
 単一組織・小規模チーム向けの「スケジュール＆工数管理」Web アプリ。
