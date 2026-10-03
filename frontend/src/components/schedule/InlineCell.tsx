@@ -407,6 +407,10 @@ function SelectCell({
         className,
       )}
       onBlur={() => setEditing(false)}
+      // Esc で選ばずに閉じる（範囲のコピー・貼り付けの後も、これで閉じる）。
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') setEditing(false)
+      }}
       onChange={(e) => {
         setEditing(false)
         onSave(e.target.value)

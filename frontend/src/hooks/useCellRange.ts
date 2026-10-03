@@ -70,6 +70,30 @@ export interface CellRangeOptions {
 
 const cellAttr = (rowId: string, colKey: string) => `${rowId}|${colKey}`
 
+/** コピー・貼り付けを受けた要素が何か。
+ *  - 'text'   … 文字を選んで編集できる入力欄（文字・数値・ID・複数行）
+ *  - 'opaque' … 文字を選べない編集欄（プルダウンの select・日付の input）
+ *  - 'none'   … 編集欄ではない（選択中のセル・入れ物） */
+function editorKind(t: EventTarget | null): 'text' | 'opaque' | 'none' {
+  const el = t as HTMLElement | null
+  if (!el || !el.tagName) return 'none'
+  if (el.tagName === 'SELECT') return 'opaque'
+  if (el.tagName === 'INPUT') {
+    const type = (el as HTMLInputElement).type
+    return type === 'date' || type === 'datetime-local' || type === 'month' ? 'opaque' : 'text'
+  }
+  if (el.tagName === 'TEXTAREA' || el.isContentEditable) return 'text'
+  return 'none'
+}
+
+/** 開いている編集欄を、値を確定せずに閉じる（セルとしてコピー・貼り付けした後）。
+ *  Esc（＝取消。入力欄は閉じるときに古い値で上書き保存しない。select は選んだ時点で
+ *  保存する作りなので閉じるだけ）。select は念のため blur も。 */
+function closeEditor(el: HTMLElement) {
+  el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  if (el.tagName === 'SELECT') el.blur()
+}
+
 function isEditableTarget(t: EventTarget | null): boolean {
   const el = t as HTMLElement | null
   if (!el || !el.tagName) return false
@@ -472,8 +496,12 @@ export function useCellRange(o: CellRangeOptions) {
     const r = rectRef.current
     const o2 = optsRef.current
     if (!r || !o2.enabled) return false
-    // 入力欄の中で文字を選んでいるなら、その文字のコピー（ブラウザに任せる）。
-    if (isEditableTarget(e.target)) return false
+    // 文字の入力欄の中なら、その文字のコピー（ブラウザに任せる）。プルダウン・日付の
+    // 編集欄は文字を選べないので、セルのコピーとして扱う（クリックすると編集欄が
+    // 開く作りなので、ここで拾わないと「担当や日付はコピーできない」ことになる）。
+    const kind = editorKind(e.target)
+    if (kind === 'text') return false
+    if (kind === 'opaque') closeEditor(e.target as HTMLElement)
     const m: string[][] = []
     for (let ri = r.r0; ri <= r.r1; ri++) {
       const line: string[] = []
@@ -493,13 +521,18 @@ export function useCellRange(o: CellRangeOptions) {
       const o2 = optsRef.current
       if (!r || !o2.enabled) return false
       const target = e.target as HTMLElement | null
-      // 文字の入力欄（編集中）への貼り付けはブラウザに任せる。プルダウンの <select> は
-      // 文字を受け取れないので、セルへの貼り付けとして扱う。
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return false
       const text = e.clipboardData.getData('text/plain')
       if (!text) return false
-      e.preventDefault()
       const matrix = parseTsv(text)
+      // 文字の入力欄（編集中）に1つの値を貼るのは、文字の編集なのでブラウザに任せる。
+      // ただし Excel から複数セルを貼ったときは、編集中のセルを起点にした範囲の貼り付け
+      // にする（1セルにタブ入りの文字が入っても意味が無い）。プルダウン・日付の編集欄は
+      // 文字を受け取れないので、いつでもセルへの貼り付け。
+      const kind = editorKind(target)
+      const multi = matrix.length > 1 || (matrix[0]?.length ?? 0) > 1
+      if (kind === 'text' && (!multi || target?.tagName === 'TEXTAREA')) return false
+      e.preventDefault()
+      if (kind !== 'none' && target) closeEditor(target)
       if (matrix.length === 0) return true
       // 1セルを広い範囲に貼ると、範囲の全部に入る（Excel と同じ）。
       const single = matrix.length === 1 && matrix[0].length === 1
