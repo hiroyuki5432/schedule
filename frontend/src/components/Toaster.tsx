@@ -30,6 +30,17 @@ export function Toaster() {
           )}
         >
           <span className="min-w-0 flex-1 leading-snug">{t.message}</span>
+          {t.action && (
+            <button
+              onClick={() => {
+                toast.dismiss(t.id)
+                t.action!.onClick()
+              }}
+              className="flex-shrink-0 rounded-[7px] border border-current px-2 py-0.5 text-[12px] font-medium hover:bg-black/5"
+            >
+              {t.action.label}
+            </button>
+          )}
           <button
             onClick={() => toast.dismiss(t.id)}
             className="flex-shrink-0 opacity-60 hover:opacity-100"

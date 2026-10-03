@@ -1,4 +1,5 @@
 // Small fetch wrapper. All requests send the session cookie.
+import { CLIENT_ID } from '@/lib/clientId'
 
 export class ApiError extends Error {
   status: number
@@ -22,7 +23,11 @@ async function request<T>(
   const res = await fetch(path, {
     method,
     credentials: 'include',
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    // X-Client-Id: リアルタイム更新で「自分の画面の変更」を見分けるため（lib/clientId）。
+    headers:
+      body !== undefined
+        ? { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID }
+        : { 'X-Client-Id': CLIENT_ID },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
 

@@ -2,11 +2,10 @@
 // Each cell is editable per column type via InlineCell (text/number/date inputs,
 // dropdown/member selects, lookup read-only, status badge computed). Add row.
 import { memo, useCallback, useMemo, useRef, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import * as api from '@/api/client'
 import { useMembers } from '@/hooks/useSheets'
-import { useRowMutation } from '@/hooks/useRowMutation'
 import { useComputedValues } from '@/hooks/useComputedValues'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/Card'
@@ -29,7 +28,22 @@ import { ExpandIcon, PlusIcon, TrashIcon } from '@/components/ui/icons'
 import { ContextMenu } from '@/components/ui/ContextMenu'
 import { ColumnSettingsModal } from '@/components/settings/ColumnSettingsModal'
 import type { MenuAnchor, MenuItem } from '@/components/ui/ContextMenu'
-import type { CellValue, Column, Member, Milestone, Row } from '@/types/api'
+import { NoteEditor, NoteMark, noteHoverProps, noteTip, useSheetNotes } from '@/components/CellNotes'
+import { TrashDialog, restoreTrashEntry } from '@/components/TrashDialog'
+import { TrashButton, UndoRedoButtons } from '@/components/UndoRedoButtons'
+import { useCellRange, selectionStyle } from '@/hooks/useCellRange'
+import { FillHandle } from '@/components/FillHandle'
+import type { CellEdit } from '@/hooks/useCellRange'
+import { useApplyCellEdits } from '@/hooks/useCellEdits'
+import { useUndo, useUndoHotkeys } from '@/hooks/useUndo'
+import type { UndoDirection } from '@/hooks/useUndo'
+import { ID_CELL, parseCellText } from '@/lib/cellRange'
+import type { CellNote, CellValue, Column, Member, Milestone, Row } from '@/types/api'
+
+/** 取り消しの1件（テーブル）。行オブジェクトではなくデータだけを持つ。 */
+type TableUndoEntry =
+  | { label: string; kind: 'cells'; edits: CellEdit[] }
+  | { label: string; kind: 'delete'; trashId: number; rowIds: string[] }
 
 interface Props {
   sheetId: string
@@ -105,11 +119,26 @@ function measureValue(
   return v == null ? '' : String(v).split('\n')[0]
 }
 
+/** コピーするときの文字（画面に見えているとおり。複数行の文字は全文）。 */
+function copyText(
+  c: Column,
+  row: Row,
+  members: Member[],
+  computedValue: (column: Column, row: Row) => string | null,
+): string {
+  if (c.type === 'member') {
+    const id = row.data[c.id]
+    return members.find((m) => String(m.id) === String(id ?? ''))?.name ?? ''
+  }
+  if (isComputed(c)) return computedValue(c, row) ?? ''
+  const v = row.data[c.id]
+  return v == null ? '' : String(v)
+}
+
 export function TableSheetView({ sheetId, sheetName }: Props) {
   const qc = useQueryClient()
   const membersQ = useMembers()
   const members = useMemo(() => membersQ.data ?? [], [membersQ.data])
-  const rowMut = useRowMutation(sheetId)
 
   const detailQ = useQuery({
     queryKey: ['sheet', sheetId],
@@ -236,11 +265,16 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
 
   const anyColFilter = Object.keys(colFilters).length > 0
   const q = search.trim().toLowerCase()
+  // 追加・挿入したばかりの行は空なので、絞り込み中だと作った瞬間に消えてしまう。
+  // このセッションで作った行だけは絞り込みに関係なく出す（スケジュールと同じ）。
+  const [newRowIds, setNewRowIds] = useState<string[]>([])
+  const keptNew = useMemo(() => new Set(newRowIds), [newRowIds])
   const filteredRows = useMemo(() => {
     if (!anyColFilter && !q) return rows
     const colById = new Map(columns.map((c) => [String(c.id), c]))
     const entries = Object.entries(colFilters)
     return rows.filter((r) => {
+      if (keptNew.has(String(r.id))) return true
       for (const [colId, f] of entries) {
         const col = colById.get(String(colId))
         if (col && !matchColFilter(f, resolveColValue(r, col))) return false
@@ -253,7 +287,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
       }
       return true
     })
-  }, [rows, columns, colFilters, anyColFilter, q, resolveColValue])
+  }, [rows, columns, colFilters, anyColFilter, q, resolveColValue, keptNew])
 
   const sortedRows = useMemo(() => {
     if (!sort) return filteredRows
@@ -331,56 +365,138 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
   const isPinned = (i: number) => i < pinnedCount
   const lastPinnedAttr = pinnedCount - 1
 
-  function addRow() {
-    api
-      .createRow(sheetId, { data: {} })
-      .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
-      .catch(() => {
-        /* TODO: toast on failure */
-      })
-  }
+  /** 行を追加する。anchor を渡すと、その行の上／下に挿入する（要望: 行の挿入）。 */
+  const addRow = useCallback(
+    (at?: { rowId: string; where: 'above' | 'below' }) => {
+      api
+        .createRow(sheetId, {
+          data: {},
+          ...(at?.where === 'above' ? { insert_before_id: at.rowId } : {}),
+          ...(at?.where === 'below' ? { insert_after_id: at.rowId } : {}),
+        })
+        .then((r) => {
+          setNewRowIds((prev) => [...prev, String(r.id)])
+          return qc.invalidateQueries({ queryKey: ['sheet', sheetId] })
+        })
+        .catch((e) =>
+          toast.show(`行を追加できませんでした：${e instanceof Error ? e.message : ''}`, 'error'),
+        )
+    },
+    [qc, sheetId],
+  )
 
-  // Row callbacks are handed to a memoized row component, so they must keep a
-  // stable identity — otherwise every row re-renders on every parent render and
-  // the memo buys nothing. The mutation object changes identity between renders,
-  // so it is reached through a ref.
-  const rowMutRef = useRef(rowMut)
-  rowMutRef.current = rowMut
+  // ---- 書き込み（取り消しつき） ------------------------------------------------
+  const applyEdits = useApplyCellEdits(sheetId)
+  const rowsRef = useRef(rows)
+  rowsRef.current = rows
 
-  const saveCell = useCallback((row: Row, colId: string, value: CellValue) => {
-    rowMutRef.current.mutate({ row, patch: { [colId]: value } })
-  }, [])
+  const deleteRowsNow = useCallback(
+    async (ids: string[]): Promise<number | null> => {
+      try {
+        const res = await api.bulkDeleteRows(ids)
+        await qc.invalidateQueries({ queryKey: ['sheet', sheetId] })
+        void qc.invalidateQueries({ queryKey: ['trash', sheetId] })
+        return res.trash_id
+      } catch {
+        toast.show('削除できませんでした', 'error')
+        return null
+      }
+    },
+    [qc, sheetId],
+  )
+
+  const applyUndoEntry = useCallback(
+    (entry: TableUndoEntry, dir: UndoDirection) => {
+      if (entry.kind === 'cells') {
+        void applyEdits(entry.edits, dir === 'undo' ? 'before' : 'after')
+        return
+      }
+      if (dir === 'undo') {
+        void restoreTrashEntry(qc, sheetId, entry.trashId)
+      } else {
+        // やり直し = もう一度消す。新しいゴミ箱の番号を覚え直す（次の取り消し用）。
+        void deleteRowsNow(entry.rowIds).then((tid) => {
+          if (tid != null) entry.trashId = tid
+        })
+      }
+    },
+    [applyEdits, qc, sheetId, deleteRowsNow],
+  )
+  const undo = useUndo<TableUndoEntry>(applyUndoEntry, sheetId)
+  const doUndo = useCallback(() => {
+    const e = undo.undo()
+    toast.show(e ? `「${e.label}」を元に戻しました` : '元に戻せる操作はありません', e ? 'success' : 'info', 2500)
+  }, [undo])
+  const doRedo = useCallback(() => {
+    const e = undo.redo()
+    toast.show(e ? `「${e.label}」をやり直しました` : 'やり直せる操作はありません', e ? 'success' : 'info', 2500)
+  }, [undo])
+  useUndoHotkeys(doUndo, doRedo)
+  const undoRef = useRef(undo)
+  undoRef.current = undo
+
+  /** 範囲の書き込み（貼り付け・消去・フィル）と1セルの編集の共通の入口。 */
+  const writeEdits = useCallback(
+    (edits: CellEdit[], label: string) => {
+      if (edits.length === 0) return
+      undoRef.current.push({ kind: 'cells', label, edits })
+      void applyEdits(edits, 'after')
+    },
+    [applyEdits],
+  )
+
+  const saveCell = useCallback(
+    (row: Row, colId: string, value: CellValue) => {
+      const before = row.data[colId] ?? null
+      if (before === value) return
+      const col = columns.find((c) => String(c.id) === String(colId))
+      writeEdits([{ rowId: String(row.id), colKey: String(colId), before, after: value }], col?.name ?? '項目の変更')
+    },
+    [columns, writeEdits],
+  )
 
   const saveKey = useCallback(
     (row: Row, key: string) => {
-      api
-        .updateRow(row.id, { data: row.data, version: row.version, key_value: key })
-        .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
-        .catch(() => {
-          /* TODO: toast on failure (e.g. duplicate ID) */
-        })
+      if (key === row.key_value) return
+      writeEdits([{ rowId: String(row.id), colKey: ID_CELL, before: row.key_value, after: key }], 'IDの変更')
     },
-    [qc, sheetId],
+    [writeEdits],
   )
 
-  const deleteRow = useCallback(
-    (row: Row) => {
-      if (!confirm(`行「${row.key_value}」を削除しますか？`)) return
-      api
-        .deleteRow(row.id)
-        .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
-        .catch(() => {
-          /* TODO: toast on failure */
-        })
+  /** 行を消す。ゴミ箱に入るので、トーストの「元に戻す」か Ctrl+Z で戻せる。 */
+  const removeRows = useCallback(
+    async (ids: string[]) => {
+      if (ids.length === 0) return
+      const keys = ids
+        .map((id) => rowsRef.current.find((r) => String(r.id) === id)?.key_value)
+        .filter(Boolean)
+      // 確認は大量のときだけ（戻せるので、1行ずつ確認させない — Excel も確認しない）。
+      if (ids.length >= 10 && !confirm(`選択した ${ids.length} 行を削除しますか？（「削除した行」から元に戻せます）`))
+        return
+      const tid = await deleteRowsNow(ids)
+      if (tid == null) return
+      setSelected(new Set())
+      const label = ids.length === 1 ? `行「${keys[0] ?? ''}」の削除` : `${ids.length} 行の削除`
+      undoRef.current.push({ kind: 'delete', label, trashId: tid, rowIds: ids })
+      toast.show(
+        ids.length === 1 ? `行「${keys[0] ?? ''}」を削除しました` : `${ids.length} 行を削除しました`,
+        'success',
+        8000,
+        { label: '元に戻す', onClick: () => doUndo() },
+      )
     },
-    [qc, sheetId],
+    [deleteRowsNow, doUndo],
   )
+
+  const deleteRow = useCallback((row: Row) => void removeRows([String(row.id)]), [removeRows])
 
   // ---- Selection + right-click (要望: まとめて選択して削除 / 右クリックで行削除) ----
   const [selected, setSelected] = useState<Set<string>>(new Set())
   // Shift+クリックで「前に押した行から今の行まで」を選ぶための起点。
   const lastClickedRef = useRef<string | null>(null)
-  const [menu, setMenu] = useState<{ at: MenuAnchor; rowId: string } | null>(null)
+  const [menu, setMenu] = useState<{ at: MenuAnchor; rowId: string; colKey: string | null } | null>(
+    null,
+  )
   // 見出しの ⋮ から開く「列の設定」（要望: 設定と一覧を往復したくない）。
   const [settingsColId, setSettingsColId] = useState<string | null>(null)
 
@@ -409,31 +525,20 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
     [],
   )
 
-  const bulkDelete = useMutation({
-    mutationFn: (ids: string[]) => api.bulkDeleteRows(ids),
-    onSuccess: async (res) => {
-      clearSelection()
-      await qc.invalidateQueries({ queryKey: ['sheet', sheetId] })
-      toast.show(`${res.deleted} 行を削除しました`, 'success')
-    },
-    onError: () => toast.show('削除できませんでした', 'error'),
-  })
-
   const deleteSelected = useCallback(() => {
-    const ids = [...selected]
-    if (ids.length === 0) return
-    if (!confirm(`選択した ${ids.length} 行を削除しますか？この操作は取り消せません。`))
-      return
-    bulkDelete.mutate(ids)
-  }, [selected, bulkDelete])
+    void removeRows([...selected])
+  }, [selected, removeRows])
 
   /** 行を複製する（Excel のコピー→挿入にあたる、一番よく使う「増やし方」）。 */
   const duplicateRow = useCallback(
     (row: Row) => {
       api
-        .createRow(sheetId, { data: { ...row.data } })
-        .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
-        .then(() => toast.show('行を複製しました', 'success', 2000))
+        .createRow(sheetId, { data: { ...row.data }, insert_after_id: String(row.id) })
+        .then((r) => {
+          setNewRowIds((prev) => [...prev, String(r.id)])
+          return qc.invalidateQueries({ queryKey: ['sheet', sheetId] })
+        })
+        .then(() => toast.show('行を複製しました（すぐ下に入れました）', 'success', 2000))
         .catch(() => toast.show('複製できませんでした', 'error'))
     },
     [qc, sheetId],
@@ -469,23 +574,136 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
       ? rowVirt.getTotalSize() - virtualRows[virtualRows.length - 1].end
       : 0
 
+  // ---- 範囲選択（要望: Excel のようにコピペ・Delete・フィル） ------------------
+  const colKeys = useMemo(() => [ID_CELL, ...columns.map((c) => String(c.id))], [columns])
+  const rowIds = useMemo(() => sortedRows.map((r) => String(r.id)), [sortedRows])
+  const rowById = useMemo(() => new Map(rows.map((r) => [String(r.id), r])), [rows])
+  const colByKey = useMemo(() => new Map(columns.map((c) => [String(c.id), c])), [columns])
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  scrollRef.current = scrollEl
+  const range = useCellRange({
+    rowIds,
+    colKeys,
+    containerRef: scrollRef,
+    enabled: true,
+    getText: (rowId, colKey) => {
+      const row = rowById.get(rowId)
+      if (!row) return ''
+      if (colKey === ID_CELL) return row.key_value ?? ''
+      const c = colByKey.get(colKey)
+      if (!c) return ''
+      if (c.id === autoStatusColId) return autoStatusByRow.get(row.id)?.label ?? ''
+      return copyText(c, row, members, computedValue)
+    },
+    getValue: (rowId, colKey) => {
+      const row = rowById.get(rowId)
+      if (!row) return null
+      if (colKey === ID_CELL) return row.key_value ?? null
+      return row.data[colKey] ?? null
+    },
+    readonlyReason: (colKey) => {
+      if (colKey === ID_CELL) return null
+      const c = colByKey.get(colKey)
+      if (!c) return '列が見つからない'
+      if (isComputed(c)) return `「${c.name}」は計算列`
+      if (c.id === autoStatusColId) return `「${c.name}」は自動判定`
+      return null
+    },
+    parse: (colKey, text) => {
+      if (colKey === ID_CELL) {
+        const t = text.trim()
+        return t ? { ok: true, value: t } : { ok: false, reason: 'IDは空にできない' }
+      }
+      const c = colByKey.get(colKey)
+      return c ? parseCellText(c, text, members) : { ok: false, reason: '列が見つからない' }
+    },
+    fillMode: (colKey) => {
+      if (colKey === ID_CELL) return 'series'
+      const t = colByKey.get(colKey)?.type
+      return t === 'number' || t === 'date' || t === 'text' ? 'series' : 'copy'
+    },
+    seedable: (colKey) => {
+      const c = colByKey.get(colKey)
+      return !!c && (c.type === 'number' || (c.type === 'text' && !c.config?.multiline))
+    },
+    apply: writeEdits,
+    scrollToRow: (i) => rowVirt.scrollToIndex(i),
+  })
+
+  // ---- メモ ----
+  const notes = useSheetNotes(sheetId)
+  /** 行ごとの「列キー → メモ」。行のコンポーネントに同じ参照を渡し続ける（memo のため）。 */
+  const notesByRow = useMemo(() => {
+    const m = new Map<string, Map<string, CellNote>>()
+    for (const n of notes.byCell.values()) {
+      const k = String(n.row_id)
+      const inner = m.get(k) ?? new Map<string, CellNote>()
+      inner.set(n.cell_key, n)
+      m.set(k, inner)
+    }
+    return m
+  }, [notes.byCell])
+  const [noteCell, setNoteCell] = useState<{ rowId: string; colKey: string } | null>(null)
+  const cellLabel = (rowId: string, colKey: string) => {
+    const row = rowById.get(rowId)
+    const colName = colKey === ID_CELL ? 'ID' : (colByKey.get(colKey)?.name ?? '')
+    return `${row?.key_value ?? ''} ・ ${colName}`
+  }
+  const [trashOpen, setTrashOpen] = useState(false)
+
   /** 右クリックしたときのメニュー。選択が複数あるときは「選択した N 行」を主役にする。 */
-  function rowMenuItems(rowId: string): MenuItem[] {
+  function rowMenuItems(rowId: string, colKey: string | null): MenuItem[] {
     const row = rows.find((r) => r.id === rowId)
     if (!row) return []
     const inSelection = selected.has(rowId)
     const many = inSelection && selected.size > 1
+    const note = colKey ? notes.byCell.get(`${rowId}|${colKey}`) : undefined
+    // 並べ替え中は、挿入した行が「上／下」に見えない（並べ替えの位置に出る）。
+    const insertHint = sort ? '並べ替え中は使えません' : undefined
     return [
       { key: 'open', label: '開く（詳細・編集）', onClick: () => setModalRowId(rowId) },
+      ...(colKey
+        ? [
+            {
+              key: 'note',
+              label: note ? 'メモを編集…' : 'メモを追加…',
+              onClick: () => setNoteCell({ rowId, colKey }),
+            },
+            ...(note
+              ? [
+                  {
+                    key: 'note-del',
+                    label: 'メモを削除',
+                    onClick: () => notes.save.mutate({ rowId, cellKey: colKey, text: '' }),
+                  },
+                ]
+              : []),
+          ]
+        : []),
+      {
+        key: 'above',
+        label: '上に行を挿入',
+        separatorBefore: true,
+        disabled: !!sort,
+        hint: insertHint,
+        onClick: () => addRow({ rowId, where: 'above' }),
+      },
+      {
+        key: 'below',
+        label: '下に行を挿入',
+        disabled: !!sort,
+        hint: insertHint,
+        onClick: () => addRow({ rowId, where: 'below' }),
+      },
       {
         key: 'select',
         label: inSelection ? 'この行の選択を外す' : 'この行を選択',
+        separatorBefore: true,
         onClick: () => toggleRow(rowId, {}),
       },
       {
         key: 'duplicate',
-        label: '複製',
-        separatorBefore: true,
+        label: '複製（すぐ下に）',
         onClick: () => duplicateRow(row),
       },
       {
@@ -505,6 +723,13 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
         subtitle="テーブル（集計・参照）"
         actions={
           <div className="flex items-center gap-2">
+            <UndoRedoButtons
+              canUndo={undo.canUndo}
+              canRedo={undo.canRedo}
+              onUndo={doUndo}
+              onRedo={doRedo}
+            />
+            <TrashButton onClick={() => setTrashOpen(true)} />
             <SearchBox value={search} onChange={setSearch} />
 
             {/* Active-filter indicator + clear-all, same as the schedule. */}
@@ -548,7 +773,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                 固定列: {pinsCollapsed ? '最小' : '通常'}
               </button>
             )}
-            <Button size="sm" onClick={addRow}>
+            <Button size="sm" onClick={() => addRow()}>
               <PlusIcon className="h-[15px] w-[15px]" />
               新規行
             </Button>
@@ -568,7 +793,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
             title="まだレコードがありません"
             body="「新規行」で1件追加すると、列に沿って値を入れられます。列の追加や変更はシート設定から行えます。"
             actions={
-              <Button size="sm" onClick={addRow}>
+              <Button size="sm" onClick={() => addRow()}>
                 <PlusIcon className="h-[15px] w-[15px]" />
                 最初のレコードを追加
               </Button>
@@ -592,7 +817,15 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
             }
           />
         ) : (
-          <Card ref={setScrollEl} className="min-h-0 flex-1 overflow-auto">
+          <Card
+            ref={setScrollEl}
+            // tabIndex: 矢印キー・Delete・コピー／貼り付けを受け取れるように。
+            tabIndex={0}
+            onKeyDown={(e) => void range.onKeyDown(e)}
+            onCopy={(e) => void range.onCopy(e)}
+            onPaste={(e) => void range.onPaste(e)}
+            className="min-h-0 flex-1 overflow-auto outline-none"
+          >
             {/* An EXPLICIT width (the sum of the columns), not `w-max`.
                 `table-fixed` only takes the <colgroup> as authoritative when the
                 table has a definite width — with an auto/max-content width the
@@ -699,9 +932,21 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                 {padTop > 0 && <tr style={{ height: padTop }} aria-hidden />}
                 {virtualRows.map((v) => {
                   const row = sortedRows[v.index]
+                  const r = range.rect
+                  // 選択（とフィルの伸ばし先）にかかる行にだけ cellState を渡す。
+                  // それ以外の行は null のままなので、選択を動かしても再描画されない。
+                  // フィルハンドルを引いている間は、伸ばし先の行も描き直す。
+                  const touched =
+                    !!r && (range.filling || (v.index >= r.r0 && v.index <= r.r1))
                   return (
                     <TableRowView
                       key={row.id}
+                      rowIndex={v.index}
+                      cellState={touched ? range.cellState : null}
+                      cellProps={range.cellProps}
+                      fillHandleProps={range.fillHandleProps}
+                      onEnterNext={range.enterNext}
+                      notes={notesByRow.get(String(row.id))}
                       row={row}
                       columns={columns}
                       members={members}
@@ -714,7 +959,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
                       lastPinnedAttr={lastPinnedAttr}
                       selected={selected.has(row.id)}
                       onToggleSelect={toggleRow}
-                      onContextMenu={(at, rowId) => setMenu({ at, rowId })}
+                      onContextMenu={(at, rowId, colKey) => setMenu({ at, rowId, colKey })}
                       onOpen={setModalRowId}
                       onSaveCell={saveCell}
                       onSaveKey={saveKey}
@@ -745,14 +990,26 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
             </button>
             <button
               onClick={deleteSelected}
-              disabled={bulkDelete.isPending}
               className="flex items-center gap-1.5 rounded-[8px] border border-[#E1A18C] px-2.5 py-1 text-[12px] text-[#A8442B] hover:bg-[#FAE6E0] disabled:opacity-50"
             >
               <TrashIcon className="h-[14px] w-[14px]" />
-              {bulkDelete.isPending ? '削除中…' : '削除'}
+              削除
             </button>
           </div>
         </div>
+      )}
+
+      {trashOpen && <TrashDialog sheetId={sheetId} onClose={() => setTrashOpen(false)} />}
+
+      {noteCell && (
+        <NoteEditor
+          title={cellLabel(noteCell.rowId, noteCell.colKey)}
+          note={notes.byCell.get(`${noteCell.rowId}|${noteCell.colKey}`)}
+          onSave={(text) =>
+            notes.save.mutate({ rowId: noteCell.rowId, cellKey: noteCell.colKey, text })
+          }
+          onClose={() => setNoteCell(null)}
+        />
       )}
 
       {settingsColId && (
@@ -767,7 +1024,7 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
       {menu && (
         <ContextMenu
           at={menu.at}
-          items={rowMenuItems(menu.rowId)}
+          items={rowMenuItems(menu.rowId, menu.colKey)}
           onClose={() => setMenu(null)}
         />
       )}
@@ -801,6 +1058,12 @@ export function TableSheetView({ sheetId, sheetName }: Props) {
  *  this keeps a single cell edit from re-rendering the other 24. Every callback
  *  it receives is stable (useCallback in the parent), so the memo actually holds. */
 const TableRowView = memo(function TableRowView({
+  rowIndex,
+  cellState,
+  cellProps,
+  fillHandleProps,
+  onEnterNext,
+  notes,
   row,
   columns,
   members,
@@ -819,6 +1082,13 @@ const TableRowView = memo(function TableRowView({
   onSaveKey,
   onDelete,
 }: {
+  rowIndex: number
+  /** 選択範囲にかかる行だけ渡ってくる（それ以外は null）。 */
+  cellState: ReturnType<typeof useCellRange>['cellState'] | null
+  cellProps: ReturnType<typeof useCellRange>['cellProps']
+  fillHandleProps: ReturnType<typeof useCellRange>['fillHandleProps']
+  onEnterNext: ReturnType<typeof useCellRange>['enterNext']
+  notes: Map<string, CellNote> | undefined
   row: Row
   columns: Column[]
   members: Member[]
@@ -831,7 +1101,7 @@ const TableRowView = memo(function TableRowView({
   lastPinnedAttr: number
   selected: boolean
   onToggleSelect: (rowId: string, opts: { range?: boolean }) => void
-  onContextMenu: (at: MenuAnchor, rowId: string) => void
+  onContextMenu: (at: MenuAnchor, rowId: string, colKey: string | null) => void
   onOpen: (rowId: string) => void
   onSaveCell: (row: Row, colId: string, value: CellValue) => void
   onSaveKey: (row: Row, key: string) => void
@@ -847,7 +1117,11 @@ const TableRowView = memo(function TableRowView({
       style={{ height: ROW_H }}
       onContextMenu={(e) => {
         e.preventDefault()
-        onContextMenu({ x: e.clientX, y: e.clientY }, row.id)
+        // どのセルの上で押したか（メモの追加に使う）。
+        const cell = (e.target as HTMLElement).closest('[data-cell]')
+        const colKey = cell?.getAttribute('data-cell')?.split('|')[1] ?? null
+        noteTip.hide()
+        onContextMenu({ x: e.clientX, y: e.clientY }, row.id, colKey)
       }}
     >
       <td className={cn(TD_PIN, selected && 'bg-[#EDF4F0]', 'px-1.5 py-1')} style={{ left: 0 }}>
@@ -878,44 +1152,70 @@ const TableRowView = memo(function TableRowView({
           </button>
         </div>
       </td>
-      <td
-        className={cn(
-          TD_PIN,
-          selected && 'bg-[#EDF4F0]',
-          pinnedCount === 0 && SH_RIGHT,
-          'px-1 py-1',
-        )}
-        style={{ left: OPEN_W }}
-      >
-        <IdCell row={row} onSave={(v) => onSaveKey(row, v)} />
-      </td>
-      {columns.map((c, i) => (
-        <td
-          key={c.id}
-          className={cn(
-            // overflow-hidden: a cell must never spill into its neighbour when
-            // the column is dragged narrow.
-            'overflow-hidden px-0 py-1',
-            isPinned(i) && TD_PIN,
-            isPinned(i) && i === lastPinnedAttr && SH_RIGHT,
-          )}
-          style={isPinned(i) ? { left: pinLefts[i] } : undefined}
-        >
-          {c.id === autoStatusColId ? (
-            <AutoStatusCell badge={autoStatusBadge} />
-          ) : (
-            <InlineCell
-              row={row}
-              column={c}
-              members={members}
-              computedValue={computedValue}
-              rows={rows}
-              compact
-              onSave={(v) => onSaveCell(row, c.id, v)}
-            />
-          )}
-        </td>
-      ))}
+      {(() => {
+        const st = cellState?.(rowIndex, 0) ?? null
+        const note = notes?.get(ID_CELL)
+        return (
+          <td
+            {...cellProps(String(row.id), ID_CELL)}
+            {...noteHoverProps(note)}
+            className={cn(
+              TD_PIN,
+              selected && 'bg-[#EDF4F0]',
+              pinnedCount === 0 && SH_RIGHT,
+              'px-1 py-1',
+            )}
+            style={{ left: OPEN_W, ...selectionStyle(st) }}
+          >
+            <div className="relative h-full">
+              <IdCell row={row} onSave={(v) => onSaveKey(row, v)} />
+              {note && <NoteMark />}
+              {st?.handle && <FillHandle props={fillHandleProps} />}
+            </div>
+          </td>
+        )
+      })()}
+      {columns.map((c, i) => {
+        const st = cellState?.(rowIndex, i + 1) ?? null
+        const note = notes?.get(String(c.id))
+        return (
+          <td
+            key={c.id}
+            {...cellProps(String(row.id), String(c.id))}
+            {...noteHoverProps(note)}
+            className={cn(
+              // overflow-hidden: a cell must never spill into its neighbour when
+              // the column is dragged narrow.
+              'overflow-hidden px-0 py-1',
+              isPinned(i) && TD_PIN,
+              isPinned(i) && i === lastPinnedAttr && SH_RIGHT,
+            )}
+            style={{
+              ...(isPinned(i) ? { left: pinLefts[i] } : {}),
+              ...selectionStyle(st),
+            }}
+          >
+            <div className="relative h-full">
+              {c.id === autoStatusColId ? (
+                <AutoStatusCell badge={autoStatusBadge} />
+              ) : (
+                <InlineCell
+                  row={row}
+                  column={c}
+                  members={members}
+                  computedValue={computedValue}
+                  rows={rows}
+                  compact
+                  onSave={(v) => onSaveCell(row, c.id, v)}
+                  onEnterCommit={() => onEnterNext({ rowId: String(row.id), colKey: String(c.id) })}
+                />
+              )}
+              {note && <NoteMark />}
+              {st?.handle && <FillHandle props={fillHandleProps} />}
+            </div>
+          </td>
+        )
+      })}
       <td className="px-2 py-1 text-right">
         <button
           title="行を削除"

@@ -29,7 +29,11 @@ def export_csv(
             select(Column).where(Column.sheet_id == sheet.id).order_by(Column.order, Column.id)
         ).scalars()
     )
-    rows = list(db.execute(select(Row).where(Row.sheet_id == sheet.id).order_by(Row.id)).scalars())
+    rows = list(
+        db.execute(
+            select(Row).where(Row.sheet_id == sheet.id).order_by(Row.sort_order, Row.id)
+        ).scalars()
+    )
     row_ids = [r.id for r in rows]
 
     # Collect the full set of weeks present across all effort entries (sorted).

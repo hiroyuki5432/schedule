@@ -7,6 +7,8 @@ import { AddSheetDialog } from '@/components/AddSheetDialog'
 import { GlobalSearch, useGlobalSearchHotkey } from '@/components/GlobalSearch'
 import { NotificationBell } from '@/components/NotificationBell'
 import { VersionBadge } from '@/components/VersionBadge'
+import { RealtimeBadge } from '@/components/RealtimeBadge'
+import { useRealtime } from '@/hooks/useRealtime'
 import {
   CalendarIcon,
   ChartIcon,
@@ -49,6 +51,9 @@ export function AppLayout() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const location = useLocation()
+
+  // 他の人の変更を、開いている画面へ自動で反映する。
+  useRealtime(!!user)
 
   const openSearch = useCallback(() => setSearchOpen(true), [])
   useGlobalSearchHotkey(openSearch)
@@ -186,6 +191,7 @@ export function AppLayout() {
             </button>
           </div>
           {/* どのビルドが動いているか。「直したはずなのに直らない」の切り分け用。 */}
+          <RealtimeBadge />
           <VersionBadge />
         </div>
       </aside>

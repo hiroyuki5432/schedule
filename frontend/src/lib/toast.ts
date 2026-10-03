@@ -4,10 +4,17 @@
 
 export type ToastKind = 'info' | 'success' | 'warn' | 'error'
 
+export interface ToastAction {
+  label: string
+  onClick: () => void
+}
+
 export interface Toast {
   id: number
   kind: ToastKind
   message: string
+  /** トーストの中のボタン（例: 「元に戻す」）。押すとトーストも閉じる。 */
+  action?: ToastAction
 }
 
 type Listener = (toasts: Toast[]) => void
@@ -21,9 +28,9 @@ function emit() {
 }
 
 export const toast = {
-  show(message: string, kind: ToastKind = 'info', ttlMs = 5000): number {
+  show(message: string, kind: ToastKind = 'info', ttlMs = 5000, action?: ToastAction): number {
     const id = ++seq
-    toasts = [...toasts, { id, kind, message }]
+    toasts = [...toasts, { id, kind, message, ...(action ? { action } : {}) }]
     emit()
     if (ttlMs > 0) setTimeout(() => toast.dismiss(id), ttlMs)
     return id

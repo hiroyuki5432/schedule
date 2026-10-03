@@ -36,6 +36,13 @@ import { phaseWeightByName, redistributeMilestones } from '@/lib/milestones'
 import { makeIsRowDone, resolveDisplayValue } from '@/lib/status'
 import { cn } from '@/lib/format'
 import { toast } from '@/lib/toast'
+import { ID_CELL } from '@/lib/cellRange'
+import type { CellEdit } from '@/hooks/useCellRange'
+import { useApplyCellEdits } from '@/hooks/useCellEdits'
+import type { EditSide } from '@/hooks/useCellEdits'
+import { NoteEditor, useSheetNotes } from '@/components/CellNotes'
+import { TrashDialog, restoreTrashEntry } from '@/components/TrashDialog'
+import { TrashButton, UndoRedoButtons } from '@/components/UndoRedoButtons'
 import type { CellValue, Column, NotificationItem, Row } from '@/types/api'
 
 /** One reversible edit. Entries hold DATA only — never a captured row object —
@@ -52,6 +59,10 @@ type UndoEntry =
     }
   | { label: string; kind: 'progress'; rowId: string; before: number | null; after: number | null }
   | { label: string; kind: 'key'; rowId: string; before: string; after: string }
+  /** 属性セルの範囲の書き込み（貼り付け・消去・フィル）。 */
+  | { label: string; kind: 'cells'; edits: CellEdit[] }
+  /** 行の削除（ゴミ箱の番号で戻す）。 */
+  | { label: string; kind: 'delete'; trashId: number; rowIds: string[] }
 
 const VIEW_MODES: Array<{ m: ViewMode; label: string }> = [
   { m: 'week', label: '週' },
@@ -353,8 +364,81 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
     [grid.columns, currentWeekIso, rowMut],
   )
 
+  // ---- 属性セルの範囲の書き込み（貼り付け・消去・フィル） ---------------------
+  const stampWeekly = useCallback(
+    (_rowId: string, colKey: string): Record<string, CellValue> => {
+      const col = grid.columns.find((c) => String(c.id) === colKey)
+      // 週次リセットの列は、1セルの編集と同じく「今週の値」として印を付ける。
+      return col?.config?.weekly_reset ? { [`__wk_${colKey}`]: currentWeekIso } : {}
+    },
+    [grid.columns, currentWeekIso],
+  )
+  const bulkApply = useApplyCellEdits(sheetId, stampWeekly)
+  const applyAttrEdits = useCallback(
+    async (edits: CellEdit[], side: EditSide) => {
+      const ok = await bulkApply(edits, side)
+      if (!ok) return
+      // 開始日／完了日を変えた行は、1セルの編集と同じく◇の日付を割合で配り直す。
+      const spanKeys = new Set(
+        grid.columns.filter((c) => c.config?.sched_role).map((c) => String(c.id)),
+      )
+      const touched = [...new Set(edits.filter((e) => spanKeys.has(e.colKey)).map((e) => e.rowId))]
+      if (touched.length === 0 || !schedStartCol || !schedEndCol) return
+      const valueOf = (rowId: string, colId: string) => {
+        const e = edits.find((x) => x.rowId === rowId && x.colKey === colId)
+        if (e) return (side === 'after' ? e.after : e.before) as string | null
+        const m = rowsRef.current.find((r) => String(r.row.id) === rowId)
+        return (m?.row.data[colId] as string | null) ?? null
+      }
+      for (const rowId of touched) {
+        const model = rowsRef.current.find((r) => String(r.row.id) === rowId)
+        const start = valueOf(rowId, String(schedStartCol.id))
+        const end = valueOf(rowId, String(schedEndCol.id))
+        if (!model || model.milestones.length === 0 || !start || !end) continue
+        const next = redistributeMilestones(
+          model.milestones,
+          start,
+          end,
+          phaseWeightByName(defaultMilestones),
+        )
+        await api.putMilestones(model.row.id, next).catch(() => undefined)
+      }
+      void qc.invalidateQueries({ queryKey: ['sheet-milestones', sheetId] })
+    },
+    // schedStartCol / schedEndCol / defaultMilestones are declared below; read at call time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bulkApply, grid.columns, qc, sheetId],
+  )
+
+  const deleteRowsNow = useCallback(
+    async (ids: string[]): Promise<number | null> => {
+      try {
+        const res = await api.bulkDeleteRows(ids)
+        await qc.invalidateQueries({ queryKey: ['sheet', sheetId] })
+        void qc.invalidateQueries({ queryKey: ['trash', sheetId] })
+        return res.trash_id
+      } catch {
+        toast.show('削除できませんでした', 'error')
+        return null
+      }
+    },
+    [qc, sheetId],
+  )
+
   const applyUndoEntry = useCallback(
     (entry: UndoEntry, dir: UndoDirection) => {
+      if (entry.kind === 'cells') {
+        void applyAttrEdits(entry.edits, dir === 'undo' ? 'before' : 'after')
+        return
+      }
+      if (entry.kind === 'delete') {
+        if (dir === 'undo') void restoreTrashEntry(qc, sheetId, entry.trashId)
+        else
+          void deleteRowsNow(entry.rowIds).then((tid) => {
+            if (tid != null) entry.trashId = tid
+          })
+        return
+      }
       if (entry.kind === 'effort') {
         const items = entry.edits.flatMap((e) =>
           expandEdit(e, dir === 'undo' ? e.prev : e.value),
@@ -376,7 +460,7 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
         rowMut.mutate({ row, patch: {}, keyValue: dir === 'undo' ? entry.before : entry.after })
       }
     },
-    [expandEdit, bulkEffortMut, writeCell, rowMut],
+    [expandEdit, bulkEffortMut, writeCell, rowMut, applyAttrEdits, deleteRowsNow, qc, sheetId],
   )
 
   // The stack resets per sheet: recorded row ids mean nothing on another sheet.
@@ -428,6 +512,13 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
       after: value,
     })
     writeCell(row, colId, value)
+  }
+
+  /** 範囲の書き込み（GanttGrid から）。1回の取り消しで全部戻る。 */
+  function saveAttrEdits(edits: CellEdit[], label: string) {
+    if (edits.length === 0) return
+    undo.push({ kind: 'cells', label, edits })
+    void applyAttrEdits(edits, 'after')
   }
 
   function saveRowKey(row: Row, key: string) {
@@ -534,21 +625,56 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
       })
   }
 
-  function deleteRow(row: Row) {
-    const childCount = grid.rows.filter(
-      (r) => r.parentRowId === String(row.id),
-    ).length
-    const msg =
-      childCount > 0
-        ? `行「${row.key_value}」と子タスク${childCount}件を削除しますか？`
-        : `行「${row.key_value}」を削除しますか？`
-    if (!confirm(msg)) return
+  /** 行を消す。ゴミ箱に入るので、トーストの「元に戻す」か Ctrl+Z で戻せる
+   *  （戻せるので確認は出さない — Excel も行の削除で確認しない）。 */
+  async function deleteRow(row: Row) {
+    const childCount = grid.rows.filter((r) => r.parentRowId === String(row.id)).length
+    const tid = await deleteRowsNow([String(row.id)])
+    if (tid == null) return
+    const what =
+      childCount > 0 ? `行「${row.key_value}」と子タスク${childCount}件` : `行「${row.key_value}」`
+    undo.push({ kind: 'delete', label: `${what}の削除`, trashId: tid, rowIds: [String(row.id)] })
+    toast.show(`${what}を削除しました`, 'success', 8000, {
+      label: '元に戻す',
+      onClick: () => doUndo(),
+    })
+  }
+
+  /** 行の上／下に挿入（要望: Excel の「行の挿入」）。子タスクの隣なら同じ親の子になる。 */
+  function insertRow(anchor: Row, where: 'above' | 'below') {
+    // 子タスクとして入るときは、親の担当を引き継ぐ（子タスクの追加と同じ）。
+    const memberCol = grid.columns.find((c) => c.type === 'member')
+    const parent = anchor.parent_row_id
+      ? grid.rows.find((r) => String(r.row.id) === String(anchor.parent_row_id))?.row
+      : null
+    const data: Record<string, CellValue> = {}
+    if (parent && memberCol && parent.data[memberCol.id] != null)
+      data[memberCol.id] = parent.data[memberCol.id]
     api
-      .deleteRow(row.id)
-      .then(() => qc.invalidateQueries({ queryKey: ['sheet', sheetId] }))
-      .catch(() => {
-        /* TODO: toast on failure */
+      .createRow(sheetId, {
+        data,
+        ...(where === 'above'
+          ? { insert_before_id: String(anchor.id) }
+          : { insert_after_id: String(anchor.id) }),
       })
+      .then((r) => {
+        setNewRowIds((prev) => [...prev, String(r.id)])
+        return qc.invalidateQueries({ queryKey: ['sheet', sheetId] })
+      })
+      .catch((e) =>
+        toast.show(`行を挿入できませんでした：${e instanceof Error ? e.message : ''}`, 'error'),
+      )
+  }
+
+  // ---- メモ・ゴミ箱 ----
+  const notes = useSheetNotes(sheetId)
+  const [noteCell, setNoteCell] = useState<{ row: Row; cellKey: string } | null>(null)
+  const [trashOpen, setTrashOpen] = useState(false)
+  function noteTitle(row: Row, cellKey: string): string {
+    if (cellKey === ID_CELL) return `${row.key_value} ・ ID`
+    if (cellKey.startsWith('w:')) return `${row.key_value} ・ 週 ${cellKey.slice(2)}`
+    const col = grid.columns.find((c) => String(c.id) === cellKey)
+    return `${row.key_value} ・ ${col?.name ?? ''}`
   }
 
   // Detection → notification register (cron-free): when the live schedule renders,
@@ -636,26 +762,13 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
 
           {/* undo / redo — the keyboard shortcuts exist too, but most people
               won't guess that a web grid supports Ctrl+Z unless it's shown. */}
-          <div className="flex items-center overflow-hidden rounded-[9px] border border-[var(--line)] bg-[var(--surface)]">
-            <button
-              onClick={doUndo}
-              disabled={!undo.canUndo}
-              title="元に戻す（Ctrl+Z）"
-              aria-label="元に戻す"
-              className="px-2.5 py-1.5 text-[13px] leading-none text-[var(--ink2)] enabled:hover:bg-[var(--line2)] disabled:text-[var(--line)]"
-            >
-              ↶
-            </button>
-            <button
-              onClick={doRedo}
-              disabled={!undo.canRedo}
-              title="やり直す（Ctrl+Y）"
-              aria-label="やり直す"
-              className="border-l border-[var(--line)] px-2.5 py-1.5 text-[13px] leading-none text-[var(--ink2)] enabled:hover:bg-[var(--line2)] disabled:text-[var(--line)]"
-            >
-              ↷
-            </button>
-          </div>
+          <UndoRedoButtons
+            canUndo={undo.canUndo}
+            canRedo={undo.canRedo}
+            onUndo={doUndo}
+            onRedo={doRedo}
+          />
+          <TrashButton onClick={() => setTrashOpen(true)} />
 
           {/* change history (誰がいつ何を変えたか) */}
           <button
@@ -917,7 +1030,14 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
             onAddChild={addChild}
             onEditProgress={saveProgress}
             onEditDeps={setDepRow}
-            onDeleteRow={deleteRow}
+            onDeleteRow={(r) => void deleteRow(r)}
+            notes={notes.byCell}
+            onEditNote={(r, cellKey) => setNoteCell({ row: r, cellKey })}
+            onDeleteNote={(r, cellKey) =>
+              notes.save.mutate({ rowId: String(r.id), cellKey, text: '' })
+            }
+            onInsertRow={insertRow}
+            onAttrEdits={saveAttrEdits}
           />
         )}
         <div className="mt-2 px-1 text-[11.5px] text-[var(--ink3)]">
@@ -942,6 +1062,19 @@ export function SchedulePage({ sheetId, sheetName }: Props) {
           candidates={depCandidates}
           sheetId={sheetId}
           onClose={() => setDepRow(null)}
+        />
+      )}
+
+      {trashOpen && <TrashDialog sheetId={sheetId} onClose={() => setTrashOpen(false)} />}
+
+      {noteCell && (
+        <NoteEditor
+          title={noteTitle(noteCell.row, noteCell.cellKey)}
+          note={notes.byCell.get(`${noteCell.row.id}|${noteCell.cellKey}`)}
+          onSave={(text) =>
+            notes.save.mutate({ rowId: String(noteCell.row.id), cellKey: noteCell.cellKey, text })
+          }
+          onClose={() => setNoteCell(null)}
         />
       )}
 

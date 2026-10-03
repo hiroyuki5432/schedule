@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import User
+from app.realtime import tag_session
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -42,6 +43,8 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User:
         # Stale session referencing a deleted user, or an account frozen mid-session.
         request.session.clear()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    # 変更通知（リアルタイム更新）に「誰が・どの画面から」書いたかを載せる。
+    tag_session(db, user.id, request.headers.get("X-Client-Id"))
     return user
 
 

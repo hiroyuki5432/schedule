@@ -5,6 +5,7 @@ import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import { AuthProvider } from '@/hooks/useAuth'
 import { Toaster } from '@/components/Toaster'
+import { NoteTipHost } from '@/components/CellNotes'
 import { queryClient } from '@/lib/queryClient'
 import './index.css'
 
@@ -15,6 +16,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <AuthProvider>
           <App />
           <Toaster />
+          <NoteTipHost />
         </AuthProvider>
       </BrowserRouter>
     </QueryClientProvider>

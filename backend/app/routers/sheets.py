@@ -104,7 +104,7 @@ def get_sheet(
     )
     rows = list(
         db.execute(
-            select(Row).where(Row.sheet_id == sheet.id).order_by(Row.id)
+            select(Row).where(Row.sheet_id == sheet.id).order_by(Row.sort_order, Row.id)
         ).scalars()
     )
     return SheetDetailOut(

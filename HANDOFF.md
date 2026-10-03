@@ -1,6 +1,6 @@
 # 引き継ぎ (HANDOFF) — 工数スケジュール管理アプリ
 
-次の担当（AI/人）向けの現状まとめ。最終更新 2026-06-24。
+次の担当（AI/人）向けの現状まとめ。最終更新 2026-10-04（v1.2.0: リアルタイム更新・範囲操作・ゴミ箱・メモ・行の挿入。詳細は STATUS.md）。
 
 ## 0. まず読む順
 1. このファイル（全体像・運用の落とし穴）
@@ -47,6 +47,10 @@ docker compose up -d --build
 - **backend (uvicorn --reload)**: バインドマウントの fs イベントを拾えず**自動リロードしないことが多い**。backend を編集したら必ず `docker compose restart backend`。
 - ブラウザ側もコード差し替え時は **Ctrl+Shift+R** で確実に。
 - 「全然変わらない」と言われたら、まずこのリロード問題を疑うこと（過去に実際これだった）。
+
+### ⚠ リアルタイム更新（v1.2〜）
+- 画面は `GET /api/events`（SSE）を開きっぱなしにする。サイドバー下部に「同期中」が出ていれば接続できている。「再接続中…」のままなら、プロキシが応答を溜め込んでいないか（`proxy_buffering`）を疑う（DEPLOY.md §4）。
+- 通知は DB のトリガ発。backend を再起動しても DB 側の仕掛けは残る。LISTEN は各ワーカーが1本ずつ張る（`app/realtime.py`）。
 
 ### ⚠ DBスキーマ変更
 - **Alembic 整備済み**。`backend/alembic/versions/`（initial + 0002〜0009）。起動時に `entrypoint.sh` が pre-Alembic の既存DBを baseline に stamp してから `alembic upgrade head` する。

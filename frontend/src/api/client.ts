@@ -2,6 +2,7 @@
 import { http, ApiError } from '@/lib/http'
 import type {
   AggregateRow,
+  CellNote,
   ChangeEntry,
   Column,
   ColumnConfig,
@@ -22,6 +23,7 @@ import type {
   SheetSettings,
   SnapshotResult,
   TaskOption,
+  TrashEntry,
   User,
   UserDayWorkLog,
   WorkLog,
@@ -136,7 +138,13 @@ export const getRows = (sheetId: string) => http.get<Row[]>(`/api/sheets/${sheet
 
 export const createRow = (
   sheetId: string,
-  body: { key_value?: string; data: Row['data'] },
+  body: {
+    key_value?: string
+    data: Row['data']
+    /** 途中に挿入する（指定した行の直前／直後）。子タスクを指すと同じ親の子になる。 */
+    insert_before_id?: string
+    insert_after_id?: string
+  },
 ) => http.post<Row>(`/api/sheets/${sheetId}/rows`, body)
 
 /** Create a subtask (子タスク) under a parent task. Inherits weekly effort,
@@ -157,7 +165,33 @@ export const updateRow = (
   },
 ) => http.patch<Row>(`/api/rows/${id}`, body)
 
-export const deleteRow = (id: string) => http.del<void>(`/api/rows/${id}`)
+/** 削除した行はゴミ箱に入る。`trash_id` で元に戻せる（restoreTrash）。 */
+export const deleteRow = (id: string) =>
+  http.del<{ deleted: number; trash_id: number }>(`/api/rows/${id}`)
+
+/** 範囲の貼り付け・まとめて消去・フィル。送ったセルだけを書き換える（1トランザクション）。 */
+export const bulkUpdateRows = (
+  items: Array<{ id: string; data: Row['data']; key_value?: string }>,
+) => http.post<{ updated: number; rows: Row[] }>('/api/rows/bulk-update', { items })
+
+// ---- ゴミ箱（削除した行） ----
+export const getTrash = (sheetId: string) =>
+  http.get<TrashEntry[]>(`/api/sheets/${sheetId}/trash`)
+
+export const restoreTrash = (trashId: number) =>
+  http.post<{ restored: number; row_ids: number[]; notes: string[] }>(
+    `/api/trash/${trashId}/restore`,
+  )
+
+export const purgeTrash = (trashId: number) => http.del<void>(`/api/trash/${trashId}`)
+
+// ---- セルのメモ ----
+export const getNotes = (sheetId: string) =>
+  http.get<CellNote[]>(`/api/sheets/${sheetId}/notes`)
+
+/** text が空ならメモを消す。 */
+export const putNote = (rowId: string, cellKey: string, text: string) =>
+  http.put<{ note: CellNote | null }>(`/api/rows/${rowId}/notes`, { cell_key: cellKey, text })
 
 // ---- Effort (weekly hours) ----
 export const getEffort = (sheetId: string, from?: string, to?: string) => {
@@ -743,6 +777,10 @@ export interface MaintenanceUsage {
     backups_total: number
     backups_old: number
     backups_keep: number
+    /** ゴミ箱（削除した行）。古いバージョンのサーバでは無い。 */
+    trash_total?: number
+    trash_old?: number
+    trash_keep_days?: number
     backups_bytes: number
     backups_old_bytes: number
   }
@@ -756,6 +794,7 @@ export interface CleanupInput {
   legacy_cells?: boolean
   empty_effort?: boolean
   backups_keep?: number | null
+  trash_keep_days?: number | null
   dry_run?: boolean
 }
 
@@ -763,10 +802,12 @@ export const getMaintenanceUsage = (params: {
   rowEventsKeepDays: number
   snapshotsKeepWeeks: number
   backupsKeep: number
+  trashKeepDays?: number
 }) =>
   http.get<MaintenanceUsage>(
     `/api/maintenance/usage?row_events_keep_days=${params.rowEventsKeepDays}` +
-      `&snapshots_keep_weeks=${params.snapshotsKeepWeeks}&backups_keep=${params.backupsKeep}`,
+      `&snapshots_keep_weeks=${params.snapshotsKeepWeeks}&backups_keep=${params.backupsKeep}` +
+      `&trash_keep_days=${params.trashKeepDays ?? 90}`,
   )
 
 export const runMaintenanceCleanup = (body: CleanupInput) =>
@@ -838,4 +879,7 @@ export const getServerVersion = () =>
 
 /** 複数行をまとめて削除（1トランザクション）。子タスクは親と一緒に消える。 */
 export const bulkDeleteRows = (ids: string[]) =>
-  http.post<{ deleted: number }>('/api/rows/bulk-delete', { ids })
+  http.post<{ deleted: number; trash_id: number | null; trash_ids: number[] }>(
+    '/api/rows/bulk-delete',
+    { ids },
+  )

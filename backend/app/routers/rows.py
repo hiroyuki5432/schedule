@@ -4,16 +4,23 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import history_service
+from app import history_service, trash_service
 from app.date_values import normalize_date_text
 from app.db import get_db
 from app.deps import get_row_for_user, get_sheet_for_user
 from app.models import Column, Row, RowEvent, Sheet, User
-from app.schemas import RowBulkDelete, RowCreate, RowEventOut, RowOut, RowUpdate
+from app.schemas import (
+    RowBulkDelete,
+    RowBulkUpdate,
+    RowCreate,
+    RowEventOut,
+    RowOut,
+    RowUpdate,
+)
 from app.security import current_user
 from app.weeks import current_week_start
 from app.worklog_service import org_week_start_weekday
@@ -77,8 +84,51 @@ def list_rows(
 ) -> list[Row]:
     get_sheet_for_user(db, sheet_id, user)
     return list(
-        db.execute(select(Row).where(Row.sheet_id == sheet_id).order_by(Row.id)).scalars()
+        db.execute(
+            select(Row).where(Row.sheet_id == sheet_id).order_by(Row.sort_order, Row.id)
+        ).scalars()
     )
+
+
+def _anchor_for(
+    db: Session, sheet_id: int, payload: RowCreate, user: User
+) -> tuple[Row, bool] | None:
+    """挿入位置の基準になる行と、その前（True）か後ろ（False）か。指定が無ければ None。"""
+    anchor_id = payload.insert_before_id or payload.insert_after_id
+    if not anchor_id:
+        return None
+    anchor = get_row_for_user(db, anchor_id, user)
+    if anchor.sheet_id != sheet_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="挿入位置の行が、このシートの行ではありません",
+        )
+    return anchor, payload.insert_before_id is not None
+
+
+def _make_room(db: Session, anchor: Row, before: bool) -> int:
+    """基準の行の前／後ろに1つ空きを作り、その番号を返す。
+
+    後ろの行の番号を1つずつずらすだけなので、並びはそれ以外まったく変わらない。
+    子タスクは画面では親の下にまとめて出す（番号は親子をまたいで1本）ので、
+    親の「後ろ」に入れるときは、その親の子タスクたちの後ろに入れる。
+    """
+    target = anchor.sort_order or 0
+    if not before:
+        last = target
+        if anchor.parent_row_id is None:
+            kids = db.execute(
+                select(Row.sort_order).where(Row.parent_row_id == anchor.id)
+            ).scalars().all()
+            last = max([target, *[k or 0 for k in kids]])
+        target = last + 1
+    db.execute(
+        update(Row)
+        .where(Row.sheet_id == anchor.sheet_id, Row.sort_order >= target)
+        .values(sort_order=Row.sort_order + 1)
+        .execution_options(synchronize_session=False)
+    )
+    return target
 
 
 @router.post("/sheets/{sheet_id}/rows", response_model=RowOut, status_code=status.HTTP_201_CREATED)
@@ -89,18 +139,31 @@ def create_row(
     db: Session = Depends(get_db),
 ) -> Row:
     sheet = get_sheet_for_user(db, sheet_id, user)
+    anchored = _anchor_for(db, sheet_id, payload, user)
+    # 子タスクの前後に挿入したときは、同じ親の子タスクとして入れる（画面では親の下に
+    # まとめて並ぶので、最上位の行にすると挿入した場所に出てこない）。
+    parent = (
+        db.get(Row, anchored[0].parent_row_id)
+        if anchored and anchored[0].parent_row_id is not None
+        else None
+    )
     key_value = payload.key_value
     if key_value is None or key_value == "":
-        key_value = _next_key_value(db, sheet)
+        key_value = (
+            _next_child_key_value(db, parent) if parent is not None else _next_key_value(db, sheet)
+        )
 
     row = Row(
         sheet_id=sheet_id,
+        parent_row_id=parent.id if parent is not None else None,
         key_value=key_value,
         data=_normalize_cells(db, sheet_id, payload.data),
         version=1,
         created_by=user.id,
         updated_by=user.id,
     )
+    if anchored:
+        row.sort_order = _make_room(db, anchored[0], anchored[1])
     db.add(row)
     try:
         db.commit()
@@ -231,19 +294,16 @@ def update_row(
     return RowOut.model_validate(row)
 
 
-@router.delete("/rows/{row_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/rows/{row_id}")
 def delete_row(
     row_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
-) -> Response:
+) -> dict:
+    """1行を削除する。消す前にゴミ箱へ写すので、`trash_id` で元に戻せる。"""
     row = get_row_for_user(db, row_id, user)
-    # Log first: the event's row_id is SET NULL by the delete, but row_key keeps
-    # the task id so the deletion stays traceable in the sheet history.
-    history_service.record(
-        db, user=user, row=row, kind="delete", changes=[("行を削除", row.key_value or "", None)]
-    )
-    db.delete(row)
+    sheet = db.get(Sheet, row.sheet_id)
+    batch = trash_service.trash_rows(db, user, sheet, [row])
     db.commit()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return {"deleted": batch.row_count, "trash_id": batch.id}
 
 
 @router.post("/rows/bulk-delete")
@@ -259,43 +319,85 @@ def bulk_delete_rows(
     なので、全部消えるか、1つも消えないかのどちらか。
 
     子タスク（サブタスク）は親を消せば一緒に消える。明示的に選ばれていなくても消えるので、
-    件数は「実際に消えた行数」を返す。
+    件数は「実際に消えた行数」を返す。消したものはゴミ箱に入り、`trash_id` で戻せる
+    （シートごとに1件。普通は1シートなので1件）。
     """
     ids = list(dict.fromkeys(payload.ids))  # 重複を潰して順序は保つ
     if not ids:
-        return {"deleted": 0}
+        return {"deleted": 0, "trash_id": None, "trash_ids": []}
     # 1件ずつ所有権を確認する — 他組織の行IDを混ぜられても触れないように。
     rows = [get_row_for_user(db, rid, user) for rid in ids]
-
-    selected = {r.id for r in rows}
-    children = list(
-        db.execute(select(Row).where(Row.parent_row_id.in_(selected))).scalars()
-    )
-    # 件数は commit の前に確定させる。commit 後に child.id を読むと、削除済みの行を
-    # 読み直そうとして ObjectDeletedError になる。
-    deleted_ids = selected | {c.id for c in children}
-    for row in rows:
-        history_service.record(
-            db,
-            user=user,
-            row=row,
-            kind="delete",
-            changes=[("行を削除", row.key_value or "", None)],
-        )
-    for child in children:
-        if child.id in selected:
-            continue
-        history_service.record(
-            db,
-            user=user,
-            row=child,
-            kind="delete",
-            changes=[("行を削除（親の削除に伴う）", child.key_value or "", None)],
-        )
-    for row in rows:
-        db.delete(row)
+    by_sheet: dict[int, list[Row]] = {}
+    for r in rows:
+        by_sheet.setdefault(r.sheet_id, []).append(r)
+    batches = [
+        trash_service.trash_rows(db, user, db.get(Sheet, sid), group)
+        for sid, group in by_sheet.items()
+    ]
     db.commit()
-    return {"deleted": len(deleted_ids)}
+    trash_ids = [b.id for b in batches]
+    return {
+        "deleted": sum(b.row_count for b in batches),
+        "trash_id": trash_ids[0] if len(trash_ids) == 1 else None,
+        "trash_ids": trash_ids,
+    }
+
+
+@router.post("/rows/bulk-update")
+def bulk_update_rows(
+    payload: RowBulkUpdate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """範囲の貼り付け・まとめて消去・フィル（要望: Excel のように範囲でコピペしたい）。
+
+    セル単位で上書きする: 送られてきた列だけを書き換え、それ以外の列はそのとき DB に
+    ある値のまま残す。同じ行の別の列を他の人が直していても消さないため、行の version
+    による衝突検出はしない（週次工数の範囲貼り付けと同じ扱い）。履歴は1セルずつ残る。
+
+    計算列（参照・数式）は値を持たないので、送られてきても書かない。
+    """
+    merged: dict[int, dict] = {}
+    keys: dict[int, str] = {}
+    for it in payload.items:
+        merged.setdefault(it.id, {}).update(it.data)
+        if it.key_value is not None:
+            keys[it.id] = it.key_value
+    if not merged:
+        return {"updated": 0, "rows": []}
+
+    rows = [get_row_for_user(db, rid, user) for rid in merged]
+    computed: dict[int, set[str]] = {}
+    out: list[Row] = []
+    for row in rows:
+        if row.sheet_id not in computed:
+            computed[row.sheet_id] = {
+                str(cid)
+                for cid in db.execute(
+                    select(Column.id).where(
+                        Column.sheet_id == row.sheet_id, Column.type.in_(("lookup", "formula"))
+                    )
+                ).scalars()
+            }
+        patch = {
+            str(k): v for k, v in merged[row.id].items() if str(k) not in computed[row.sheet_id]
+        }
+        patch = _normalize_cells(db, row.sheet_id, patch)
+        new_data = {**(row.data or {}), **patch}
+        new_key = keys.get(row.id)
+        history_service.record_row_update(
+            db, user=user, row=row, new_data=new_data, new_key=new_key
+        )
+        if new_key is not None:
+            row.key_value = new_key
+        row.data = new_data
+        row.version = row.version + 1
+        row.updated_by = user.id
+        out.append(row)
+    db.commit()
+    for r in out:
+        db.refresh(r)
+    return {"updated": len(out), "rows": [RowOut.model_validate(r) for r in out]}
 
 
 def _events_out(db: Session, events: list[RowEvent]) -> list[RowEventOut]:

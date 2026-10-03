@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # Set true in production (behind HTTPS) so the session cookie is Secure-only.
     COOKIE_SECURE: bool = False
 
+    # リアルタイム更新（他の人の変更を画面へ届ける）。Postgres の LISTEN を1本使う。
+    REALTIME_ENABLED: bool = True
+
     # Seeding
     SEED_ON_STARTUP: bool = True
     DEMO_ADMIN_EMAIL: str = "admin@demo.local"

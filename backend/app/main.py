@@ -1,12 +1,15 @@
 """FastAPI application entrypoint."""
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 
+from app import realtime
 from app.config import settings
 from app.version import VERSION, build_info
 from app.routers import (
@@ -24,10 +27,12 @@ from app.routers import (
     notifications,
     org,
     replace,
+    notes,
     rows,
     search,
     sheets,
     snapshots,
+    trash,
     worklog,
 )
 
@@ -44,7 +49,16 @@ async def lifespan(app: FastAPI):
             logger.info("Seed check complete.")
         except Exception:  # pragma: no cover - seed must never block startup
             logger.exception("Seed failed (continuing startup).")
-    yield
+    listener = (
+        asyncio.create_task(realtime.listen_forever()) if settings.REALTIME_ENABLED else None
+    )
+    try:
+        yield
+    finally:
+        if listener is not None:
+            listener.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await listener
 
 
 app = FastAPI(title="工数スケジュール管理 API", version=VERSION, lifespan=lifespan)
@@ -76,6 +90,9 @@ app.include_router(worklog.router)
 app.include_router(notifications.router)
 app.include_router(search.router)
 app.include_router(maintenance.router)
+app.include_router(notes.router)
+app.include_router(trash.router)
+app.include_router(realtime.router)
 
 
 @app.get("/api/health", tags=["health"])

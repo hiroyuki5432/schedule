@@ -29,7 +29,9 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import (
     Backup,
+    CellNote,
     Column,
+    DeletedRowBatch,
     EffortEntry,
     ImportPreset,
     Notification,
@@ -51,6 +53,7 @@ router = APIRouter(prefix="/api/maintenance", tags=["maintenance"])
 DEFAULT_EVENT_KEEP_DAYS = 365
 DEFAULT_SNAPSHOT_KEEP_WEEKS = 52
 DEFAULT_BACKUP_KEEP = 10
+DEFAULT_TRASH_KEEP_DAYS = 90
 
 #: 実テーブルのサイズを出すための一覧（表示名つき）。Postgres 以外では出さない。
 _TABLES: list[tuple[str, str]] = [
@@ -63,6 +66,8 @@ _TABLES: list[tuple[str, str]] = [
     ("notifications", "通知"),
     ("backups", "バックアップ"),
     ("import_presets", "取り込み設定"),
+    ("deleted_rows", "ゴミ箱（削除した行）"),
+    ("cell_notes", "セルのメモ"),
     ("columns", "列定義"),
     ("sheets", "シート"),
 ]
@@ -152,6 +157,7 @@ def usage(
     row_events_keep_days: int = DEFAULT_EVENT_KEEP_DAYS,
     snapshots_keep_weeks: int = DEFAULT_SNAPSHOT_KEEP_WEEKS,
     backups_keep: int = DEFAULT_BACKUP_KEEP,
+    trash_keep_days: int = DEFAULT_TRASH_KEEP_DAYS,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -201,6 +207,12 @@ def usage(
     )
     backups_old = max(0, len(backups) - max(0, backups_keep))
     orphan_cells, orphan_rows, legacy_cells, legacy_rows = _orphan_cells(db, org_id)
+    trash_cutoff = datetime.now(timezone.utc) - timedelta(days=max(0, trash_keep_days))
+    trash_total = rows_of(DeletedRowBatch, DeletedRowBatch.org_id == org_id)
+    trash_old = rows_of(
+        DeletedRowBatch,
+        (DeletedRowBatch.org_id == org_id) & (DeletedRowBatch.deleted_at < trash_cutoff),
+    )
 
     counts = {
         "rows": rows_of(Row, Row.sheet_id.in_(sheet_ids)) if sheet_ids else 0,
@@ -213,6 +225,8 @@ def usage(
         "backups": len(backups),
         "import_presets": rows_of(ImportPreset, ImportPreset.org_id == org_id),
         "columns": rows_of(Column, Column.sheet_id.in_(sheet_ids)) if sheet_ids else 0,
+        "deleted_rows": trash_total,
+        "cell_notes": rows_of(CellNote, CellNote.sheet_id.in_(sheet_ids)) if sheet_ids else 0,
         "sheets": len(sheet_ids),
     }
 
@@ -243,6 +257,9 @@ def usage(
             "backups_total": len(backups),
             "backups_old": backups_old,
             "backups_keep": backups_keep,
+            "trash_total": trash_total,
+            "trash_old": trash_old,
+            "trash_keep_days": trash_keep_days,
             "backups_bytes": sum(int(b.size_bytes or 0) for b in backups),
             "backups_old_bytes": sum(
                 int(b.size_bytes or 0) for b in backups[max(0, backups_keep) :]
@@ -333,6 +350,13 @@ def cleanup(
                     next_data = {k: v for k, v in data.items() if k not in set(drop)}
                     row.data = next_data
         deleted["orphan_cells"] = cells
+
+    if body.trash_keep_days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(0, body.trash_keep_days))
+        where = (DeletedRowBatch.org_id == org_id) & (DeletedRowBatch.deleted_at < cutoff)
+        deleted["deleted_rows"] = count(DeletedRowBatch, where)
+        if not body.dry_run and deleted["deleted_rows"]:
+            db.execute(delete(DeletedRowBatch).where(where))
 
     if body.backups_keep is not None:
         keep = max(0, body.backups_keep)

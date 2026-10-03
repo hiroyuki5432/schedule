@@ -113,6 +113,14 @@ ID列は取り込むと「シートの列」ではなく行のキー値になる
 
 場所: `xlsx_formula._ref()` が断る。テストは `backend/tests/test_xlsx_formula.py` / `test_xlsx_lookup.py`、フロントは `frontend/src/lib/formula.test.ts` / `computed.test.ts`。
 
+## 3b. DB のトリガ・並び順・リアルタイム更新・ゴミ箱を触るとき（v1.2〜）
+
+- **トリガの SQL は2か所にある。** `backend/app/db_triggers.py`（テストの `create_all` 用）と `alembic/versions/0018_*.py`（本番・開発DB用）。片方だけ直すと「テストは緑・本番だけ違う」になる。変えるときは新しいマイグレーションで `CREATE OR REPLACE` し、`db_triggers.py` も同じにする。
+- **行の並びは `Row.sort_order, Row.id`。** 表示・出力に関わる `select(Row)` は必ずこの順にする（`order_by(Row.id)` のままだと、挿入した行が末尾に出る）。`sort_order` は DB トリガが埋めるので、行を作る側で付ける必要は無い（付けないこと — 末尾以外に置きたいときだけ `rows._make_room`）。
+- **書き込みはすべてリアルタイム通知の対象になる。** 画面を開くだけで書き込む処理（GET の中の commit）を足すと、通知 → 他の画面が読み直す → また書く、の連鎖の種になる。足すなら2回目以降は何も書かない（冪等）ことを確かめる。週次スナップショットは通知の対象から外してある。
+- **行を消す入口はゴミ箱を通す**（`trash_service.trash_rows`）。行に結びつくテーブルを新しく足したら、`trash_service` の写し（payload）と戻し、`backup_service.TABLE_ORDER` の両方に入れる。入れないと「戻したのに一部だけ無い」になる。
+- **範囲の書き込みは「前の値つき」でまとめて1回**（`hooks/useCellRange` → `useCellEdits`）。1セルずつ API を呼ぶ形に戻すと、Ctrl+Z が1セルずつになり、途中で失敗したときに半分だけ入る。
+
 ## 4. このコードベース全体で効く原則
 
 上の13件から抜き出したもの。Excel 取り込みに限らない。

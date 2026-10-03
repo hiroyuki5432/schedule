@@ -193,12 +193,58 @@ class RowOut(BaseModel):
 class RowCreate(BaseModel):
     key_value: Optional[str] = None
     data: dict[str, Any] = Field(default_factory=dict)
+    # 途中に挿入する（要望: Excel の「上に行を挿入」）。どちらも無ければ末尾。
+    # 指定した行の直前／直後に入る。子タスクを指したときは、同じ親の子として入る。
+    insert_before_id: Optional[int] = None
+    insert_after_id: Optional[int] = None
+
+
+class RowBulkUpdateItem(BaseModel):
+    id: int
+    # 書き換えるセルだけ（{列ID: 値}）。ここに無い列は触らない。
+    data: dict[str, Any] = Field(default_factory=dict)
+    # ID（key_value）も書き換えるとき。
+    key_value: Optional[str] = None
+
+
+class RowBulkUpdate(BaseModel):
+    """範囲の貼り付け・まとめて消去・フィルの書き込み。1トランザクションで処理する。"""
+
+    items: list[RowBulkUpdateItem] = Field(default_factory=list)
 
 
 class RowBulkDelete(BaseModel):
     """まとめて削除（要望: まとめて選択して削除）。1トランザクションで処理する。"""
 
     ids: list[int] = Field(default_factory=list)
+
+
+class TrashOut(BaseModel):
+    """ゴミ箱の1件（1回の削除操作）。"""
+
+    id: int
+    sheet_id: int
+    row_count: int
+    row_keys: str
+    deleted_by_name: str
+    deleted_at: datetime
+
+
+class CellNoteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    row_id: int
+    cell_key: str
+    text: str
+    updated_by_name: str
+    updated_at: datetime
+
+
+class CellNoteIn(BaseModel):
+    cell_key: str
+    # 空ならメモを消す。
+    text: str = ""
 
 
 class RowUpdate(BaseModel):
@@ -487,6 +533,8 @@ class CleanupRequest(BaseModel):
     notifications_read: bool = False
     #: 消した列のセル（`rows.data` に残った、どの列にも属さない値）を消す。
     orphan_cells: bool = False
+    #: これより前に削除した行（ゴミ箱）を完全に消す（日数）。
+    trash_keep_days: Optional[int] = None
     #: 開始日/完了日の移行前の値のうち、実列に入っているぶんと重複するコピーを消す。
     legacy_cells: bool = False
     #: 予定も実績も入っていない工数セルを消す。

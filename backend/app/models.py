@@ -4,9 +4,11 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
+    FetchedValue,
     ForeignKey,
     Index,
     Integer,
@@ -129,6 +131,15 @@ class Row(Base):
     )
     key_value: Mapped[str | None] = mapped_column(String(255), nullable=True)
     data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # 行の並び順（要望: Excel のように行を途中に挿入したい）。シート内で小さい順に並ぶ。
+    # 値はデータベースのトリガ（app.db_triggers の rows_fill_sort_order）が入れる —
+    # 何も指定せずに INSERT すればシートの末尾、つまり従来どおり「追加した順」になる。
+    # 取り込み・復元・seed など、行を作る入口がいくつもあるので、どれか1つが
+    # 付け忘れても NULL にならないよう、アプリではなく DB 側で埋めている。
+    # 途中に挿入するときだけ、アプリが後ろの行をずらしてから値を指定する。
+    sort_order: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, server_default=FetchedValue()
+    )
     # Manual progress 0-100 (手入力の進捗%). Null = not set. A parent with
     # children shows an effort-weighted roll-up instead (computed on the front end).
     progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -156,6 +167,8 @@ class Row(Base):
     milestones: Mapped[list["RowMilestone"]] = relationship(
         back_populates="row", cascade="all, delete-orphan", order_by="RowMilestone.order"
     )
+
+    __table_args__ = (Index("ix_rows_sheet_order", "sheet_id", "sort_order"),)
 
     # NOTE: key_value is intentionally NOT unique within a sheet — the same ID
     # may be reused for repeated work (e.g. recurring development). Lookups then
@@ -456,3 +469,82 @@ class Notification(Base):
         UniqueConstraint("user_id", "dedupe_key", name="uq_notif_user_dedupe"),
         Index("ix_notif_user_unread", "user_id", "read_at", "created_at"),
     )
+
+
+class CellNote(Base):
+    """セルのメモ（要望: Excel のコメントのように、セルに一言残したい）。
+
+    `cell_key` が「どのセルか」:
+      * 列ID（数字の文字列）… 属性列のセル
+      * ``"__id__"``       … ID のセル
+      * ``"w:YYYY-MM-DD"`` … 週次工数のセル（週の開始日）
+
+    行を消せばメモも消える（ON DELETE CASCADE）。ゴミ箱から行を戻すときは、
+    行と一緒に保管しておいたメモも戻す（app.trash_service）。
+    """
+
+    __tablename__ = "cell_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sheet_id: Mapped[int] = mapped_column(
+        ForeignKey("sheets.id", ondelete="CASCADE"), nullable=False
+    )
+    row_id: Mapped[int] = mapped_column(
+        ForeignKey("rows.id", ondelete="CASCADE"), nullable=False
+    )
+    cell_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 書いた人の表示名。アカウントが消えても読めるよう、書いた時点の名前で持つ。
+    updated_by_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("row_id", "cell_key", name="uq_cell_note_row_key"),
+        Index("ix_cell_note_sheet", "sheet_id"),
+    )
+
+
+class DeletedRowBatch(Base):
+    """ゴミ箱 — 削除した行を、元に戻せる形で保管しておく（要望: 行削除の取り消し）。
+
+    1回の削除操作（1行でも、まとめて削除でも）が1件。`payload` に、消えた行（子タスク
+    を含む）・その週次工数・マイルストン・セルのメモを **IDごと** 持っておき、戻すときは
+    同じIDで書き戻す。IDを保つのは、他の行の先行タスク（depends_on）や、行に
+    結びついていた変更履歴・日報（削除で row_id が NULL になる）を、そのまま結び直せる
+    ようにするため。結び直す相手は `payload.event_ids` / `payload.worklog_ids` に控える。
+
+    戻したら、この記録は消える。シートを消せば一緒に消える。
+    """
+
+    __tablename__ = "deleted_rows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    sheet_id: Mapped[int] = mapped_column(
+        ForeignKey("sheets.id", ondelete="CASCADE"), nullable=False
+    )
+    #: 消えた行の数（子タスクを含む）。
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 一覧に出す「どの行か」— 先頭いくつかのID を「、」でつないだもの。
+    row_keys: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    deleted_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deleted_by_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    deleted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (Index("ix_deleted_rows_sheet_at", "sheet_id", "deleted_at"),)
+
+
+# データベース側の仕掛け（並び順の自動採番・変更通知のトリガ）。テストは Alembic を
+# 通さず create_all でテーブルを作るので、テーブル作成のイベントに結びつけておく。
+from app import db_triggers  # noqa: E402,F401  (import for its side effect)

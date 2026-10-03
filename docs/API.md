@@ -8,6 +8,7 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 - 日付: `YYYY-MM-DD`（週は月曜＝`week_start`）。
 - 楽観ロック: 行・工数は `version`（整数）。不一致は `409 Conflict` + `{detail, current}`。
 - エラー: `{ "detail": "..." }`、適切な HTTP ステータス。
+- 画面の識別: フロントはすべての要求に `X-Client-Id`（タブごとの乱数）を付ける。リアルタイム更新の通知に「どの画面からの変更か」として返り、自分の画面の変更で読み直さないために使う。
 
 ## 認証
 | メソッド | パス | 概要 |
@@ -64,17 +65,42 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 ## 行
 `row = { id, sheet_id, key_value, data:{col_id: value}, version }`
 ※ key_value はシート内で重複可（同一開発の再実施などで同じIDを使える）。lookup は先頭一致で解決。計算列（lookup/formula）の値は `data` に入らない。
+※ 行は **`rows.sort_order` 順**（同じなら id 順）で返る。並び順は DB のトリガが末尾の番号を埋めるので、どの入口から作っても「追加した順」になる。シート詳細（`GET /api/sheets/{id}`）・Excel/CSV 出力も同じ順。
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET | `/api/sheets/{id}/rows` | `[row]` |
-| POST | `/api/sheets/{id}/rows` | `{key_value?, data}`（key_value 未指定なら採番ルールで自動）|
+| POST | `/api/sheets/{id}/rows` | `{key_value?, data, insert_before_id?, insert_after_id?}`（key_value 未指定なら採番ルールで自動）。挿入位置を指定すると、その行の直前／直後に入る（後ろの行の番号を1つずつずらす）。親の**後ろ**はその子タスクたちの後ろ。**子タスクを指すと同じ親の子**として入り、ID は子の採番（`親ID-NN`）。他シートの行を指すと 400 |
 | PATCH | `/api/rows/{id}` | `{data, version}` → 更新後 row（409 で衝突）|
-| DELETE | `/api/rows/{id}` | |
+| POST | `/api/rows/bulk-update` | **範囲の書き込み**（貼り付け・まとめて消去・フィル）。`{items:[{id, data:{col_id: value}, key_value?}]}` → `{updated, rows[]}`。**送った列だけ**を上書きし、他の列はそのときの DB の値を残す（version の衝突検出はしない＝週次工数の範囲貼り付けと同じ）。日付列は保存形へ正規化、計算列は書かない。1トランザクション、履歴は1セル1件 |
+| DELETE | `/api/rows/{id}` | 行（＋子タスク）を**ゴミ箱へ移して**削除。`{deleted, trash_id}` |
+| POST | `/api/rows/bulk-delete` | `{ids}` → `{deleted, trash_id, trash_ids[]}`。1トランザクション。ゴミ箱はシートごとに1件（`trash_id` は1シートのときだけ）|
 | DELETE | `/api/sheets/{id}/rows` | **admin**。シートの行・工数・マイルストン・スナップショットを全削除（列/設定は保持、採番は1にリセット）。`{deleted}` を返す |
 | POST | `/api/org/clear-data` | **admin**。グループ内全シートに対し上記の全削除を実行。`{sheets, deleted}` を返す |
 | POST | `/api/sheets/{id}/replace` | **一括置換**。`{column_id?, find, replace, whole_cell?, case_sensitive?, include_key?, include_options?, dry_run?}` → `{rows, cells, options, applied, samples[]}`。`column_id` 省略＝このシートの全列、`"__id__"`＝ID(key_value) だけ。`dry_run` は**既定 true**（何も書かずに件数と before/after の例を返す）。計算列（lookup/formula）は対象外（単独指定は 400）。`include_options`（既定 true）でプルダウンの**選択肢そのもの**も同じ規則で置換し、重複した選択肢は畳む。数値列・日付列は置換後に保存形へ戻す。変更は1セル1件で変更履歴に残る |
 
 ※ 週次グリッドのシートは初回アクセス時に **開始日 / 完了日** 列（`date`型・`config.sched_role='start'|'end'`）を自動生成し、旧 `__sched_start/__sched_end` 値を移行（追加のみ）。列一覧で並べ替え・固定・ソート可能。
+
+## ゴミ箱（削除した行）
+削除した行は、子タスク・週次工数・マイルストン・セルのメモと一緒に `deleted_rows` に**IDごと**写してから消す。戻すと同じID・同じ並び位置に戻り、削除で外れた変更履歴と日報の `row_id` も結び直す。
+| メソッド | パス | 概要 |
+|---|---|---|
+| GET | `/api/sheets/{id}/trash` | `[{id, sheet_id, row_count, row_keys, deleted_by_name, deleted_at}]`（新しい順、最大200件）|
+| POST | `/api/trash/{id}/restore` | `{restored, row_ids[], notes[]}`。戻したらゴミ箱から消える。すでに戻した・消したものは 404、同じIDの行が既にあれば 409。親が居ない子タスクは親なしで戻し、`notes` で伝える |
+| DELETE | `/api/trash/{id}` | **admin**。ゴミ箱から完全に消す |
+
+## セルのメモ
+`note = { id, row_id, cell_key, text, updated_by_name, updated_at }`。`cell_key` は 列ID・`"__id__"`（ID）・`"w:YYYY-MM-DD"`（週次工数のセル）。1セル1件、最大2000字。列を消すとその列のメモも消える。
+| メソッド | パス | 概要 |
+|---|---|---|
+| GET | `/api/sheets/{id}/notes` | `[note]` |
+| PUT | `/api/rows/{id}/notes` | `{cell_key, text}` → `{note}`。空文字なら削除して `{note: null}`。他シートの列・不正な週は 400。変更履歴に「メモ（列名）」で残る |
+
+## リアルタイム更新
+| メソッド | パス | 概要 |
+|---|---|---|
+| GET | `/api/events` | **Server-Sent Events**（`text/event-stream`）。ログイン中のグループの変更を `data: {s, t, u, c}` で流す（`s`=シートID、`t`=変わったテーブル、`u`=変えた人、`c`=変えた画面の `X-Client-Id`）。値は送らない（受け手はいつもの API で読み直す）。`t:"resync"` は「全部読み直して」（サーバの再接続・取りこぼし時）。20秒ごとに `: ping`。未ログインは 401 |
+
+通知の元は DB のトリガ（`app_notify_change` → `pg_notify('app_change')`）で、行・列・シート・工数・マイルストン・メモ・ゴミ箱・日報の変更がコミットされたときだけ出る。同じトランザクションの同じ内容は1通にまとまる。
 
 ## 週次工数 (effort)
 `effort = { row_id, week_start, planned_hours, actual_hours, version }`
@@ -199,8 +225,8 @@ backend と frontend の結合契約。両者はこの定義に従う。SPEC.md 
 
 | メソッド | パス | 概要 |
 |---|---|---|
-| GET | `/api/maintenance/usage` | **admin**。`?row_events_keep_days=&snapshots_keep_weeks=&backups_keep=`（既定 365/52/10）。`{database_bytes, tables[{name,label,rows,bytes}], cleanable{...}}`。`rows` はこのグループの件数、`bytes` は**サーバ全体**のテーブルサイズ（Postgres 以外では `null`）|
-| POST | `/api/maintenance/cleanup` | **admin**。`{row_events_keep_days?, snapshots_keep_weeks?, notifications_read?, orphan_cells?, legacy_cells?, empty_effort?, backups_keep?, dry_run?}` → `{dry_run, deleted{...}, total}`。`dry_run` は**既定 true**。日数/週数/件数は `null` なら「触らない」。1トランザクション。`legacy_cells` は 開始日/完了日 の移行前の値のうち**実列に同じ値が入っているコピーだけ**を消す（実列が空なら残す）|
+| GET | `/api/maintenance/usage` | **admin**。`?row_events_keep_days=&snapshots_keep_weeks=&backups_keep=&trash_keep_days=`（既定 365/52/10/90）。`cleanable` に `trash_total` / `trash_old` を含む。`{database_bytes, tables[{name,label,rows,bytes}], cleanable{...}}`。`rows` はこのグループの件数、`bytes` は**サーバ全体**のテーブルサイズ（Postgres 以外では `null`）|
+| POST | `/api/maintenance/cleanup` | **admin**。`{row_events_keep_days?, snapshots_keep_weeks?, notifications_read?, orphan_cells?, legacy_cells?, empty_effort?, backups_keep?, trash_keep_days?, dry_run?}` → `{dry_run, deleted{...}, total}`。`dry_run` は**既定 true**。日数/週数/件数は `null` なら「触らない」。1トランザクション。`legacy_cells` は 開始日/完了日 の移行前の値のうち**実列に同じ値が入っているコピーだけ**を消す（実列が空なら残す）|
 
 ## 実装優先度
 1. auth / org / members / sheets / columns / rows / effort / milestones（スケジュール画面が動く中核）

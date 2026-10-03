@@ -50,17 +50,24 @@ export function ContextMenu({
 
   useEffect(() => {
     const close = () => onClose()
+    // メニューの中を押したときは閉じない。window の capture は React の
+    // stopPropagation より先に走るので、ここで見分けないと、項目を押した瞬間に
+    // メニューが消えて onClick が届かない（項目が「押しても何も起きない」）。
+    const closeOutside = (e: MouseEvent) => {
+      if (ref.current && e.target instanceof Node && ref.current.contains(e.target)) return
+      onClose()
+    }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
     }
     // capture: メニューの外の onClick より先に閉じる。
-    window.addEventListener('mousedown', close, true)
+    window.addEventListener('mousedown', closeOutside, true)
     window.addEventListener('resize', close)
     window.addEventListener('keydown', onKey)
     // スクロールで置いていかれると、行と関係ない場所に浮いたままになる。
     window.addEventListener('scroll', close, true)
     return () => {
-      window.removeEventListener('mousedown', close, true)
+      window.removeEventListener('mousedown', closeOutside, true)
       window.removeEventListener('resize', close)
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('scroll', close, true)

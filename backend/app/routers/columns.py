@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.date_values import normalize_date_text
 from app.db import get_db
 from app.deps import get_column_for_user, get_sheet_for_user
-from app.models import Column, Row, Sheet, User
+from app.models import CellNote, Column, Row, Sheet, User
 from app.schemas import ColumnCreate, ColumnOut, ColumnUpdate
 from app.security import current_user
 
@@ -187,6 +187,12 @@ def delete_column(
             sheet.key_column_id = None
         if sheet.color_basis_column_id == column.id:
             sheet.color_basis_column_id = None
+    # その列のセルに付いたメモも消す（列が無ければ二度と表示できない）。
+    db.execute(
+        delete(CellNote).where(
+            CellNote.sheet_id == column.sheet_id, CellNote.cell_key == str(column.id)
+        )
+    )
     db.delete(column)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

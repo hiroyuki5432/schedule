@@ -34,6 +34,7 @@ export function MaintenanceCard() {
   const [eventDays, setEventDays] = useState(365)
   const [snapshotWeeks, setSnapshotWeeks] = useState(52)
   const [backupKeep, setBackupKeep] = useState(10)
+  const [trashDays, setTrashDays] = useState(90)
 
   // 何を消すか。既定は「見えないデータだけ」— 履歴と断面は，消すと戻らない記録なので
   // 自分でチェックを入れてもらう。
@@ -45,15 +46,17 @@ export function MaintenanceCard() {
     legacy: false,
     effort: true,
     backups: false,
+    trash: false,
   })
 
   const usageQ = useQuery({
-    queryKey: ['maintenance-usage', eventDays, snapshotWeeks, backupKeep],
+    queryKey: ['maintenance-usage', eventDays, snapshotWeeks, backupKeep, trashDays],
     queryFn: () =>
       api.getMaintenanceUsage({
         rowEventsKeepDays: eventDays,
         snapshotsKeepWeeks: snapshotWeeks,
         backupsKeep: backupKeep,
+        trashKeepDays: trashDays,
       }),
     enabled: open,
     staleTime: 30_000,
@@ -68,6 +71,7 @@ export function MaintenanceCard() {
     legacy_cells: pick.legacy,
     empty_effort: pick.effort,
     backups_keep: pick.backups ? backupKeep : null,
+    trash_keep_days: pick.trash ? trashDays : null,
     dry_run: dryRun,
   })
 
@@ -208,6 +212,25 @@ export function MaintenanceCard() {
                       min={0}
                       value={eventDays}
                       onChange={(e) => setEventDays(Number(e.target.value) || 0)}
+                      className="h-7 w-[74px] px-2 py-1 text-[11.5px] tabular-nums"
+                    />
+                    日より前
+                  </span>
+                }
+              />
+              <Row
+                checked={pick.trash}
+                onChange={(v) => setPick({ ...pick, trash: v })}
+                label="ゴミ箱（削除した行）"
+                detail={`${(c.trash_old ?? 0).toLocaleString()} / ${(c.trash_total ?? 0).toLocaleString()} 件`}
+                note="消すと、その行は「削除した行」から元に戻せなくなります。"
+                after={
+                  <span className="flex items-center gap-1 text-[11.5px] text-[var(--ink2)]">
+                    <Input
+                      type="number"
+                      min={0}
+                      value={trashDays}
+                      onChange={(e) => setTrashDays(Number(e.target.value) || 0)}
                       className="h-7 w-[74px] px-2 py-1 text-[11.5px] tabular-nums"
                     />
                     日より前

@@ -57,7 +57,13 @@ TABLE_ORDER: list[str] = [
     "work_logs",
     "row_events",
     "import_presets",
+    "cell_notes",
+    "deleted_rows",
 ]
+
+#: 後から足したテーブル。これより前に取ったバックアップには無いので、無ければ
+#: 「空」とみなす（形式は互換のまま。無いことを理由に復元を断らない）。
+OPTIONAL_TABLES = {"cell_notes", "deleted_rows"}
 
 _MODELS = {
     "users": models.User,
@@ -70,6 +76,8 @@ _MODELS = {
     "work_logs": models.WorkLog,
     "row_events": models.RowEvent,
     "import_presets": models.ImportPreset,
+    "cell_notes": models.CellNote,
+    "deleted_rows": models.DeletedRowBatch,
 }
 
 
@@ -111,9 +119,9 @@ def _scope(name: str, org_id: int):
         .scalar_subquery()
     )
     m = _MODELS[name]
-    if name in ("users", "sheets", "work_logs", "row_events", "import_presets"):
+    if name in ("users", "sheets", "work_logs", "row_events", "import_presets", "deleted_rows"):
         return m.org_id == org_id
-    if name in ("columns", "sheet_snapshots"):
+    if name in ("columns", "sheet_snapshots", "cell_notes"):
         return m.sheet_id.in_(sheets)
     if name in ("rows",):
         return m.sheet_id.in_(sheets)
@@ -253,7 +261,7 @@ def validate(payload: dict, org_id: int) -> None:
             "（IDをそのまま書き戻すため、他グループのデータと衝突します）"
         )
     tables = payload["tables"]
-    missing = [t for t in TABLE_ORDER if t not in tables]
+    missing = [t for t in TABLE_ORDER if t not in tables and t not in OPTIONAL_TABLES]
     if missing:
         raise RestoreError(f"バックアップに含まれていないデータがあります：{'、'.join(missing)}")
     # An org with no admin can never be managed again — including taking the next

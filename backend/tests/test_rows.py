@@ -56,7 +56,9 @@ def test_bulk_delete_removes_every_selected_row(auth_client):
 
     r = auth_client.post("/api/rows/bulk-delete", json={"ids": ids[:3]})
     assert r.status_code == 200, r.text
-    assert r.json() == {"deleted": 3}
+    assert r.json()["deleted"] == 3
+    # 消したものはゴミ箱に入る（元に戻せる）。
+    assert r.json()["trash_id"] is not None
 
     left = auth_client.get(f"/api/sheets/{sheet_id}/rows").json()
     assert [row["id"] for row in left] == [ids[3]]
@@ -70,7 +72,7 @@ def test_bulk_delete_counts_children_taken_with_their_parent(auth_client):
         assert c.status_code == 201, c.text
 
     r = auth_client.post("/api/rows/bulk-delete", json={"ids": [parent["id"]]})
-    assert r.json() == {"deleted": 3}  # 親1 + 子2
+    assert r.json()["deleted"] == 3  # 親1 + 子2
     assert auth_client.get(f"/api/sheets/{sheet_id}/rows").json() == []
 
 
@@ -87,9 +89,7 @@ def test_bulk_delete_is_all_or_nothing_across_sheets(auth_client, client, org_ad
 
 
 def test_bulk_delete_of_nothing_is_a_no_op(auth_client):
-    assert auth_client.post("/api/rows/bulk-delete", json={"ids": []}).json() == {
-        "deleted": 0
-    }
+    assert auth_client.post("/api/rows/bulk-delete", json={"ids": []}).json()["deleted"] == 0
 
 
 def test_bulk_delete_is_recorded_in_the_sheet_history(auth_client):

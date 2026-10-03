@@ -30,6 +30,9 @@ interface Props {
   compact?: boolean
   /** When false, editable types render read-only (e.g. as-of snapshot). Default true. */
   editable?: boolean
+  /** 文字・数値・日付の入力を Enter で確定したとき（範囲選択がある画面では、1つ下の
+   *  セルへ移って続けて入力する — Excel と同じ）。 */
+  onEnterCommit?: () => void
 }
 
 function raw(row: Row, column: Column): CellValue {
@@ -46,6 +49,7 @@ export function InlineCell({
   className,
   compact,
   editable = true,
+  onEnterCommit,
 }: Props) {
   const [editing, setEditing] = useState(false)
   const value = raw(row, column)
@@ -235,6 +239,7 @@ export function InlineCell({
         onSave(next)
       }}
       onCancel={() => setEditing(false)}
+      onEnter={onEnterCommit}
     />
   )
 }
@@ -426,6 +431,7 @@ function TextCellInput({
   initial,
   onCommit,
   onCancel,
+  onEnter,
   pad,
   className,
 }: {
@@ -433,10 +439,13 @@ function TextCellInput({
   initial: string
   onCommit: (v: string) => void
   onCancel: () => void
+  /** Enter で確定した後に呼ぶ（blur での確定では呼ばない）。 */
+  onEnter?: () => void
   pad: string
   className?: string
 }) {
   const ref = useRef<HTMLInputElement>(null)
+  const doneRef = useRef(false)
   const [val, setVal] = useState(initial)
   useEffect(() => {
     ref.current?.focus()
@@ -448,10 +457,23 @@ function TextCellInput({
       type={type}
       value={val}
       onChange={(e) => setVal(e.target.value)}
-      onBlur={() => onCommit(val.trim())}
+      onBlur={() => {
+        // Enter で確定した直後に、消えていく入力欄の blur でもう一度保存しない。
+        if (doneRef.current) return
+        onCommit(val.trim())
+      }}
       onKeyDown={(e) => {
-        if (e.key === 'Enter') onCommit(val.trim())
-        if (e.key === 'Escape') onCancel()
+        if (e.key === 'Enter') {
+          // 変換中（日本語入力の確定の Enter）は確定にしない。
+          if (e.nativeEvent.isComposing) return
+          doneRef.current = true
+          onCommit(val.trim())
+          onEnter?.()
+        }
+        if (e.key === 'Escape') {
+          doneRef.current = true
+          onCancel()
+        }
       }}
       className={cn(
         'box-border h-full w-full min-w-0 rounded border border-[var(--green-l)] bg-[var(--surface)] text-[12.5px] outline-none',

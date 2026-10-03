@@ -193,6 +193,27 @@ export interface Row {
   depends_on: string[]
 }
 
+/** ゴミ箱の1件（1回の削除操作。子タスクを含む）。 */
+export interface TrashEntry {
+  id: number
+  sheet_id: number
+  row_count: number
+  /** 一覧に出す ID（先頭いくつか）。 */
+  row_keys: string
+  deleted_by_name: string
+  deleted_at: string
+}
+
+/** セルのメモ。cell_key は 列ID / '__id__' / 'w:YYYY-MM-DD'（週次工数のセル）。 */
+export interface CellNote {
+  id: number
+  row_id: number
+  cell_key: string
+  text: string
+  updated_by_name: string
+  updated_at: string
+}
+
 export interface SheetDetail {
   sheet: Sheet
   columns: Column[]

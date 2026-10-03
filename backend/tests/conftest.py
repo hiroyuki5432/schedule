@@ -24,6 +24,8 @@ _TEST_URL = os.environ.get("TEST_DATABASE_URL") or _u.set(
 ).render_as_string(hide_password=False)
 os.environ["DATABASE_URL"] = _TEST_URL
 os.environ["SEED_ON_STARTUP"] = "false"
+# テストではリアルタイム更新の LISTEN を張らない（通知そのものは test_realtime が見る）。
+os.environ["REALTIME_ENABLED"] = "false"
 
 
 def _ensure_database(url: str) -> None:
@@ -56,6 +58,9 @@ from app.security import hash_password  # noqa: E402
 
 @pytest.fixture(scope="session", autouse=True)
 def _schema():
+    # 作り直す: テスト用DBは前回の実行のまま残るので、create_all だけだと
+    # 列の追加（例: rows.sort_order）が反映されず、古い形のまま走ってしまう。
+    Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     yield
 

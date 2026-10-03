@@ -18,7 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 
 #: 手動で上げるアプリのバージョン。フロントの package.json と揃えること。
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 @lru_cache(maxsize=1)

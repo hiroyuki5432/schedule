@@ -89,7 +89,7 @@ def test_deleting_a_row_stays_in_the_sheet_history(auth_client):
     sid = make_sheet(auth_client)
     row = make_row(auth_client, sid)
 
-    assert auth_client.delete(f"/api/rows/{row['id']}").status_code == 204
+    assert auth_client.delete(f"/api/rows/{row['id']}").status_code == 200
 
     events = auth_client.get(f"/api/sheets/{sid}/history").json()
     deleted = next(e for e in events if e["kind"] == "delete")

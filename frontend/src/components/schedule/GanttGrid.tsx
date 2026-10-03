@@ -11,6 +11,11 @@
 //  Clicking a week cell turns it into an inline <input>; Enter/blur saves.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCellRange, selectionStyle } from '@/hooks/useCellRange'
+import type { CellEdit } from '@/hooks/useCellRange'
+import { ID_CELL, parseCellText, parseTsv } from '@/lib/cellRange'
+import { NoteMark, noteHoverProps, noteKey, noteTip, weekCellKey } from '@/components/CellNotes'
+import { FillHandle } from '@/components/FillHandle'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { ScheduleRowModel } from '@/hooks/useScheduleData'
 import { InlineCell } from '@/components/schedule/InlineCell'
@@ -31,7 +36,7 @@ import { toast } from '@/lib/toast'
 import { fmtISO, fmtMD, parseDate } from '@/lib/dates'
 import type { WeekCell } from '@/lib/gantt'
 import type { StatusBadge } from '@/lib/status'
-import type { CellValue, Column, Member, Row } from '@/types/api'
+import type { CellNote, CellValue, Column, Member, Row } from '@/types/api'
 
 const ROW_H = 38
 const FOOT_H = 34 // sticky 週計 (per-week totals) footer
@@ -267,6 +272,15 @@ interface Props {
   /** Open the dependency (先行タスク) editor for a row. */
   onEditDeps: (row: Row) => void
   onDeleteRow: (row: Row) => void
+  /** セルのメモ（「行ID|セル」→ メモ）。 */
+  notes?: Map<string, CellNote>
+  /** メモを書く／直す（セル: 列ID・'__id__'・'w:YYYY-MM-DD'）。 */
+  onEditNote?: (row: Row, cellKey: string) => void
+  onDeleteNote?: (row: Row, cellKey: string) => void
+  /** 行の上／下に挿入（要望: Excel の「行の挿入」）。 */
+  onInsertRow?: (row: Row, where: 'above' | 'below') => void
+  /** 属性セルの範囲の書き込み（貼り付け・消去・フィル）。 */
+  onAttrEdits?: (edits: CellEdit[], label: string) => void
 }
 
 interface EditingCell {
@@ -309,6 +323,11 @@ export function GanttGrid({
   onEditProgress,
   onEditDeps,
   onDeleteRow,
+  notes,
+  onEditNote,
+  onDeleteNote,
+  onInsertRow,
+  onAttrEdits,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const didScrollRef = useRef(false)
@@ -342,7 +361,12 @@ export function GanttGrid({
   const [openMenu, setOpenMenu] = useState<SortKey | null>(null)
   // 行の右クリックメニュー（要望: 行削除が右クリックでできない）。テーブル画面と同じ
   // 操作にしてある。
-  const [rowMenu, setRowMenu] = useState<{ at: MenuAnchor; rowId: string } | null>(null)
+  const [rowMenu, setRowMenu] = useState<{
+    at: MenuAnchor
+    rowId: string
+    /** 右クリックしたセル（メモ用）。列ID・'__id__'・'w:YYYY-MM-DD'。 */
+    cellKey: string | null
+  } | null>(null)
   // 見出しの ⋮ →「この列の設定…」（要望: 設定と一覧を往復したくない）。
   const [settingsColId, setSettingsColId] = useState<string | null>(null)
   // Collapsed parents (子タスクを畳む). Empty = all expanded.
@@ -397,8 +421,8 @@ export function GanttGrid({
         top.push(r)
       }
     }
-    for (const arr of childrenOf.values())
-      arr.sort((a, b) => compareValues(a.keyValue, b.keyValue))
+    // 子タスクはサーバの並び順（行の並び順＝挿入した位置）のまま。以前は ID 順に
+    // 並べ替えていたが、それだと「上に挿入」した子が ID の位置へ動いてしまう。
 
     let sortedTop = top
     if (sort) {
@@ -561,6 +585,86 @@ export function GanttGrid({
       editable && wi >= lineIndex && (viewMode === 'week' || !m.hasChildren),
     [editable, lineIndex, viewMode],
   )
+
+  // ---- 属性セルの範囲選択（要望: Excel のようにコピペ・Delete・フィル） -------
+  // 週セルの範囲選択（sel）とは別物で、どちらか一方だけが選ばれている状態にする。
+  const attrColKeys = useMemo(() => [ID_CELL, ...ordered.map((c) => String(c.id))], [ordered])
+  const attrRowIds = useMemo(() => displayRows.map((m) => String(m.row.id)), [displayRows])
+  const modelById = useMemo(
+    () => new Map(displayRows.map((m) => [String(m.row.id), m])),
+    [displayRows],
+  )
+  const colByKey = useMemo(() => new Map(ordered.map((c) => [String(c.id), c])), [ordered])
+  /** 週次リセットの列は、その週の値でなければ空として扱う（画面の見え方と揃える）。 */
+  const attrValue = (m: ScheduleRowModel, c: Column): CellValue => {
+    if (c.config?.weekly_reset && viewedWeekIso && m.row.data[`__wk_${c.id}`] !== viewedWeekIso)
+      return null
+    return m.row.data[c.id] ?? null
+  }
+  const range = useCellRange({
+    rowIds: attrRowIds,
+    colKeys: attrColKeys,
+    containerRef: scrollRef,
+    enabled: true,
+    getText: (rowId, colKey) => {
+      const m = modelById.get(rowId)
+      if (!m) return ''
+      if (colKey === ID_CELL) return m.keyValue ?? ''
+      const c = colByKey.get(colKey)
+      if (!c) return ''
+      if (c.id === autoStatusColId) return m.status?.label ?? ''
+      if (c.type === 'status') {
+        const v = attrValue(m, c)
+        return v != null && v !== '' ? String(v) : (m.status?.label ?? '')
+      }
+      if (c.type === 'member') {
+        const id = attrValue(m, c)
+        return members.find((x) => String(x.id) === String(id ?? ''))?.name ?? ''
+      }
+      if (isComputed(c)) return computedValue(c, m.row) ?? ''
+      const v = attrValue(m, c)
+      return v == null ? '' : String(v)
+    },
+    getValue: (rowId, colKey) => {
+      const m = modelById.get(rowId)
+      if (!m) return null
+      if (colKey === ID_CELL) return m.row.key_value ?? null
+      const c = colByKey.get(colKey)
+      return c ? attrValue(m, c) : null
+    },
+    readonlyReason: (colKey) => {
+      if (!editable) return '基準週（過去の計画）の表示中'
+      if (colKey === ID_CELL) return null
+      const c = colByKey.get(colKey)
+      if (!c) return '列が見つからない'
+      if (isComputed(c)) return `「${c.name}」は計算列`
+      if (c.id === autoStatusColId) return `「${c.name}」は自動判定`
+      return null
+    },
+    parse: (colKey, text) => {
+      if (colKey === ID_CELL) {
+        const t = text.trim()
+        return t ? { ok: true, value: t } : { ok: false, reason: 'IDは空にできない' }
+      }
+      const c = colByKey.get(colKey)
+      return c ? parseCellText(c, text, members) : { ok: false, reason: '列が見つからない' }
+    },
+    fillMode: (colKey) => {
+      if (colKey === ID_CELL) return 'series'
+      const t = colByKey.get(colKey)?.type
+      return t === 'number' || t === 'date' || t === 'text' ? 'series' : 'copy'
+    },
+    seedable: (colKey) => {
+      const c = colByKey.get(colKey)
+      return !!c && (c.type === 'number' || (c.type === 'text' && !c.config?.multiline))
+    },
+    apply: (edits, label) => onAttrEdits?.(edits, label),
+    scrollToRow: (i) => rowVirt.scrollToIndex(i),
+    onActivate: () => {
+      setSel(null)
+      setEditing(null)
+    },
+  })
 
   const selRect: SelRect | null = useMemo(() => {
     if (!sel) return null
@@ -766,11 +870,8 @@ export function GanttGrid({
       const text = e.clipboardData.getData('text/plain')
       if (!text) return
       e.preventDefault()
-      const matrix = text
-        .replace(/\r\n?/g, '\n')
-        .replace(/\n+$/, '')
-        .split('\n')
-        .map((line) => line.split('\t'))
+      // Excel の TSV（"…" で囲まれたセルを含む）として読む。
+      const matrix = parseTsv(text)
 
       const cells: Array<{ m: ScheduleRowModel; wi: number; value: number | null }> = []
       let skipped = 0
@@ -898,12 +999,16 @@ export function GanttGrid({
     ],
   )
 
+  const rangeClearRef = useRef(range.clear)
+  rangeClearRef.current = range.clear
+
   // Mouse-down inside the week area starts either a click (open the editor on
   // mouse-up) or a drag-select. The window listener also catches a mouse-up
   // outside the grid so a drag can never get stuck on.
   const beginCellDrag = useCallback(
     (m: ScheduleRowModel, wi: number, shiftKey: boolean) => {
       const ref: CellRef = { rowId: String(m.row.id), wi }
+      rangeClearRef.current()
       setSel((prev) =>
         shiftKey && prev ? { anchor: prev.anchor, focus: ref } : { anchor: ref, focus: ref },
       )
@@ -1111,7 +1216,16 @@ export function GanttGrid({
     : `基準 ${fmtMD(weeks[lineIndex] ?? new Date())}`
 
   const isMonth = viewMode === 'month'
-  function tooltipFor(model: ScheduleRowModel, cell: WeekCell, wi: number): string {
+  function tooltipFor(
+    model: ScheduleRowModel,
+    cell: WeekCell | null | undefined,
+    wi: number,
+    note?: CellNote,
+  ): string {
+    const memo = note
+      ? `<div style="margin-top:4px;padding:4px 6px;border-radius:5px;background:#FFF9E0;color:#3a382f;white-space:pre-wrap;max-width:260px">${esc(note.text)}<div style="font-size:10px;color:#8a8466">${esc(note.updated_by_name)}</div></div>`
+      : ''
+    if (!cell) return `<b style="font-weight:600">${esc(model.keyValue)}</b><br>週 ${fmtMD(weeks[wi])}${memo}`
     const planned = cell.planned ?? 0
     const actual = cell.actual ?? 0
     const diff = round1(planned - actual)
@@ -1129,7 +1243,7 @@ export function GanttGrid({
     const ms = tip
       ? `<br><span style="color:${cell.msDelayDays && cell.msDelayDays > 0 ? '#F2B8A0' : '#CFE0D7'}">◇ ${esc(tip)}</span>`
       : ''
-    return `<b style="font-weight:600">${esc(model.keyValue)}</b>${phase}<br>${when}<br>予定 ${round1(planned)}h ／ 実績 ${round1(actual)}h ／ 差 ${diff > 0 ? '+' : ''}${diff}h${chg}${ms}`
+    return `<b style="font-weight:600">${esc(model.keyValue)}</b>${phase}<br>${when}<br>予定 ${round1(planned)}h ／ 実績 ${round1(actual)}h ／ 差 ${diff > 0 ? '+' : ''}${diff}h${chg}${ms}${memo}`
   }
 
   return (
@@ -1142,9 +1256,18 @@ export function GanttGrid({
         tabIndex={0}
         role="grid"
         aria-label="週次工数グリッド"
-        onKeyDown={handleKeyDown}
-        onCopy={handleCopy}
-        onPaste={handlePaste}
+        onKeyDown={(e) => {
+          if (range.sel && range.onKeyDown(e)) return
+          handleKeyDown(e)
+        }}
+        onCopy={(e) => {
+          if (range.sel && range.onCopy(e)) return
+          handleCopy(e)
+        }}
+        onPaste={(e) => {
+          if (range.sel && range.onPaste(e)) return
+          handlePaste(e)
+        }}
         className="h-full overflow-auto outline-none"
       >
         <div className="relative" style={{ width: totalW, height: HEAD_H + totalH + FOOT_H }}>
@@ -1275,7 +1398,18 @@ export function GanttGrid({
                 style={{ top: HEAD_H + vRow.start, height: ROW_H, width: totalW }}
                 onContextMenu={(e) => {
                   e.preventDefault()
-                  setRowMenu({ at: { x: e.clientX, y: e.clientY }, rowId: String(model.row.id) })
+                  hideTip()
+                  noteTip.hide()
+                  // どのセルの上か（メモ用）: 属性セル / ID は data-cell、週セルは data-week。
+                  const t = e.target as HTMLElement
+                  const attr = t.closest('[data-cell]')?.getAttribute('data-cell')?.split('|')[1]
+                  const wk = t.closest('[data-week]')?.getAttribute('data-week')
+                  const cellKey = attr ?? (wk && !isMonth ? weekCellKey(wk) : null)
+                  setRowMenu({
+                    at: { x: e.clientX, y: e.clientY },
+                    rowId: String(model.row.id),
+                    cellKey,
+                  })
                 }}
               >
                 {/* pinned: ID + title */}
@@ -1291,9 +1425,19 @@ export function GanttGrid({
                   }}
                 >
                   <div
-                    className="flex items-center gap-0.5 overflow-hidden px-2 text-[12.5px] font-semibold"
-                    style={{ width: idW, paddingLeft: isChild ? 16 : undefined }}
+                    {...range.cellProps(String(model.row.id), ID_CELL)}
+                    {...noteHoverProps(notes?.get(noteKey(model.row.id, ID_CELL)))}
+                    className="relative flex h-full items-center gap-0.5 overflow-hidden px-2 text-[12.5px] font-semibold"
+                    style={{
+                      width: idW,
+                      paddingLeft: isChild ? 16 : undefined,
+                      ...selectionStyle(range.cellState(vRow.index, 0)),
+                    }}
                   >
+                    {notes?.get(noteKey(model.row.id, ID_CELL)) && <NoteMark />}
+                    {range.cellState(vRow.index, 0)?.handle && (
+                      <FillHandle props={range.fillHandleProps} />
+                    )}
                     {/* tree toggle (parent) / indent (child / leaf top-level) */}
                     {!isChild && model.hasChildren ? (
                       <button
@@ -1400,9 +1544,24 @@ export function GanttGrid({
                       </button>
                     )}
                   </div>
-                  {pinnedCols.map((c) => (
-                    <div key={c.id} className="h-full overflow-hidden" style={{ width: cw(c) }}>
+                  {pinnedCols.map((c, i) => {
+                    const ci = i + 1
+                    const st = range.cellState(vRow.index, ci)
+                    const note = notes?.get(noteKey(model.row.id, String(c.id)))
+                    return (
+                    <div
+                      key={c.id}
+                      {...range.cellProps(String(model.row.id), String(c.id))}
+                      {...noteHoverProps(note)}
+                      className="relative h-full overflow-hidden"
+                      style={{ width: cw(c), ...selectionStyle(st) }}
+                    >
+                      {note && <NoteMark />}
+                      {st?.handle && <FillHandle props={range.fillHandleProps} />}
                       <AttrCell
+                        onEnterNext={() =>
+                          range.enterNext({ rowId: String(model.row.id), colKey: String(c.id) })
+                        }
                         row={model.row}
                         column={c}
                         members={members}
@@ -1419,7 +1578,8 @@ export function GanttGrid({
                         onSave={(v) => onEditRowCell(model.row, c.id, v)}
                       />
                     </div>
-                  ))}
+                    )
+                  })}
                   <RowSummaryCells
                     cols={pinnedSummary}
                     model={model}
@@ -1433,9 +1593,24 @@ export function GanttGrid({
                   className={cn('flex flex-shrink-0 items-center border-r border-[var(--line2)]', rowBg)}
                   style={{ width: attrW, height: ROW_H }}
                 >
-                  {scrollCols.map((c) => (
-                    <div key={c.id} className="h-full overflow-hidden" style={{ width: cw(c) }}>
+                  {scrollCols.map((c, i) => {
+                    const ci = pinAttrCount + i + 1
+                    const st = range.cellState(vRow.index, ci)
+                    const note = notes?.get(noteKey(model.row.id, String(c.id)))
+                    return (
+                    <div
+                      key={c.id}
+                      {...range.cellProps(String(model.row.id), String(c.id))}
+                      {...noteHoverProps(note)}
+                      className="relative h-full overflow-hidden"
+                      style={{ width: cw(c), ...selectionStyle(st) }}
+                    >
+                      {note && <NoteMark />}
+                      {st?.handle && <FillHandle props={range.fillHandleProps} />}
                       <AttrCell
+                        onEnterNext={() =>
+                          range.enterNext({ rowId: String(model.row.id), colKey: String(c.id) })
+                        }
                         row={model.row}
                         column={c}
                         members={members}
@@ -1452,7 +1627,8 @@ export function GanttGrid({
                         onSave={(v) => onEditRowCell(model.row, c.id, v)}
                       />
                     </div>
-                  ))}
+                    )
+                  })}
                   <RowSummaryCells
                     cols={scrollSummary}
                     model={model}
@@ -1507,9 +1683,14 @@ export function GanttGrid({
                       vRow.index <= selRect.r1 &&
                       wi >= selRect.w0 &&
                       wi <= selRect.w1
+                    const weekNote = isMonth
+                      ? undefined
+                      : notes?.get(noteKey(model.row.id, weekCellKey(fmtISO(weeks[wi]))))
                     return (
                       <WeekCellView
                         key={wi}
+                        weekIso={fmtISO(weeks[wi])}
+                        note={weekNote}
                         cell={cell}
                         monthStart={monthStart[wi]}
                         left={wi * weekColWidth}
@@ -1548,11 +1729,18 @@ export function GanttGrid({
                                 : prev,
                             )
                           }
-                          if (!cell || ((cell.planned ?? 0) <= 0 && (cell.actual ?? 0) <= 0)) {
+                          if (
+                            !weekNote &&
+                            (!cell || ((cell.planned ?? 0) <= 0 && (cell.actual ?? 0) <= 0))
+                          ) {
                             hideTip()
                             return
                           }
-                          showTip(e.clientX + 14, e.clientY + 14, tooltipFor(model, cell, wi))
+                          showTip(
+                            e.clientX + 14,
+                            e.clientY + 14,
+                            tooltipFor(model, cell, wi, weekNote),
+                          )
                         }}
                         onLeave={hideTip}
                       />
@@ -1754,6 +1942,9 @@ export function GanttGrid({
         (() => {
           const model = displayRows.find((r) => String(r.row.id) === rowMenu.rowId)
           if (!model) return null
+          const ck = rowMenu.cellKey
+          const note = ck ? notes?.get(noteKey(model.row.id, ck)) : undefined
+          const insertHint = sort ? '並べ替え中は使えません' : undefined
           return (
             <ContextMenu
               at={rowMenu.at}
@@ -1763,6 +1954,24 @@ export function GanttGrid({
                   label: '開く（全項目・変更履歴）',
                   onClick: () => onOpenRecord(model.row),
                 },
+                ...(ck && onEditNote && editable
+                  ? [
+                      {
+                        key: 'note',
+                        label: note ? 'メモを編集…' : 'メモを追加…',
+                        onClick: () => onEditNote(model.row, ck),
+                      },
+                      ...(note && onDeleteNote
+                        ? [
+                            {
+                              key: 'note-del',
+                              label: 'メモを削除',
+                              onClick: () => onDeleteNote(model.row, ck),
+                            },
+                          ]
+                        : []),
+                    ]
+                  : []),
                 {
                   key: 'milestones',
                   label: 'フェーズ（◇）を編集',
@@ -1773,10 +1982,29 @@ export function GanttGrid({
                   label: '先行タスク（依存）を設定',
                   onClick: () => onEditDeps(model.row),
                 },
+                ...(onInsertRow && editable
+                  ? [
+                      {
+                        key: 'above',
+                        label: '上に行を挿入',
+                        separatorBefore: true,
+                        disabled: !!sort,
+                        hint: insertHint,
+                        onClick: () => onInsertRow(model.row, 'above'),
+                      },
+                      {
+                        key: 'below',
+                        label: '下に行を挿入',
+                        disabled: !!sort,
+                        hint: insertHint,
+                        onClick: () => onInsertRow(model.row, 'below'),
+                      },
+                    ]
+                  : []),
                 {
                   key: 'child',
                   label: '子タスクを追加',
-                  separatorBefore: true,
+                  separatorBefore: !(onInsertRow && editable),
                   // サブタスクの下にさらに子は作れない（サーバ側の決まり）。
                   disabled: model.depth === 1,
                   onClick: () => onAddChild(model.row),
@@ -2071,6 +2299,7 @@ function EditableKey({
     <button
       type="button"
       title={value ? `${value} — クリックでID編集` : 'IDを編集（クリック）'}
+      data-cell-editor
       onClick={() => setEditing(true)}
       className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left hover:text-[var(--green-d)] hover:underline"
     >
@@ -2094,6 +2323,7 @@ function AttrCell({
   autoStatusDelayWeeks,
   viewedWeekIso,
   onSave,
+  onEnterNext,
 }: {
   row: Row
   column: Column
@@ -2101,6 +2331,8 @@ function AttrCell({
   rows: Row[]
   computedValue: (column: Column, row: Row) => string | null
   editable: boolean
+  /** Enter で確定したら1つ下のセルへ（範囲選択と同じ動き）。 */
+  onEnterNext?: () => void
   autoStatusBadge?: StatusBadge | null
   /** Weeks behind (何週遅延) for the auto-status column; shown next to the badge. */
   autoStatusDelayWeeks?: number | null
@@ -2169,6 +2401,7 @@ function AttrCell({
         compact
         editable={editable}
         onSave={onSave}
+        onEnterCommit={onEnterNext}
       />
     )
   }
@@ -2245,6 +2478,9 @@ function ReadonlyCell({
 }
 
 interface WeekCellViewProps {
+  /** この列の週（YYYY-MM-DD）。右クリックでメモを付けるときの目印。 */
+  weekIso: string
+  note?: CellNote
   cell: WeekCell | null
   monthStart: boolean
   left: number
@@ -2260,6 +2496,8 @@ interface WeekCellViewProps {
 }
 
 function WeekCellView({
+  weekIso,
+  note,
   cell,
   monthStart,
   left,
@@ -2289,6 +2527,7 @@ function WeekCellView({
         editable && !colored && 'hover:bg-[var(--line2)]',
       )}
       style={{ left, width, background: colored ? cell!.color : undefined }}
+      data-week={weekIso}
       onMouseDown={onMouseDown}
       onMouseUp={onMouseUp}
       onMouseMove={onHover}
@@ -2300,6 +2539,7 @@ function WeekCellView({
           style={{ background: 'rgba(38,107,83,.14)' }}
         />
       )}
+      {note && <NoteMark />}
       {(cell?.milestoneActual || cell?.milestoneMarker) && (
         <span
           title={cell ? milestoneTip(cell) : undefined}
