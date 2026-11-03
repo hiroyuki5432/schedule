@@ -27,6 +27,7 @@ import { Overview } from '@/components/dashboard/Overview'
 import type { Scope } from '@/components/dashboard/Overview'
 import { Board } from '@/components/dashboard/Board'
 import { EffortSummary } from '@/components/dashboard/EffortSummary'
+import { Timeline } from '@/components/dashboard/Timeline'
 import { fmtISO, startOfWeek } from '@/lib/dates'
 import { makeIsRowDone } from '@/lib/status'
 import { ApiError } from '@/lib/http'
@@ -46,10 +47,11 @@ import {
 import type { TaskInfo } from '@/lib/dashboard'
 import type { Column, Effort } from '@/types/api'
 
-type TabKey = 'overview' | 'board' | 'effort'
+type TabKey = 'overview' | 'board' | 'timeline' | 'effort'
 const TABS = [
   { key: 'overview', label: '概要' },
   { key: 'board', label: 'ボード' },
+  { key: 'timeline', label: '期間' },
   { key: 'effort', label: '工数の集計' },
 ] as const
 
@@ -372,6 +374,17 @@ export function DashboardPage() {
                 hasCategory={!!cat.col}
                 pending={pending}
                 onMove={(t, v) => void move(String(t.m.row.id), v, true)}
+              />
+            )}
+            {tab === 'timeline' && (
+              <Timeline
+                sheetId={sheetId}
+                tasks={filtered.filter((t) => !t.isParent)}
+                lanes={lanes}
+                today={today}
+                currentWeek={currentWeek}
+                scope={scope}
+                onScope={setScope}
               />
             )}
             {tab === 'effort' && (
