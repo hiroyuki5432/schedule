@@ -69,6 +69,12 @@ jobs:
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
+    # The EC2 host logs in to GHCR with this job's GITHUB_TOKEN (valid only while the
+    # job runs). A personal access token in GHCR_TOKEN used to be required here, and
+    # when it expired every deploy failed at `docker login` (denied) while the build
+    # itself stayed green.
+    permissions:
+      packages: read
     steps:
       - name: Deploy on EC2 over SSH
         uses: appleboy/ssh-action@v1.2.0
@@ -83,15 +89,14 @@ jobs:
             cd "${EC2_APP_DIR:-/opt/schedule}"
             # Update the compose file etc. (images come from GHCR, code is not built here).
             git pull --ff-only
-            # Log in to GHCR only if a read token is provided (skip if packages are public).
-            if [ -n "${GHCR_TOKEN}" ]; then
-              echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
-            fi
+            echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
             docker compose -f docker-compose.prod.yml pull
+            # The token dies with this job — don't leave it behind as a stale login.
+            docker logout ghcr.io
             docker compose -f docker-compose.prod.yml up -d
             docker image prune -f
         env:
-          GHCR_USER: ${{ secrets.GHCR_USER }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Optional: set this repo secret to deploy somewhere other than /opt/schedule
           EC2_APP_DIR: ${{ secrets.EC2_APP_DIR }}
